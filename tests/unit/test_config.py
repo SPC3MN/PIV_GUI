@@ -13,7 +13,8 @@ def test_json_roundtrip_stability(tmp_path):
     cfg.project.input_path = "/some/data.set"
     cfg.postprocess.global_outlier_std = 4.0
     cfg.postprocess.range_filter.enabled = True
-    cfg.postprocess.range_filter.magnitude_range = (0.0, 20.0)
+    cfg.postprocess.range_filter.residual_max = 5.0
+    cfg.postprocess.range_filter.window_size = 5
 
     d1 = to_dict(cfg)
     cfg2 = from_dict(d1)
@@ -21,7 +22,8 @@ def test_json_roundtrip_stability(tmp_path):
     assert d1 == d2
     assert cfg2.project.input_path == "/some/data.set"
     assert cfg2.postprocess.global_outlier_std == 4.0
-    assert cfg2.postprocess.range_filter.magnitude_range == (0.0, 20.0)
+    assert cfg2.postprocess.range_filter.residual_max == 5.0
+    assert cfg2.postprocess.range_filter.window_size == 5
 
 
 def test_load_project_writes_defaults_when_missing(tmp_path):

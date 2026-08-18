@@ -25,28 +25,21 @@ def test_global_outlier_mask_flags_known_spike():
     assert mask.sum() < 10
 
 
-def test_range_filter_u_range():
-    u = np.array([-5.0, 0.0, 5.0, 50.0])
-    v = np.zeros(4)
-    invalid = range_filter(u, v, u_range=(-10, 10))
-    np.testing.assert_array_equal(invalid, [False, False, False, True])
-
-
-def test_range_filter_magnitude_range():
-    u = np.array([3.0, 0.0])
-    v = np.array([4.0, 0.0])  # magnitude 5.0 and 0.0
-    invalid = range_filter(u, v, magnitude_range=(1.0, 10.0))
-    np.testing.assert_array_equal(invalid, [False, True])
-
-
 def test_range_filter_residual_flags_spatial_spike():
     ny, nx = 9, 9
     u = np.ones((ny, nx)) * 2.0
     v = np.zeros((ny, nx))
     u[4, 4] = 50.0  # a single vector wildly different from its neighbors
-    invalid = range_filter(u, v, residual_max=5.0, neighborhood_size=3)
+    invalid = range_filter(u, v, residual_max=5.0, window_size=3)
     assert invalid[4, 4]
     assert invalid.sum() == 1
+
+
+def test_range_filter_none_disables():
+    u = np.ones((5, 5))
+    v = np.zeros((5, 5))
+    invalid = range_filter(u, v, residual_max=None)
+    assert not invalid.any()
 
 
 def test_range_filter_residual_requires_2d():

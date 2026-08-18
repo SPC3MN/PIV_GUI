@@ -1,11 +1,11 @@
 """Main window: assembles the project/settings panels (left), preview and
 run panels (right, as tabs) into one window.
 
-The window has a fixed width (no horizontal scroll bar anywhere -- the
-left panel's QScrollArea only ever scrolls vertically, and its contained
-widgets are sized to fit within that fixed width) so the layout doesn't
-grow wider than intended; overflow text elsewhere is left to individual
-widgets to elide/truncate rather than force extra width.
+The window itself is freely resizable (no fixed width) -- only the left
+panel has a fixed, comfortable width with its QScrollArea's horizontal
+scroll bar disabled, so growing the window just gives the preview/run
+side (stretch=1) more room rather than ever needing horizontal scrolling
+anywhere.
 """
 
 from PySide6.QtCore import Qt
@@ -19,15 +19,14 @@ from piv_suite_gui.widgets.settings_panel import SettingsPanel
 
 LEFT_PANEL_WIDTH = 440
 RIGHT_PANEL_WIDTH = 640
-WINDOW_WIDTH = LEFT_PANEL_WIDTH + RIGHT_PANEL_WIDTH
+INITIAL_WINDOW_WIDTH = LEFT_PANEL_WIDTH + RIGHT_PANEL_WIDTH
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("PIV Suite")
-        self.resize(WINDOW_WIDTH, 800)
-        self.setFixedWidth(WINDOW_WIDTH)
+        self.resize(INITIAL_WINDOW_WIDTH, 800)
         self._build_ui()
 
     def _build_ui(self):

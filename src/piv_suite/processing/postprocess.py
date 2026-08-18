@@ -24,60 +24,41 @@ def global_outlier_mask(u, v, n_std):
     return (np.abs(u - u_mean) > n_std * u_std) | (np.abs(v - v_mean) > n_std * v_std)
 
 
-def range_filter(u, v, u_range=None, v_range=None, magnitude_range=None,
-                  residual_max=None, neighborhood_size=3):
-    """Reject vectors that fall outside a configured displacement range,
-    and/or whose residual from their LOCAL neighborhood median exceeds a
-    threshold ("remove residuals above a certain range").
+def range_filter(u, v, residual_max=None, window_size=3):
+    """Reject vectors whose residual from their LOCAL window median
+    exceeds a threshold ("remove if residual...").
 
     This is complementary to global_outlier_mask: that one rejects vectors
     far from the FIELD-WIDE mean (a single global threshold); this one
-    rejects vectors either outside a fixed, physically-motivated range
-    (e.g. "no vector should exceed 20 px/frame in this experiment") or far
-    from their immediate spatial neighbors (catches spatially-localized
-    spurious vectors -- a spike surrounded by consistent neighbors -- that
-    a global mean/std check can miss in a large field).
+    rejects vectors far from their immediate spatial neighbors, catching
+    spatially-localized spurious vectors -- a spike surrounded by
+    consistent neighbors -- that a global mean/std check can miss in a
+    large field.
 
     Parameters
     ----------
-    u, v : ndarray, same shape (regular (ny, nx) grid expected for the
-        residual check; range checks work on any shape).
-    u_range, v_range : (min, max) or None -- absolute component bounds.
-    magnitude_range : (min, max) or None -- bounds on sqrt(u**2 + v**2).
+    u, v : ndarray, same shape, a regular (ny, nx) grid (not applicable to
+        flat/tiled output).
     residual_max : float or None -- if set, rejects vectors whose distance
-        from the local neighborhood median (magnitude of
-        (u - median_u, v - median_v)) exceeds this value. Requires u, v to
-        be a regular 2-D grid.
-    neighborhood_size : odd int, the local median filter's window size
-        (in vectors, not pixels) for the residual check.
+        from the local window median (magnitude of (u - median_u,
+        v - median_v)) exceeds this value. None disables the filter
+        (returns an all-False mask).
+    window_size : odd int, the local median filter's window size (in
+        vectors, not pixels).
 
     Returns a bool array (same shape as u), True = rejected.
     """
-    invalid = np.zeros_like(u, dtype=bool)
-
-    if u_range is not None:
-        lo, hi = u_range
-        invalid |= (u < lo) | (u > hi)
-    if v_range is not None:
-        lo, hi = v_range
-        invalid |= (v < lo) | (v > hi)
-    if magnitude_range is not None:
-        lo, hi = magnitude_range
-        mag = np.hypot(u, v)
-        invalid |= (mag < lo) | (mag > hi)
-
-    if residual_max is not None:
-        if u.ndim != 2:
-            raise ValueError(
-                "residual_max requires u, v to be a regular 2-D (ny, nx) "
-                "grid -- not applicable to flat/tiled output"
-            )
-        med_u = _nan_median_filter(u, neighborhood_size)
-        med_v = _nan_median_filter(v, neighborhood_size)
-        residual = np.hypot(u - med_u, v - med_v)
-        invalid |= residual > residual_max
-
-    return invalid
+    if residual_max is None:
+        return np.zeros_like(u, dtype=bool)
+    if u.ndim != 2:
+        raise ValueError(
+            "range_filter requires u, v to be a regular 2-D (ny, nx) "
+            "grid -- not applicable to flat/tiled output"
+        )
+    med_u = _nan_median_filter(u, window_size)
+    med_v = _nan_median_filter(v, window_size)
+    residual = np.hypot(u - med_u, v - med_v)
+    return residual > residual_max
 
 
 def _nan_median_filter(a, size):

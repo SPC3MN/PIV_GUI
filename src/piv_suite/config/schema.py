@@ -72,6 +72,14 @@ class CorrelationSettings:
 
 @dataclass
 class ValidationSettings:
+    """Per-pass validation/replacement the CPU/GPU engines run internally
+    between multi-pass window-deformation passes (openpiv.windef /
+    piv_gpu need SOME threshold to decide which vectors get replaced
+    before the next pass can deform the image) -- kept as an internal
+    dataclass with fixed defaults, no longer exposed in the GUI. The
+    user-facing "remove invalid vectors" step is PostProcessSettings'
+    std-dev and residual filters instead, applied once after the engine
+    has already produced its final field, not this per-pass mechanism."""
     sig2noise_method: str = "peak2mean"
     sig2noise_threshold: float = 1.05
     sig2noise_validate: bool = True
@@ -86,37 +94,34 @@ class ValidationSettings:
 
 @dataclass
 class RangeFilterSettings:
-    """Config surface for processing.postprocess.range_filter -- both
-    "remove residuals above a certain range" and a hard displacement/
-    magnitude range are supported, independently toggleable."""
+    """Config surface for processing.postprocess.range_filter -- rejects a
+    vector whose distance from its local window median displacement
+    exceeds residual_max. This is the sole "remove if residual..."
+    detection method (no magnitude/component range option -- see
+    PostProcessSettings' docstring for why)."""
     enabled: bool = False
-    u_range: Optional[Tuple[float, float]] = None
-    v_range: Optional[Tuple[float, float]] = None
-    magnitude_range: Optional[Tuple[float, float]] = None
     residual_max: Optional[float] = None
-    neighborhood_size: int = 3
+    window_size: int = 3
 
     def to_kwargs(self):
-        """None if disabled or no bound is actually set (so
+        """None if disabled or residual_max isn't set (so
         pipeline.process_frames can skip the filter entirely), else the
         kwargs dict for postprocess.range_filter()."""
-        if not self.enabled:
+        if not self.enabled or self.residual_max is None:
             return None
-        kwargs = {}
-        if self.u_range is not None:
-            kwargs["u_range"] = tuple(self.u_range)
-        if self.v_range is not None:
-            kwargs["v_range"] = tuple(self.v_range)
-        if self.magnitude_range is not None:
-            kwargs["magnitude_range"] = tuple(self.magnitude_range)
-        if self.residual_max is not None:
-            kwargs["residual_max"] = self.residual_max
-            kwargs["neighborhood_size"] = self.neighborhood_size
-        return kwargs or None
+        return {"residual_max": self.residual_max, "window_size": self.window_size}
 
 
 @dataclass
 class PostProcessSettings:
+    """Removing invalid vectors uses exactly two detection methods,
+    deliberately -- not the engines' own internal per-pass validation
+    (see ValidationSettings' docstring): "remove if difference to
+    standard deviation exceeds n_std" (global_outlier_std) and "remove if
+    residual [from the local window median] exceeds residual_max"
+    (range_filter, with a window_size control). replace_invalid/
+    smooth_field are a separate, later step (filling gaps in what's left
+    after removal), not a third detection method."""
     apply_v_sign_flip: bool = False
     global_outlier_std: Optional[float] = None   # std-dev spurious-vector filter; None disables
     range_filter: RangeFilterSettings = field(default_factory=RangeFilterSettings)

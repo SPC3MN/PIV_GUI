@@ -1,7 +1,15 @@
-"""Settings panel: multi-pass window/overlap schedule, correlation/
-validation controls, and post-processing (std-dev spurious-vector filter +
-range/residual filter) -- all the "general PIV controls" the project asks
-for, bound to the canonical config.schema dataclasses.
+"""Settings panel: multi-pass window/overlap schedule, correlation
+controls, and the "remove invalid vectors" post-processing step.
+
+Removing invalid vectors uses exactly two detection methods -- "remove if
+difference to standard deviation [exceeds n_std]" and "remove if residual
+[from the local window median exceeds a threshold]", with a window-size
+control for the latter -- see config.schema.PostProcessSettings'
+docstring for why the engines' own internal per-pass validation
+(sig2noise threshold, outlier replace method, smoothn, ...) isn't exposed
+here anymore; ValidationSettings still exists internally with fixed
+defaults, engines need SOME threshold to run their multi-pass loop, it's
+just no longer user-facing.
 """
 
 from PySide6.QtWidgets import (
@@ -15,11 +23,16 @@ from piv_suite.config.schema import (
     ValidationSettings,
 )
 
+from ._util import fit_table_to_rows
+
 SPINBOX_WIDTH = 80
+DECIMALS = 2
 
 
 def _spin_width(spin):
     spin.setMaximumWidth(SPINBOX_WIDTH)
+    if isinstance(spin, QDoubleSpinBox):
+        spin.setDecimals(DECIMALS)
     return spin
 
 
@@ -28,7 +41,8 @@ class _PassesTable(QGroupBox):
     fine) list of (window_size, overlap_fraction) rows. Both engines'
     original per-pass overlap defaults were isotropic per pass, not
     per-axis, so one overlap_fraction column is enough to match real
-    capability (see config.legacy's grouping)."""
+    capability (see config.legacy's grouping). Sized to always show every
+    row -- no scroll bar of its own."""
 
     def __init__(self, parent=None):
         super().__init__("Window schedule (coarse -> fine)", parent)
@@ -57,11 +71,13 @@ class _PassesTable(QGroupBox):
         row = self.table.rowCount()
         self.table.insertRow(row)
         self.table.setItem(row, 0, QTableWidgetItem(str(window_size)))
-        self.table.setItem(row, 1, QTableWidgetItem(str(overlap_fraction)))
+        self.table.setItem(row, 1, QTableWidgetItem(f"{overlap_fraction:.2f}"))
+        fit_table_to_rows(self.table)
 
     def _remove_row(self):
         if self.table.rowCount() > 1:
             self.table.removeRow(self.table.rowCount() - 1)
+            fit_table_to_rows(self.table)
 
     def get_passes(self):
         passes = []
@@ -75,6 +91,7 @@ class _PassesTable(QGroupBox):
         self.table.setRowCount(0)
         for p in passes:
             self._add_row(p.window_size, p.overlap_fraction)
+        fit_table_to_rows(self.table)
 
 
 class SettingsPanel(QWidget):
@@ -117,105 +134,65 @@ class SettingsPanel(QWidget):
         corr_grid.addWidget(self.n_tiles_x_spin, 4, 1)
         layout.addWidget(corr_box)
 
-        # ---- validation ----
-        val_box = QGroupBox("Validation")
-        val_grid = QGridLayout(val_box)
-        val_grid.setContentsMargins(6, 6, 6, 6)
-        val_grid.setSpacing(4)
-        val_grid.setColumnStretch(1, 1)
-        self.s2n_threshold_spin = _spin_width(QDoubleSpinBox())
-        self.s2n_threshold_spin.setRange(0.0, 100.0)
-        self.s2n_threshold_spin.setValue(1.05)
-        self.filter_method_combo = QComboBox()
-        self.filter_method_combo.addItems(["localmean", "disk", "distance"])
-        self.max_filter_iter_spin = _spin_width(QSpinBox())
-        self.max_filter_iter_spin.setRange(0, 100)
-        self.max_filter_iter_spin.setValue(4)
-        self.smoothn_check = QCheckBox("smoothn")
-        self.smoothn_check.setToolTip("Apply openpiv's smoothn() between passes.")
-        self.smoothn_p_spin = _spin_width(QDoubleSpinBox())
-        self.smoothn_p_spin.setRange(0.0, 10.0)
-        self.smoothn_p_spin.setValue(0.05)
-
-        val_grid.addWidget(QLabel("sig2noise threshold:"), 0, 0)
-        val_grid.addWidget(self.s2n_threshold_spin, 0, 1)
-        val_grid.addWidget(QLabel("Outlier replace method:"), 1, 0)
-        val_grid.addWidget(self.filter_method_combo, 1, 1)
-        val_grid.addWidget(QLabel("Max replace iterations:"), 2, 0)
-        val_grid.addWidget(self.max_filter_iter_spin, 2, 1)
-        val_grid.addWidget(self.smoothn_check, 3, 0)
-        val_grid.addWidget(self.smoothn_p_spin, 3, 1)
-        layout.addWidget(val_box)
-
-        # ---- post-processing ----
-        post_box = QGroupBox("Post-processing")
+        # ---- remove invalid vectors ----
+        post_box = QGroupBox("Remove invalid vectors")
         post_grid = QGridLayout(post_box)
         post_grid.setContentsMargins(6, 6, 6, 6)
         post_grid.setSpacing(4)
 
         self.sign_flip_check = QCheckBox("Flip v sign")
-        post_grid.addWidget(self.sign_flip_check, 0, 0)
+        post_grid.addWidget(self.sign_flip_check, 0, 0, 1, 3)
 
-        self.std_filter_check = QCheckBox("Std-dev filter")
+        self.std_filter_check = QCheckBox("Remove if difference to std-dev exceeds:")
         self.std_filter_check.setToolTip("Reject vectors more than n_std standard deviations from the field mean.")
         self.std_filter_check.toggled.connect(self._on_std_filter_toggled)
         self.n_std_spin = _spin_width(QDoubleSpinBox())
         self.n_std_spin.setRange(0.1, 100.0)
         self.n_std_spin.setValue(4.0)
         self.n_std_spin.setEnabled(False)
-        post_grid.addWidget(self.std_filter_check, 1, 0)
-        post_grid.addWidget(QLabel("n_std:"), 1, 1)
+        post_grid.addWidget(self.std_filter_check, 1, 0, 1, 2)
         post_grid.addWidget(self.n_std_spin, 1, 2)
 
-        self.replace_invalid_check = QCheckBox("Interpolate invalid vectors")
-        post_grid.addWidget(self.replace_invalid_check, 2, 0, 1, 2)
+        self.residual_enabled_check = QCheckBox("Remove if residual exceeds:")
+        self.residual_enabled_check.setToolTip(
+            "Reject vectors whose distance from their local window median "
+            "displacement (px/frame) exceeds this value.")
+        self.residual_enabled_check.toggled.connect(self._on_residual_filter_toggled)
+        self.residual_max_spin = _spin_width(QDoubleSpinBox())
+        self.residual_max_spin.setRange(0.0, 1e6)
+        self.residual_max_spin.setValue(5.0)
+        self.residual_max_spin.setEnabled(False)
+        post_grid.addWidget(self.residual_enabled_check, 2, 0, 1, 2)
+        post_grid.addWidget(self.residual_max_spin, 2, 2)
+
+        self.window_size_spin = _spin_width(QSpinBox())
+        self.window_size_spin.setRange(3, 21)
+        self.window_size_spin.setSingleStep(2)
+        self.window_size_spin.setValue(3)
+        self.window_size_spin.setEnabled(False)
+        post_grid.addWidget(QLabel("  Window size:"), 3, 1)
+        post_grid.addWidget(self.window_size_spin, 3, 2)
+
+        self.replace_invalid_check = QCheckBox("Interpolate removed vectors")
+        post_grid.addWidget(self.replace_invalid_check, 4, 0, 1, 3)
 
         self.smooth_check = QCheckBox("Gaussian smooth")
         self.smooth_sigma_spin = _spin_width(QDoubleSpinBox())
         self.smooth_sigma_spin.setRange(0.1, 100.0)
         self.smooth_sigma_spin.setValue(1.0)
-        post_grid.addWidget(self.smooth_check, 3, 0)
-        post_grid.addWidget(QLabel("sigma:"), 3, 1)
-        post_grid.addWidget(self.smooth_sigma_spin, 3, 2)
+        post_grid.addWidget(self.smooth_check, 5, 0)
+        post_grid.addWidget(QLabel("sigma:"), 5, 1)
+        post_grid.addWidget(self.smooth_sigma_spin, 5, 2)
 
         layout.addWidget(post_box)
-
-        # ---- range/residual filter ----
-        range_box = QGroupBox("Range / residual filter")
-        range_grid = QGridLayout(range_box)
-        range_grid.setContentsMargins(6, 6, 6, 6)
-        range_grid.setSpacing(4)
-        self.range_enabled_check = QCheckBox("Enabled")
-        range_grid.addWidget(self.range_enabled_check, 0, 0, 1, 3)
-
-        self.mag_min_spin = _spin_width(QDoubleSpinBox()); self.mag_min_spin.setRange(-1e6, 1e6); self.mag_min_spin.setValue(0.0)
-        self.mag_max_spin = _spin_width(QDoubleSpinBox()); self.mag_max_spin.setRange(-1e6, 1e6); self.mag_max_spin.setValue(1e6)
-        self.mag_enabled_check = QCheckBox("Magnitude range:")
-        self.mag_enabled_check.setToolTip("Reject vectors whose displacement magnitude (px/frame) falls outside [min, max].")
-        range_grid.addWidget(self.mag_enabled_check, 1, 0)
-        range_grid.addWidget(self.mag_min_spin, 1, 1)
-        range_grid.addWidget(self.mag_max_spin, 1, 2)
-
-        self.residual_enabled_check = QCheckBox("Local residual max:")
-        self.residual_enabled_check.setToolTip(
-            "Reject vectors whose distance from their local neighborhood median "
-            "displacement (px/frame) exceeds this value.")
-        self.residual_max_spin = _spin_width(QDoubleSpinBox()); self.residual_max_spin.setRange(0.0, 1e6); self.residual_max_spin.setValue(5.0)
-        range_grid.addWidget(self.residual_enabled_check, 2, 0)
-        range_grid.addWidget(self.residual_max_spin, 2, 1)
-
-        self.neighborhood_spin = _spin_width(QSpinBox())
-        self.neighborhood_spin.setRange(3, 21)
-        self.neighborhood_spin.setSingleStep(2)
-        self.neighborhood_spin.setValue(3)
-        range_grid.addWidget(QLabel("Neighborhood:"), 3, 0)
-        range_grid.addWidget(self.neighborhood_spin, 3, 1)
-
-        layout.addWidget(range_box)
         layout.addStretch(1)
 
     def _on_std_filter_toggled(self, checked):
         self.n_std_spin.setEnabled(checked)
+
+    def _on_residual_filter_toggled(self, checked):
+        self.residual_max_spin.setEnabled(checked)
+        self.window_size_spin.setEnabled(checked)
 
     def get_correlation_settings(self) -> CorrelationSettings:
         return CorrelationSettings(
@@ -228,21 +205,15 @@ class SettingsPanel(QWidget):
         )
 
     def get_validation_settings(self) -> ValidationSettings:
-        return ValidationSettings(
-            sig2noise_threshold=self.s2n_threshold_spin.value(),
-            filter_method=self.filter_method_combo.currentText(),
-            max_filter_iteration=self.max_filter_iter_spin.value(),
-            smoothn=self.smoothn_check.isChecked(),
-            smoothn_p=self.smoothn_p_spin.value(),
-        )
+        """The engines' own internal per-pass validation is no longer
+        user-facing (see module docstring) -- fixed defaults every time."""
+        return ValidationSettings()
 
     def get_postprocess_settings(self) -> PostProcessSettings:
         range_filter = RangeFilterSettings(
-            enabled=self.range_enabled_check.isChecked(),
-            magnitude_range=(self.mag_min_spin.value(), self.mag_max_spin.value())
-                if self.mag_enabled_check.isChecked() else None,
+            enabled=self.residual_enabled_check.isChecked(),
             residual_max=self.residual_max_spin.value() if self.residual_enabled_check.isChecked() else None,
-            neighborhood_size=self.neighborhood_spin.value(),
+            window_size=self.window_size_spin.value(),
         )
         return PostProcessSettings(
             apply_v_sign_flip=self.sign_flip_check.isChecked(),

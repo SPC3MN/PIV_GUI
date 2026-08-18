@@ -40,11 +40,7 @@ def from_dict(d: dict) -> ProjectConfig:
 
     post_d = dict(d.get("postprocess", {}))
     if "range_filter" in post_d and post_d["range_filter"] is not None:
-        rf = dict(post_d["range_filter"])
-        for key in ("u_range", "v_range", "magnitude_range"):
-            if rf.get(key) is not None:
-                rf[key] = tuple(rf[key])
-        post_d["range_filter"] = RangeFilterSettings(**rf)
+        post_d["range_filter"] = RangeFilterSettings(**post_d["range_filter"])
     postprocess = PostProcessSettings(**post_d)
 
     calibration = CalibrationSettings(**d.get("calibration", {}))
