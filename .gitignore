@@ -8,3 +8,4 @@ dist/
 piv_output*/
 stereo_piv_output*/
 .pytest_cache/
+installer/Output/
