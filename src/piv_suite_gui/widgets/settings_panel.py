@@ -2,9 +2,9 @@
 controls, and the "remove invalid vectors" post-processing step.
 
 Removing invalid vectors uses exactly two detection methods -- "remove if
-difference to standard deviation [exceeds n_std]" and "remove if residual
-[from the local window median exceeds a threshold]", with a window-size
-control for the latter -- see config.schema.PostProcessSettings'
+difference to standard deviation [exceeds n*sigma]" and "remove if
+residual [from the local window median exceeds a threshold]", with a
+window-size control for the latter -- see config.schema.PostProcessSettings'
 docstring for why the engines' own internal per-pass validation
 (sig2noise threshold, outlier replace method, smoothn, ...) isn't exposed
 here anymore; ValidationSettings still exists internally with fixed
@@ -23,17 +23,7 @@ from piv_suite.config.schema import (
     ValidationSettings,
 )
 
-from ._util import fit_table_to_rows
-
-SPINBOX_WIDTH = 80
-DECIMALS = 2
-
-
-def _spin_width(spin):
-    spin.setMaximumWidth(SPINBOX_WIDTH)
-    if isinstance(spin, QDoubleSpinBox):
-        spin.setDecimals(DECIMALS)
-    return spin
+from ._util import fit_table_to_rows, style_spin
 
 
 class _PassesTable(QGroupBox):
@@ -113,20 +103,20 @@ class SettingsPanel(QWidget):
         corr_grid.setContentsMargins(6, 6, 6, 6)
         corr_grid.setSpacing(4)
         corr_grid.setColumnStretch(1, 1)
-        self.dt_spin = _spin_width(QDoubleSpinBox())
+        self.dt_spin = style_spin(QDoubleSpinBox())
         self.dt_spin.setRange(1e-6, 1e6)
         self.dt_spin.setValue(1.0)
         self.subpixel_combo = QComboBox()
         self.subpixel_combo.addItems(["gaussian", "centroid", "parabolic"])
-        corr_grid.addWidget(QLabel("dt:"), 0, 0)
+        corr_grid.addWidget(QLabel("Δt:"), 0, 0)  # Δt
         corr_grid.addWidget(self.dt_spin, 0, 1)
         corr_grid.addWidget(QLabel("Subpixel method:"), 1, 0)
         corr_grid.addWidget(self.subpixel_combo, 1, 1)
 
         self.tiling_check = QCheckBox("GPU tiling (large frames)")
         self.tiling_check.setToolTip("Split large frames into a grid of tiles to bound peak GPU memory.")
-        self.n_tiles_y_spin = _spin_width(QSpinBox()); self.n_tiles_y_spin.setRange(1, 64); self.n_tiles_y_spin.setValue(1)
-        self.n_tiles_x_spin = _spin_width(QSpinBox()); self.n_tiles_x_spin.setRange(1, 64); self.n_tiles_x_spin.setValue(1)
+        self.n_tiles_y_spin = style_spin(QSpinBox()); self.n_tiles_y_spin.setRange(1, 64); self.n_tiles_y_spin.setValue(1)
+        self.n_tiles_x_spin = style_spin(QSpinBox()); self.n_tiles_x_spin.setRange(1, 64); self.n_tiles_x_spin.setValue(1)
         corr_grid.addWidget(self.tiling_check, 2, 0, 1, 2)
         corr_grid.addWidget(QLabel("n_tiles_y:"), 3, 0)
         corr_grid.addWidget(self.n_tiles_y_spin, 3, 1)
@@ -140,49 +130,49 @@ class SettingsPanel(QWidget):
         post_grid.setContentsMargins(6, 6, 6, 6)
         post_grid.setSpacing(4)
 
-        self.sign_flip_check = QCheckBox("Flip v sign")
-        post_grid.addWidget(self.sign_flip_check, 0, 0, 1, 3)
-
-        self.std_filter_check = QCheckBox("Remove if difference to std-dev exceeds:")
-        self.std_filter_check.setToolTip("Reject vectors more than n_std standard deviations from the field mean.")
+        self.std_filter_check = QCheckBox("Remove if |value - mean| exceeds:")
+        self.std_filter_check.setToolTip(
+            "Reject vectors more than n·σ (n times the standard "
+            "deviation) from the field mean.")
         self.std_filter_check.toggled.connect(self._on_std_filter_toggled)
-        self.n_std_spin = _spin_width(QDoubleSpinBox())
+        self.n_std_spin = style_spin(QDoubleSpinBox())
         self.n_std_spin.setRange(0.1, 100.0)
         self.n_std_spin.setValue(4.0)
         self.n_std_spin.setEnabled(False)
-        post_grid.addWidget(self.std_filter_check, 1, 0, 1, 2)
-        post_grid.addWidget(self.n_std_spin, 1, 2)
+        post_grid.addWidget(self.std_filter_check, 0, 0, 1, 2)
+        post_grid.addWidget(self.n_std_spin, 0, 2)
+        post_grid.addWidget(QLabel("·σ"), 0, 3)  # ·σ
 
         self.residual_enabled_check = QCheckBox("Remove if residual exceeds:")
         self.residual_enabled_check.setToolTip(
             "Reject vectors whose distance from their local window median "
             "displacement (px/frame) exceeds this value.")
         self.residual_enabled_check.toggled.connect(self._on_residual_filter_toggled)
-        self.residual_max_spin = _spin_width(QDoubleSpinBox())
+        self.residual_max_spin = style_spin(QDoubleSpinBox())
         self.residual_max_spin.setRange(0.0, 1e6)
         self.residual_max_spin.setValue(5.0)
         self.residual_max_spin.setEnabled(False)
-        post_grid.addWidget(self.residual_enabled_check, 2, 0, 1, 2)
-        post_grid.addWidget(self.residual_max_spin, 2, 2)
+        post_grid.addWidget(self.residual_enabled_check, 1, 0, 1, 2)
+        post_grid.addWidget(self.residual_max_spin, 1, 2)
 
-        self.window_size_spin = _spin_width(QSpinBox())
+        self.window_size_spin = style_spin(QSpinBox())
         self.window_size_spin.setRange(3, 21)
         self.window_size_spin.setSingleStep(2)
         self.window_size_spin.setValue(3)
         self.window_size_spin.setEnabled(False)
-        post_grid.addWidget(QLabel("  Window size:"), 3, 1)
-        post_grid.addWidget(self.window_size_spin, 3, 2)
+        post_grid.addWidget(QLabel("  N (window size):"), 2, 1)
+        post_grid.addWidget(self.window_size_spin, 2, 2)
 
         self.replace_invalid_check = QCheckBox("Interpolate removed vectors")
-        post_grid.addWidget(self.replace_invalid_check, 4, 0, 1, 3)
+        post_grid.addWidget(self.replace_invalid_check, 3, 0, 1, 3)
 
         self.smooth_check = QCheckBox("Gaussian smooth")
-        self.smooth_sigma_spin = _spin_width(QDoubleSpinBox())
+        self.smooth_sigma_spin = style_spin(QDoubleSpinBox())
         self.smooth_sigma_spin.setRange(0.1, 100.0)
         self.smooth_sigma_spin.setValue(1.0)
-        post_grid.addWidget(self.smooth_check, 5, 0)
-        post_grid.addWidget(QLabel("sigma:"), 5, 1)
-        post_grid.addWidget(self.smooth_sigma_spin, 5, 2)
+        post_grid.addWidget(self.smooth_check, 4, 0)
+        post_grid.addWidget(QLabel("σ:"), 4, 1)  # σ
+        post_grid.addWidget(self.smooth_sigma_spin, 4, 2)
 
         layout.addWidget(post_box)
         layout.addStretch(1)
@@ -216,7 +206,6 @@ class SettingsPanel(QWidget):
             window_size=self.window_size_spin.value(),
         )
         return PostProcessSettings(
-            apply_v_sign_flip=self.sign_flip_check.isChecked(),
             global_outlier_std=self.n_std_spin.value() if self.std_filter_check.isChecked() else None,
             range_filter=range_filter,
             replace_invalid=self.replace_invalid_check.isChecked(),

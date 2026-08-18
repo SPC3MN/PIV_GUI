@@ -187,3 +187,44 @@ def test_calibration_coef_table_has_no_internal_scrollbar(qtbot):
     table = window.calibration_panel.cam0_form.coef_table
     assert table.verticalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
     assert table.rowCount() == 10
+
+
+def test_no_sign_flip_option(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    assert not hasattr(window.settings_panel, "sign_flip_check")
+    post = window.settings_panel.get_postprocess_settings()
+    assert not hasattr(post, "apply_v_sign_flip")
+
+
+def test_spin_boxes_have_no_counter_buttons(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    from PySide6.QtWidgets import QAbstractSpinBox, QDoubleSpinBox, QSpinBox
+    # project_panel has no spin boxes (only text/combo/radio fields) --
+    # settings_panel and calibration_panel are where every numeric field lives
+    for panel in (window.settings_panel, window.calibration_panel):
+        spins = panel.findChildren(QSpinBox) + panel.findChildren(QDoubleSpinBox)
+        assert spins, f"{panel} has no spin boxes to check"
+        for spin in spins:
+            assert spin.buttonSymbols() == QAbstractSpinBox.NoButtons
+
+
+def test_calibration_labels_use_math_notation(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    cam0 = window.calibration_panel.cam0_form
+    labels = [cam0.layout().itemAt(0).layout().itemAt(i).widget().text()
+              for i in range(0, 10, 2)]
+    assert "x₀:" in labels
+    assert "y₀:" in labels
+    assert "Δx:" in labels
+    assert "Δy:" in labels
+    assert cam0.coef_table.horizontalHeaderItem(0).text() == "dx(s,t)"
+    assert cam0.coef_table.verticalHeaderItem(2).text() == "s²"  # "s2" -> s²
+    assert cam0.coef_table.verticalHeaderItem(8).text() == "s²t"  # "s2t" -> s²t
+
+    cp = window.calibration_panel
+    from PySide6.QtWidgets import QLabel
+    angle_labels = {lbl.text() for lbl in cp.findChildren(QLabel)} & {"α₁:", "α₂:", "β₁:", "β₂:"}
+    assert angle_labels == {"α₁:", "α₂:", "β₁:", "β₂:"}

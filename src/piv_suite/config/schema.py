@@ -122,7 +122,6 @@ class PostProcessSettings:
     (range_filter, with a window_size control). replace_invalid/
     smooth_field are a separate, later step (filling gaps in what's left
     after removal), not a third detection method."""
-    apply_v_sign_flip: bool = False
     global_outlier_std: Optional[float] = None   # std-dev spurious-vector filter; None disables
     range_filter: RangeFilterSettings = field(default_factory=RangeFilterSettings)
     replace_invalid: bool = False
@@ -136,7 +135,6 @@ class PostProcessSettings:
         class _Post:
             pass
         p = _Post()
-        p.apply_v_sign_flip = self.apply_v_sign_flip
         p.global_outlier_std = self.global_outlier_std
         p.range_filter = self.range_filter.to_kwargs()
         p.replace_invalid = self.replace_invalid

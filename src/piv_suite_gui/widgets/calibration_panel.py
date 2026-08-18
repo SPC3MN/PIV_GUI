@@ -7,7 +7,13 @@ interface but stays disabled until that parser is implemented (see
 calibration/report_parser.py).
 
 cam0/cam1 forms are tabs rather than side-by-side, to keep the panel's
-width fixed instead of doubling it.
+width fixed instead of doubling it. Labels use the same symbols as
+calibration.camera_mapping.CameraMapping's own docstring (x0/y0 the
+mapping's origin, x_span/y_span the normalization span -- displayed as
+Δx/Δy since that's what a "span" is -- and the dx(s,t)/dy(s,t) polynomial
+whose terms are s, s^2, s^3, t, t^2, t^3, st, s^2t, t^2s, matching
+CameraMapping._poly exactly) and reconstruct_stereo's own alpha/beta
+angle parameters.
 """
 
 from PySide6.QtWidgets import (
@@ -19,11 +25,19 @@ from PySide6.QtWidgets import (
 from piv_suite.calibration.report_parser import parse_davis_calibration_report
 from piv_suite.config.schema import CameraMappingSettings, StereoSettings
 
-from ._util import fit_table_to_rows
+from ._util import fit_table_to_rows, style_spin
 
 COEF_KEYS = ("1", "s", "s2", "s3", "t", "t2", "t3", "st", "s2t", "t2s")
+# Display-only superscript notation for the polynomial table's row headers
+# -- CameraMapping._poly's actual term for each key, e.g. s2 -> s^2. The
+# underlying COEF_KEYS strings are unchanged (still what CameraMapping's
+# dx_coefs/dy_coefs dicts are keyed by).
+COEF_DISPLAY = {
+    "1": "1", "s": "s", "s2": "s²", "s3": "s³",
+    "t": "t", "t2": "t²", "t3": "t³",
+    "st": "st", "s2t": "s²t", "t2s": "t²s",
+}
 SPIN_WIDTH = 90
-DECIMALS = 2
 
 
 class _CameraMappingForm(QWidget):
@@ -42,8 +56,8 @@ class _CameraMappingForm(QWidget):
         self.y0_spin = self._make_spin()
         self.y_span_spin = self._make_spin(default=1.0)
         for i, (label, w) in enumerate([
-            ("Name:", self.name_edit), ("x0:", self.x0_spin), ("x_span:", self.x_span_spin),
-            ("y0:", self.y0_spin), ("y_span:", self.y_span_spin),
+            ("Name:", self.name_edit), ("x₀:", self.x0_spin), ("Δx:", self.x_span_spin),
+            ("y₀:", self.y0_spin), ("Δy:", self.y_span_spin),
         ]):
             top.addWidget(QLabel(label), i, 0)
             top.addWidget(w, i, 1)
@@ -60,8 +74,8 @@ class _CameraMappingForm(QWidget):
         layout.addWidget(load_btn)
 
         self.coef_table = QTableWidget(len(COEF_KEYS), 2)
-        self.coef_table.setHorizontalHeaderLabels(["dx_coefs", "dy_coefs"])
-        self.coef_table.setVerticalHeaderLabels(list(COEF_KEYS))
+        self.coef_table.setHorizontalHeaderLabels(["dx(s,t)", "dy(s,t)"])
+        self.coef_table.setVerticalHeaderLabels([COEF_DISPLAY[k] for k in COEF_KEYS])
         self.coef_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         for row in range(len(COEF_KEYS)):
             self.coef_table.setItem(row, 0, QTableWidgetItem("0.00"))
@@ -73,10 +87,8 @@ class _CameraMappingForm(QWidget):
     def _make_spin(default=0.0):
         s = QDoubleSpinBox()
         s.setRange(-1e7, 1e7)
-        s.setDecimals(DECIMALS)
         s.setValue(default)
-        s.setMaximumWidth(SPIN_WIDTH)
-        return s
+        return style_spin(s, width=SPIN_WIDTH)
 
     def _load_from_report(self):
         try:
@@ -129,10 +141,10 @@ class CalibrationPanel(QWidget):
         geom_grid = QGridLayout(geom_box)
         geom_grid.setContentsMargins(6, 6, 6, 6)
         geom_grid.setSpacing(4)
-        self.world_h_spin = QSpinBox(); self.world_h_spin.setRange(1, 100000); self.world_h_spin.setValue(1000); self.world_h_spin.setMaximumWidth(SPIN_WIDTH)
-        self.world_w_spin = QSpinBox(); self.world_w_spin.setRange(1, 100000); self.world_w_spin.setValue(1000); self.world_w_spin.setMaximumWidth(SPIN_WIDTH)
-        self.world_scale_spin = QDoubleSpinBox(); self.world_scale_spin.setRange(1e-6, 1e6); self.world_scale_spin.setValue(1.0); self.world_scale_spin.setMaximumWidth(SPIN_WIDTH); self.world_scale_spin.setDecimals(DECIMALS)
-        self.dewarp_order_spin = QSpinBox(); self.dewarp_order_spin.setRange(0, 5); self.dewarp_order_spin.setValue(1); self.dewarp_order_spin.setMaximumWidth(SPIN_WIDTH)
+        self.world_h_spin = style_spin(QSpinBox(), width=SPIN_WIDTH); self.world_h_spin.setRange(1, 100000); self.world_h_spin.setValue(1000)
+        self.world_w_spin = style_spin(QSpinBox(), width=SPIN_WIDTH); self.world_w_spin.setRange(1, 100000); self.world_w_spin.setValue(1000)
+        self.world_scale_spin = style_spin(QDoubleSpinBox(), width=SPIN_WIDTH); self.world_scale_spin.setRange(1e-6, 1e6); self.world_scale_spin.setValue(1.0)
+        self.dewarp_order_spin = style_spin(QSpinBox(), width=SPIN_WIDTH); self.dewarp_order_spin.setRange(0, 5); self.dewarp_order_spin.setValue(1)
         geom_grid.addWidget(QLabel("World shape (H, W):"), 0, 0)
         geom_grid.addWidget(self.world_h_spin, 0, 1)
         geom_grid.addWidget(self.world_w_spin, 0, 2)
@@ -156,8 +168,8 @@ class CalibrationPanel(QWidget):
         self.beta1_spin = self._angle_spin(0.0)
         self.beta2_spin = self._angle_spin(0.0)
         for i, (label, w) in enumerate([
-            ("alpha1:", self.alpha1_spin), ("alpha2:", self.alpha2_spin),
-            ("beta1:", self.beta1_spin), ("beta2:", self.beta2_spin),
+            ("α₁:", self.alpha1_spin), ("α₂:", self.alpha2_spin),
+            ("β₁:", self.beta1_spin), ("β₂:", self.beta2_spin),
         ]):
             angle_grid.addWidget(QLabel(label), i, 0)
             angle_grid.addWidget(w, i, 1)
@@ -169,9 +181,7 @@ class CalibrationPanel(QWidget):
         s = QDoubleSpinBox()
         s.setRange(-180.0, 180.0)
         s.setValue(default)
-        s.setMaximumWidth(SPIN_WIDTH)
-        s.setDecimals(DECIMALS)
-        return s
+        return style_spin(s, width=SPIN_WIDTH)
 
     def get_settings(self) -> StereoSettings:
         return StereoSettings(

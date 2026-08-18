@@ -101,7 +101,8 @@ def migrate(legacy: dict) -> ProjectConfig:
         )
 
     postprocess = PostProcessSettings(
-        apply_v_sign_flip=legacy.get("apply_v_sign_flip", False),
+        # legacy["apply_v_sign_flip"] is intentionally dropped -- the
+        # v-sign-flip option was removed from the new schema entirely
         global_outlier_std=legacy.get("global_outlier_std"),
         range_filter=RangeFilterSettings(),  # didn't exist in any legacy config
         replace_invalid=legacy.get("replace_invalid", False),

@@ -36,7 +36,9 @@ def test_migrate_gpu_stereo_legacy_config():
     assert cfg.stereo.cam0_mapping.name == "cam0"
     assert cfg.stereo.world_shape == (500, 600)
     assert cfg.stereo.alpha1_deg == -45.0
-    assert cfg.postprocess.apply_v_sign_flip is True
+    # apply_v_sign_flip was removed from the schema entirely -- a legacy
+    # config that had it set is silently dropped, not an error
+    assert not hasattr(cfg.postprocess, "apply_v_sign_flip")
     assert cfg.postprocess.replace_invalid is True
 
 

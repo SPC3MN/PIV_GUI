@@ -26,16 +26,15 @@ def process_frames(engine, frame_a, frame_b, post, report_gpu_mem=False, on_gpu_
 
     `post` is a PostProcessSettings-like object (duck-typed, not required
     to be config.schema.PostProcessSettings specifically) with attributes:
-    apply_v_sign_flip, global_outlier_std, range_filter (a dict of
-    range_filter() kwargs, or None to skip), replace_invalid, smooth_field,
-    smooth_sigma.
+    global_outlier_std, range_filter (a dict of range_filter() kwargs, or
+    None to skip), replace_invalid, smooth_field, smooth_sigma.
 
-    Post-processing order: sign flip -> validity mask -> range/residual
-    filter -> std-dev outlier mask -> NaN-fill -> replace_invalid ->
-    smooth -- same position global_outlier_mask already occupied in the
-    original pipeline, with the new range/residual filter running just
-    before it. Returns reject counts for each filter alongside the field
-    via `last_reject_counts` set on this function's return isn't done here
+    Post-processing order: validity mask -> range/residual filter ->
+    std-dev outlier mask -> NaN-fill -> replace_invalid -> smooth -- same
+    position global_outlier_mask already occupied in the original
+    pipeline, with the new range/residual filter running just before it.
+    Returns reject counts for each filter alongside the field via
+    `last_reject_counts` set on this function's return isn't done here
     (kept a pure return tuple) -- see run_planar_pair/run_stereo_pair for
     the CSV-facing reject-count bookkeeping.
     """
@@ -44,9 +43,6 @@ def process_frames(engine, frame_a, frame_b, post, report_gpu_mem=False, on_gpu_
     if report_gpu_mem and on_gpu_report is not None:
         on_gpu_report()
     elapsed = time.time() - t0
-
-    if post.apply_v_sign_flip:
-        v = -v
 
     valid = ~engine.val_locations
 
@@ -96,9 +92,6 @@ def process_frames_tiled(frame_a, frame_b, post, init_raw_fn, n_tiles_y, n_tiles
         frame_a, frame_b, _ctrl, init_raw_fn, n_tiles_y, n_tiles_x, margin_px,
         report_gpu_mem=report_gpu_mem, free_pools_fn=free_pools_fn,
     )
-
-    if post.apply_v_sign_flip:
-        v = -v
 
     valid = valid_raw
     range_cfg = getattr(post, "range_filter", None)

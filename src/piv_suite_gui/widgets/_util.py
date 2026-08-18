@@ -1,6 +1,18 @@
 """Small shared GUI helpers."""
 
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QAbstractSpinBox, QDoubleSpinBox
+
+
+def style_spin(spin, width=80, decimals=None):
+    """Cap a spin box's width, hide its up/down counter buttons (value is
+    still editable by typing or scrolling), and set a uniform decimal
+    display for QDoubleSpinBox."""
+    spin.setMaximumWidth(width)
+    spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+    if isinstance(spin, QDoubleSpinBox):
+        spin.setDecimals(2 if decimals is None else decimals)
+    return spin
 
 
 def fit_table_to_rows(table):
