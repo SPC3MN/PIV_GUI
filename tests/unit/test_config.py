@@ -122,3 +122,24 @@ def test_to_gpu_settings_replacing_method_matches_piv_gpu_contract():
     assert isinstance(replacing_method, tuple)
     assert len(replacing_method) >= len(search_size_iters)
     assert all(m in {"median", "spring", "mean"} for m in replacing_method)
+
+
+def test_to_gpu_settings_remaining_fields_match_piv_gpu_contract():
+    # Confirmed on real Windows/CUDA hardware (constructing piv_gpu AND
+    # running a full frame pair through it, including forced outliers to
+    # exercise replacement and smoothing) that -- unlike replacing_method
+    # -- these fields do NOT need vocabulary translation: piv_gpu.__init__
+    # broadcasts a bare str/bool straight into a per-pass tuple itself
+    # (`(x,) * self.num_passes if isinstance(x, str/bool) else x`), and
+    # canonical schema's default values already fall inside piv_gpu's
+    # allowed sets. Pinning the contract here so a future default change
+    # (e.g. a new GUI dropdown option) can't silently drift into a value
+    # piv_gpu rejects.
+    corr = CorrelationSettings()
+    val = ValidationSettings()
+    _, piv_settings = to_gpu_settings(corr, val)
+
+    assert piv_settings["subpixel_method"] in {"gaussian", "parabolic", "centroid"}
+    assert piv_settings["s2n_method"] in {"peak2peak", "peak2mean", "peak2energy"}
+    assert isinstance(piv_settings["revalidate"], bool)
+    assert isinstance(piv_settings["smooth"], bool)
