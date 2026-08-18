@@ -11,6 +11,41 @@ import dataclasses
 import numpy as np
 
 
+def _fill_residual_nan(u, v):
+    """openpiv's own filters.replace_outliers (method=localmean, bounded
+    by max_filter_iteration/filter_kernel_size) can't always fully repair
+    a pass's flagged-invalid vectors -- e.g. a no-signal region sitting
+    right at the frame edge has no far-side valid neighbor for a local
+    mean to converge from, no matter how many iterations run. Confirmed
+    on a real image pair (Windows/CUDA hardware): 310 vectors survived
+    pass 1's own replace_outliers call as literal NaN, all clustered in
+    the bottom few grid rows.
+
+    Left alone, that NaN doesn't stay local -- the NEXT pass builds a
+    RectBivariateSpline over the whole field to interpolate the
+    deformation grid, and a spline fit poisons ENTIRELY (the whole
+    interpolated surface goes NaN, not just cells near the bad region) if
+    even one input point is NaN. That all-NaN deformation field then
+    reaches scipy.ndimage.map_coordinates, whose native bounds-clamping
+    doesn't safely handle NaN coordinates -- confirmed via a real
+    Windows fatal exception (access violation), not a Python exception.
+
+    Filling with this pass's own valid-vector median is a safe, bounded
+    stand-in -- these cells are already reflected as invalid in the
+    flags/val_locations mask this function's caller already tracks, so
+    filling here only prevents literal NaN from reaching the next pass,
+    it doesn't change what counts as a valid vector in the output."""
+    u_data = np.ma.getdata(u) if isinstance(u, np.ma.MaskedArray) else u
+    v_data = np.ma.getdata(v) if isinstance(v, np.ma.MaskedArray) else v
+    nan_u = np.isnan(u_data)
+    nan_v = np.isnan(v_data)
+    if nan_u.any():
+        u_data[nan_u] = np.nanmedian(u_data)
+    if nan_v.any():
+        v_data[nan_v] = np.nanmedian(v_data)
+    return u, v
+
+
 class CPUPIVProcess:
     """Adapter around openpiv-python's own multi-pass pipeline
     (`openpiv.windef.first_pass` / `multipass_img_deform`, driven by an
@@ -85,6 +120,7 @@ class CPUPIVProcess:
                 max_iter=settings.max_filter_iteration,
                 kernel_size=settings.filter_kernel_size,
             )
+            u, v = _fill_residual_nan(u, v)
 
         if settings.smoothn:
             from openpiv import smoothn as _smoothn
@@ -97,6 +133,7 @@ class CPUPIVProcess:
         for i in range(1, settings.num_iterations):
             x, y, u, v, grid_mask, flags = windef.multipass_img_deform(
                 frame_a, frame_b, i, x, y, u, v, settings)
+            u, v = _fill_residual_nan(u, v)
             if settings.smoothn and i < settings.num_iterations - 1:
                 from openpiv import smoothn as _smoothn
                 u, *_ = _smoothn.smoothn(u, s=settings.smoothn_p)
