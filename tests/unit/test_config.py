@@ -104,3 +104,21 @@ def test_to_gpu_settings_maps_validation_fields():
     min_search_size, piv_settings = to_gpu_settings(corr, val)
     assert piv_settings["s2n_tol"] == 1.3
     assert piv_settings["search_size_iters"] == (1, 3)
+
+
+def test_to_gpu_settings_replacing_method_matches_piv_gpu_contract():
+    # Regression test: piv_gpu.__init__ itself asserts replacing_method
+    # is a tuple, one entry per pass (>= len(search_size_iters)), drawn
+    # from {'median', 'spring', 'mean'} -- confirmed via a real
+    # AssertionError from openpiv_gpu on Windows/CUDA hardware. CPU's
+    # filter_method vocabulary ('localmean', 'disk', 'distance') must
+    # never be passed straight through to the GPU backend.
+    corr = CorrelationSettings()  # 4 passes by default
+    val = ValidationSettings()
+    min_search_size, piv_settings = to_gpu_settings(corr, val)
+    _, search_size_iters, _ = passes_to_gpu(corr.passes)
+
+    replacing_method = piv_settings["replacing_method"]
+    assert isinstance(replacing_method, tuple)
+    assert len(replacing_method) >= len(search_size_iters)
+    assert all(m in {"median", "spring", "mean"} for m in replacing_method)

@@ -122,8 +122,18 @@ def to_gpu_settings(correlation: CorrelationSettings, validation: ValidationSett
     internal defaults for those -- they're not modeled in the canonical
     schema yet (a real gap to close once GPU-specific tuning needs are
     clearer, not a silent behavior change: piv_gpu's own defaults apply
-    exactly as if a hand-written piv_settings dict had omitted them too)."""
+    exactly as if a hand-written piv_settings dict had omitted them too).
+
+    replacing_method is deliberately NOT validation.filter_method passed
+    straight through -- confirmed against a real error from piv_gpu itself
+    (openpiv_gpu.gpu_process.piv_gpu.__init__'s own assertion): it must be
+    a TUPLE with one entry per pass (length == len(search_size_iters)),
+    drawn from {'median', 'spring', 'mean'} -- a different vocabulary AND
+    shape than CPU's scalar filter_method (which allows 'localmean',
+    'disk', 'distance' -- none of which piv_gpu accepts). 'median' per
+    pass is the closest equivalent to CPU's 'localmean' default."""
     min_search_size, search_size_iters, overlap_ratio = passes_to_gpu(correlation.passes)
+    num_passes = len(search_size_iters)
     piv_settings = {
         "search_size_iters": search_size_iters,
         "overlap_ratio": overlap_ratio,
@@ -131,7 +141,7 @@ def to_gpu_settings(correlation: CorrelationSettings, validation: ValidationSett
         "subpixel_method": correlation.subpixel_method,
         "s2n_method": validation.sig2noise_method,
         "s2n_tol": validation.sig2noise_threshold,
-        "replacing_method": validation.filter_method,
+        "replacing_method": ("median",) * num_passes,
         "num_replacing_iters": validation.max_filter_iteration,
         "replacing_size": validation.filter_kernel_size,
         "revalidate": validation.validation_first_pass,
