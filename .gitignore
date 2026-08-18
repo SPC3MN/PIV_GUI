@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.venv/
+*.pivproj
+piv_output*/
+stereo_piv_output*/
+.pytest_cache/

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "piv-suite"
+version = "0.1.0"
+description = "Unified planar/stereo, CPU/GPU PIV processing suite with a desktop GUI, built on OpenPIV"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "lvpyio",
+    "openpiv",
+]
+
+[project.optional-dependencies]
+gpu = [
+    # Pick the cupy variant matching your CUDA toolkit; openpiv-python-gpu
+    # is not on PyPI -- clone it and add to PYTHONPATH (see README).
+    # "cupy-cuda11x", "cupy-cuda12x", "cupy-cuda13x",
+]
+gui = [
+    "PySide6",
+]
+dev = [
+    "pytest",
+    "pytest-qt",
+]
+
+[project.scripts]
+piv-suite = "piv_suite.cli.main:main"
+piv-suite-gui = "piv_suite_gui.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
