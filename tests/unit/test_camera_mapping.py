@@ -53,3 +53,45 @@ def test_dewarp_image_caches_grid_per_shape():
     np.testing.assert_allclose(out1, raw, atol=1e-4)
     out2 = cm.dewarp_image(raw, (10, 10))
     np.testing.assert_array_equal(out1, out2)
+
+
+def test_dewarp_image_matches_analytic_result_with_real_distortion():
+    # dewarp_image with NONTRIVIAL (nonzero on every term, including cross
+    # st/s2t/t2s terms) DaVis-style polynomial distortion -- not just the
+    # zero-coefficient identity case above. Uses a bilinear ramp raw
+    # pattern (x_raw + 2*y_raw) so order=1 map_coordinates reconstructs it
+    # with ZERO interpolation error, letting this compare dewarp_image's
+    # actual output against the fully analytic expected value (computed
+    # from the SAME world_to_raw() call) to within floating-point
+    # precision alone -- directly validates s()/t() normalization,
+    # _poly(), world_to_raw(), and the map_coordinates() call together.
+    world_shape = (60, 80)  # (ny, nx)
+    ny, nx = world_shape
+    margin = 20  # uniform shift baked into the constant coef term so
+                 # every raw sample stays inside the padded raw canvas
+
+    coefs_dx = {"1": 0.5 - margin, "s": 1.2, "s2": 0.6, "s3": 0.1, "t": -0.3,
+                "t2": 0.2, "t3": 0.0, "st": 0.4, "s2t": 0.05, "t2s": -0.05}
+    coefs_dy = {"1": -0.4 - margin, "s": -0.2, "s2": 0.15, "s3": 0.0, "t": 0.9,
+                "t2": 0.5, "t3": 0.08, "st": -0.3, "s2t": 0.02, "t2s": 0.03}
+    cm = CameraMapping(x0=nx / 2, x_span=nx, y0=ny / 2, y_span=ny,
+                        dx_coefs=coefs_dx, dy_coefs=coefs_dy)
+
+    raw_ny, raw_nx = ny + 2 * margin, nx + 2 * margin
+
+    def raw_value(x_raw, y_raw):
+        return x_raw + 2.0 * y_raw
+
+    yr_idx, xr_idx = np.mgrid[0:raw_ny, 0:raw_nx].astype(np.float64)
+    raw_image = raw_value(xr_idx, yr_idx)
+
+    yp, xp = np.mgrid[0:ny, 0:nx].astype(np.float64)
+    x_raw, y_raw = cm.world_to_raw(xp, yp)
+    # confirm the margin actually keeps every sample in-bounds -- if this
+    # ever fails, the test itself needs a bigger margin, not a looser tol
+    assert x_raw.min() >= 0 and x_raw.max() <= raw_nx - 1
+    assert y_raw.min() >= 0 and y_raw.max() <= raw_ny - 1
+    expected = raw_value(x_raw, y_raw)
+
+    actual = cm.dewarp_image(raw_image, world_shape, order=1)
+    np.testing.assert_allclose(actual, expected, atol=1e-3)
