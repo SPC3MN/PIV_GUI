@@ -41,8 +41,11 @@ def iter_pairs_from_loose_files(input_path, loose_glob="*.im7",
             frame_a, frame_b = frames_from_buffer(buf)
             yield pair_id, frame_a, frame_b
     else:
-        # frame A / frame B are separate single-frame files, matched by suffix
-        files_a = sorted(p for p in paths if p.endswith(suffix_a))
+        # frame A / frame B are separate single-frame files, matched by
+        # suffix -- compared case-INsensitively, since Windows/macOS
+        # filesystems are case-insensitive and users naturally expect
+        # "_a.tif" and "_a.TIF" to be treated the same
+        files_a = sorted(p for p in paths if p.lower().endswith(suffix_a.lower()))
         if not files_a:
             sys.exit(
                 f"Files are single-frame but none end in '{suffix_a}' "
@@ -81,8 +84,10 @@ def iter_stereo_from_loose_files(input_path, loose_glob="*.im7",
             fa0, fb0, fa1, fb1 = frames_from_stereo_buffer(buf, stereo_frame_order)
             yield pair_id, fa0, fb0, fa1, fb1
     else:
-        # each camera's double-frame pair is a SEPARATE file, matched by suffix
-        files0 = sorted(p for p in paths if p.endswith(suffix_cam0))
+        # each camera's double-frame pair is a SEPARATE file, matched by
+        # suffix -- case-insensitive, see the comment in
+        # iter_pairs_from_loose_files above
+        files0 = sorted(p for p in paths if p.lower().endswith(suffix_cam0.lower()))
         if not files0:
             sys.exit(
                 f"Files aren't combined 4-frame stereo buffers but none end "
