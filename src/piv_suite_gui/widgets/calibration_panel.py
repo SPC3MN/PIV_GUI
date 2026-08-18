@@ -5,26 +5,34 @@ instead of hand-edited JSON) is the near-term workflow -- the "Load from
 DaVis report..." button is wired to calibration.report_parser's stub
 interface but stays disabled until that parser is implemented (see
 calibration/report_parser.py).
+
+cam0/cam1 forms are tabs rather than side-by-side, to keep the panel's
+width fixed instead of doubling it.
 """
 
 from PySide6.QtWidgets import (
-    QDoubleSpinBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QDoubleSpinBox, QGridLayout, QGroupBox, QHeaderView, QLabel, QLineEdit,
     QMessageBox, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QTabWidget, QVBoxLayout, QWidget,
 )
 
 from piv_suite.calibration.report_parser import parse_davis_calibration_report
 from piv_suite.config.schema import CameraMappingSettings, StereoSettings
 
 COEF_KEYS = ("1", "s", "s2", "s3", "t", "t2", "t3", "st", "s2t", "t2s")
+SPIN_WIDTH = 90
 
 
-class _CameraMappingForm(QGroupBox):
+class _CameraMappingForm(QWidget):
     def __init__(self, title, parent=None):
-        super().__init__(title, parent)
+        super().__init__(parent)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
 
         top = QGridLayout()
+        top.setSpacing(4)
+        top.setColumnStretch(1, 1)
         self.name_edit = QLineEdit(title)
         self.x0_spin = self._make_spin()
         self.x_span_spin = self._make_spin(default=1.0)
@@ -38,7 +46,7 @@ class _CameraMappingForm(QGroupBox):
             top.addWidget(w, i, 1)
         layout.addLayout(top)
 
-        load_btn = QPushButton("Load from DaVis calibration report...")
+        load_btn = QPushButton("Load from DaVis report...")
         load_btn.setEnabled(False)
         load_btn.setToolTip(
             "Not implemented yet -- calibration.report_parser is a stub. "
@@ -51,6 +59,7 @@ class _CameraMappingForm(QGroupBox):
         self.coef_table = QTableWidget(len(COEF_KEYS), 2)
         self.coef_table.setHorizontalHeaderLabels(["dx_coefs", "dy_coefs"])
         self.coef_table.setVerticalHeaderLabels(list(COEF_KEYS))
+        self.coef_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         for row in range(len(COEF_KEYS)):
             self.coef_table.setItem(row, 0, QTableWidgetItem("0.0"))
             self.coef_table.setItem(row, 1, QTableWidgetItem("0.0"))
@@ -62,6 +71,7 @@ class _CameraMappingForm(QGroupBox):
         s.setRange(-1e7, 1e7)
         s.setDecimals(4)
         s.setValue(default)
+        s.setMaximumWidth(SPIN_WIDTH)
         return s
 
     def _load_from_report(self):
@@ -97,31 +107,46 @@ class CalibrationPanel(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(6)
 
-        cams = QHBoxLayout()
+        cam_box = QGroupBox("Camera calibration")
+        cam_layout = QVBoxLayout(cam_box)
+        cam_layout.setContentsMargins(4, 4, 4, 4)
+        cam_tabs = QTabWidget()
         self.cam0_form = _CameraMappingForm("cam0")
         self.cam1_form = _CameraMappingForm("cam1")
-        cams.addWidget(self.cam0_form)
-        cams.addWidget(self.cam1_form)
-        layout.addLayout(cams)
+        cam_tabs.addTab(self.cam0_form, "cam0")
+        cam_tabs.addTab(self.cam1_form, "cam1")
+        cam_layout.addWidget(cam_tabs)
+        layout.addWidget(cam_box)
 
         geom_box = QGroupBox("World grid / dewarp")
         geom_grid = QGridLayout(geom_box)
-        self.world_h_spin = QSpinBox(); self.world_h_spin.setRange(1, 100000); self.world_h_spin.setValue(1000)
-        self.world_w_spin = QSpinBox(); self.world_w_spin.setRange(1, 100000); self.world_w_spin.setValue(1000)
-        self.world_scale_spin = QDoubleSpinBox(); self.world_scale_spin.setRange(1e-6, 1e6); self.world_scale_spin.setValue(1.0)
-        self.dewarp_order_spin = QSpinBox(); self.dewarp_order_spin.setRange(0, 5); self.dewarp_order_spin.setValue(1)
+        geom_grid.setContentsMargins(6, 6, 6, 6)
+        geom_grid.setSpacing(4)
+        self.world_h_spin = QSpinBox(); self.world_h_spin.setRange(1, 100000); self.world_h_spin.setValue(1000); self.world_h_spin.setMaximumWidth(SPIN_WIDTH)
+        self.world_w_spin = QSpinBox(); self.world_w_spin.setRange(1, 100000); self.world_w_spin.setValue(1000); self.world_w_spin.setMaximumWidth(SPIN_WIDTH)
+        self.world_scale_spin = QDoubleSpinBox(); self.world_scale_spin.setRange(1e-6, 1e6); self.world_scale_spin.setValue(1.0); self.world_scale_spin.setMaximumWidth(SPIN_WIDTH)
+        self.dewarp_order_spin = QSpinBox(); self.dewarp_order_spin.setRange(0, 5); self.dewarp_order_spin.setValue(1); self.dewarp_order_spin.setMaximumWidth(SPIN_WIDTH)
         geom_grid.addWidget(QLabel("World shape (H, W):"), 0, 0)
         geom_grid.addWidget(self.world_h_spin, 0, 1)
         geom_grid.addWidget(self.world_w_spin, 0, 2)
         geom_grid.addWidget(QLabel("World scale (px/mm):"), 1, 0)
         geom_grid.addWidget(self.world_scale_spin, 1, 1)
-        geom_grid.addWidget(QLabel("Dewarp interpolation order:"), 2, 0)
+        geom_grid.addWidget(QLabel("Dewarp order:"), 2, 0)
         geom_grid.addWidget(self.dewarp_order_spin, 2, 1)
         layout.addWidget(geom_box)
 
-        angle_box = QGroupBox("Stereo viewing angles (deg) -- see original README: verify per Z-plane")
+        angle_box = QGroupBox("Stereo viewing angles (deg)")
+        angle_box.setToolTip(
+            "See the original Stereo_PIV_GPU/Stereo_PIV_CPU README: these "
+            "angles are placeholders that should be verified per Z-plane "
+            "before trusting the reconstructed W (or U/V)."
+        )
         angle_grid = QGridLayout(angle_box)
+        angle_grid.setContentsMargins(6, 6, 6, 6)
+        angle_grid.setSpacing(4)
         self.alpha1_spin = self._angle_spin(-45.0)
         self.alpha2_spin = self._angle_spin(45.0)
         self.beta1_spin = self._angle_spin(0.0)
@@ -140,6 +165,7 @@ class CalibrationPanel(QWidget):
         s = QDoubleSpinBox()
         s.setRange(-180.0, 180.0)
         s.setValue(default)
+        s.setMaximumWidth(SPIN_WIDTH)
         return s
 
     def get_settings(self) -> StereoSettings:

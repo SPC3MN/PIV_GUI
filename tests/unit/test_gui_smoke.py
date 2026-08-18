@@ -64,3 +64,47 @@ def test_calibration_panel_default_settings(qtbot):
     assert settings.world_scale_px_per_mm == 1.0
     assert set(settings.cam0_mapping.dx_coefs.keys()) == {
         "1", "s", "s2", "s3", "t", "t2", "t3", "st", "s2t", "t2s"}
+
+
+def test_main_window_has_fixed_width(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    assert window.minimumWidth() == window.maximumWidth()
+
+
+def test_loose_options_hidden_in_set_mode(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    pp = window.project_panel
+    assert pp.mode_set.isChecked()
+    assert not pp.loose_options.isVisible()
+    pp.mode_loose.setChecked(True)
+    assert pp.loose_options.isVisible()
+
+
+def test_loose_options_show_correct_suffix_fields_per_mode(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    pp = window.project_panel
+    pp.mode_loose.setChecked(True)
+
+    pp.planar_radio.setChecked(True)
+    assert pp.suffix_a_edit.isVisible()
+    assert not pp.suffix_cam0_edit.isVisible()
+
+    pp.stereo_radio.setChecked(True)
+    assert not pp.suffix_a_edit.isVisible()
+    assert pp.suffix_cam0_edit.isVisible()
+
+
+def test_mode_and_backend_are_separate_group_boxes(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    pp = window.project_panel
+    # planar_radio/stereo_radio and cpu_radio/gpu_radio must live in
+    # different parent group boxes, not one combined box
+    mode_parent = pp.planar_radio.parentWidget()
+    backend_parent = pp.cpu_radio.parentWidget()
+    assert mode_parent is not backend_parent

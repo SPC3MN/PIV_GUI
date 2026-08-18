@@ -15,6 +15,13 @@ from piv_suite.config.schema import (
     ValidationSettings,
 )
 
+SPINBOX_WIDTH = 80
+
+
+def _spin_width(spin):
+    spin.setMaximumWidth(SPINBOX_WIDTH)
+    return spin
+
 
 class _PassesTable(QGroupBox):
     """Multi-pass window/overlap schedule editor -- an ordered (coarse to
@@ -24,8 +31,10 @@ class _PassesTable(QGroupBox):
     capability (see config.legacy's grouping)."""
 
     def __init__(self, parent=None):
-        super().__init__("Multi-pass window schedule (coarse -> fine)", parent)
+        super().__init__("Window schedule (coarse -> fine)", parent)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
         self.table = QTableWidget(0, 2)
         self.table.setHorizontalHeaderLabels(["Window size (px)", "Overlap fraction"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -75,6 +84,8 @@ class SettingsPanel(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(6)
 
         self.passes_table = _PassesTable()
         layout.addWidget(self.passes_table)
@@ -82,7 +93,10 @@ class SettingsPanel(QWidget):
         # ---- correlation ----
         corr_box = QGroupBox("Correlation")
         corr_grid = QGridLayout(corr_box)
-        self.dt_spin = QDoubleSpinBox()
+        corr_grid.setContentsMargins(6, 6, 6, 6)
+        corr_grid.setSpacing(4)
+        corr_grid.setColumnStretch(1, 1)
+        self.dt_spin = _spin_width(QDoubleSpinBox())
         self.dt_spin.setRange(1e-6, 1e6)
         self.dt_spin.setValue(1.0)
         self.subpixel_combo = QComboBox()
@@ -92,9 +106,10 @@ class SettingsPanel(QWidget):
         corr_grid.addWidget(QLabel("Subpixel method:"), 1, 0)
         corr_grid.addWidget(self.subpixel_combo, 1, 1)
 
-        self.tiling_check = QCheckBox("Use GPU tiling (large frames / limited VRAM)")
-        self.n_tiles_y_spin = QSpinBox(); self.n_tiles_y_spin.setRange(1, 64); self.n_tiles_y_spin.setValue(1)
-        self.n_tiles_x_spin = QSpinBox(); self.n_tiles_x_spin.setRange(1, 64); self.n_tiles_x_spin.setValue(1)
+        self.tiling_check = QCheckBox("GPU tiling (large frames)")
+        self.tiling_check.setToolTip("Split large frames into a grid of tiles to bound peak GPU memory.")
+        self.n_tiles_y_spin = _spin_width(QSpinBox()); self.n_tiles_y_spin.setRange(1, 64); self.n_tiles_y_spin.setValue(1)
+        self.n_tiles_x_spin = _spin_width(QSpinBox()); self.n_tiles_x_spin.setRange(1, 64); self.n_tiles_x_spin.setValue(1)
         corr_grid.addWidget(self.tiling_check, 2, 0, 1, 2)
         corr_grid.addWidget(QLabel("n_tiles_y:"), 3, 0)
         corr_grid.addWidget(self.n_tiles_y_spin, 3, 1)
@@ -105,16 +120,20 @@ class SettingsPanel(QWidget):
         # ---- validation ----
         val_box = QGroupBox("Validation")
         val_grid = QGridLayout(val_box)
-        self.s2n_threshold_spin = QDoubleSpinBox()
+        val_grid.setContentsMargins(6, 6, 6, 6)
+        val_grid.setSpacing(4)
+        val_grid.setColumnStretch(1, 1)
+        self.s2n_threshold_spin = _spin_width(QDoubleSpinBox())
         self.s2n_threshold_spin.setRange(0.0, 100.0)
         self.s2n_threshold_spin.setValue(1.05)
         self.filter_method_combo = QComboBox()
         self.filter_method_combo.addItems(["localmean", "disk", "distance"])
-        self.max_filter_iter_spin = QSpinBox()
+        self.max_filter_iter_spin = _spin_width(QSpinBox())
         self.max_filter_iter_spin.setRange(0, 100)
         self.max_filter_iter_spin.setValue(4)
-        self.smoothn_check = QCheckBox("smoothn (openpiv)")
-        self.smoothn_p_spin = QDoubleSpinBox()
+        self.smoothn_check = QCheckBox("smoothn")
+        self.smoothn_check.setToolTip("Apply openpiv's smoothn() between passes.")
+        self.smoothn_p_spin = _spin_width(QDoubleSpinBox())
         self.smoothn_p_spin.setRange(0.0, 10.0)
         self.smoothn_p_spin.setValue(0.05)
 
@@ -131,13 +150,16 @@ class SettingsPanel(QWidget):
         # ---- post-processing ----
         post_box = QGroupBox("Post-processing")
         post_grid = QGridLayout(post_box)
+        post_grid.setContentsMargins(6, 6, 6, 6)
+        post_grid.setSpacing(4)
 
         self.sign_flip_check = QCheckBox("Flip v sign")
         post_grid.addWidget(self.sign_flip_check, 0, 0)
 
-        self.std_filter_check = QCheckBox("Std-dev spurious-vector filter")
+        self.std_filter_check = QCheckBox("Std-dev filter")
+        self.std_filter_check.setToolTip("Reject vectors more than n_std standard deviations from the field mean.")
         self.std_filter_check.toggled.connect(self._on_std_filter_toggled)
-        self.n_std_spin = QDoubleSpinBox()
+        self.n_std_spin = _spin_width(QDoubleSpinBox())
         self.n_std_spin.setRange(0.1, 100.0)
         self.n_std_spin.setValue(4.0)
         self.n_std_spin.setEnabled(False)
@@ -146,10 +168,10 @@ class SettingsPanel(QWidget):
         post_grid.addWidget(self.n_std_spin, 1, 2)
 
         self.replace_invalid_check = QCheckBox("Interpolate invalid vectors")
-        post_grid.addWidget(self.replace_invalid_check, 2, 0)
+        post_grid.addWidget(self.replace_invalid_check, 2, 0, 1, 2)
 
-        self.smooth_check = QCheckBox("Gaussian-smooth field")
-        self.smooth_sigma_spin = QDoubleSpinBox()
+        self.smooth_check = QCheckBox("Gaussian smooth")
+        self.smooth_sigma_spin = _spin_width(QDoubleSpinBox())
         self.smooth_sigma_spin.setRange(0.1, 100.0)
         self.smooth_sigma_spin.setValue(1.0)
         post_grid.addWidget(self.smooth_check, 3, 0)
@@ -161,23 +183,33 @@ class SettingsPanel(QWidget):
         # ---- range/residual filter ----
         range_box = QGroupBox("Range / residual filter")
         range_grid = QGridLayout(range_box)
+        range_grid.setContentsMargins(6, 6, 6, 6)
+        range_grid.setSpacing(4)
         self.range_enabled_check = QCheckBox("Enabled")
-        range_grid.addWidget(self.range_enabled_check, 0, 0)
+        range_grid.addWidget(self.range_enabled_check, 0, 0, 1, 3)
 
-        self.mag_min_spin = QDoubleSpinBox(); self.mag_min_spin.setRange(-1e6, 1e6); self.mag_min_spin.setValue(0.0)
-        self.mag_max_spin = QDoubleSpinBox(); self.mag_max_spin.setRange(-1e6, 1e6); self.mag_max_spin.setValue(1e6)
-        self.mag_enabled_check = QCheckBox("Magnitude range (px/frame):")
+        self.mag_min_spin = _spin_width(QDoubleSpinBox()); self.mag_min_spin.setRange(-1e6, 1e6); self.mag_min_spin.setValue(0.0)
+        self.mag_max_spin = _spin_width(QDoubleSpinBox()); self.mag_max_spin.setRange(-1e6, 1e6); self.mag_max_spin.setValue(1e6)
+        self.mag_enabled_check = QCheckBox("Magnitude range:")
+        self.mag_enabled_check.setToolTip("Reject vectors whose displacement magnitude (px/frame) falls outside [min, max].")
         range_grid.addWidget(self.mag_enabled_check, 1, 0)
         range_grid.addWidget(self.mag_min_spin, 1, 1)
         range_grid.addWidget(self.mag_max_spin, 1, 2)
 
-        self.residual_enabled_check = QCheckBox("Local-median residual max (px/frame):")
-        self.residual_max_spin = QDoubleSpinBox(); self.residual_max_spin.setRange(0.0, 1e6); self.residual_max_spin.setValue(5.0)
-        self.neighborhood_spin = QSpinBox(); self.neighborhood_spin.setRange(3, 21); self.neighborhood_spin.setSingleStep(2); self.neighborhood_spin.setValue(3)
+        self.residual_enabled_check = QCheckBox("Local residual max:")
+        self.residual_enabled_check.setToolTip(
+            "Reject vectors whose distance from their local neighborhood median "
+            "displacement (px/frame) exceeds this value.")
+        self.residual_max_spin = _spin_width(QDoubleSpinBox()); self.residual_max_spin.setRange(0.0, 1e6); self.residual_max_spin.setValue(5.0)
         range_grid.addWidget(self.residual_enabled_check, 2, 0)
         range_grid.addWidget(self.residual_max_spin, 2, 1)
-        range_grid.addWidget(QLabel("neighborhood:"), 2, 2)
-        range_grid.addWidget(self.neighborhood_spin, 2, 3)
+
+        self.neighborhood_spin = _spin_width(QSpinBox())
+        self.neighborhood_spin.setRange(3, 21)
+        self.neighborhood_spin.setSingleStep(2)
+        self.neighborhood_spin.setValue(3)
+        range_grid.addWidget(QLabel("Neighborhood:"), 3, 0)
+        range_grid.addWidget(self.neighborhood_spin, 3, 1)
 
         layout.addWidget(range_box)
         layout.addStretch(1)

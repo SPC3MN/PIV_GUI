@@ -1,6 +1,14 @@
 """Main window: assembles the project/settings panels (left), preview and
-run panels (right, as tabs) into one window."""
+run panels (right, as tabs) into one window.
 
+The window has a fixed width (no horizontal scroll bar anywhere -- the
+left panel's QScrollArea only ever scrolls vertically, and its contained
+widgets are sized to fit within that fixed width) so the layout doesn't
+grow wider than intended; overflow text elsewhere is left to individual
+widgets to elide/truncate rather than force extra width.
+"""
+
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QScrollArea, QTabWidget, QVBoxLayout, QWidget
 
 from piv_suite_gui.widgets.calibration_panel import CalibrationPanel
@@ -9,22 +17,32 @@ from piv_suite_gui.widgets.project_panel import ProjectPanel
 from piv_suite_gui.widgets.run_panel import RunPanel
 from piv_suite_gui.widgets.settings_panel import SettingsPanel
 
+LEFT_PANEL_WIDTH = 440
+RIGHT_PANEL_WIDTH = 640
+WINDOW_WIDTH = LEFT_PANEL_WIDTH + RIGHT_PANEL_WIDTH
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("PIV Suite")
-        self.resize(1200, 800)
+        self.resize(WINDOW_WIDTH, 800)
+        self.setFixedWidth(WINDOW_WIDTH)
         self._build_ui()
 
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
         layout = QHBoxLayout(central)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
 
-        # ---- left: project + settings, scrollable ----
+        # ---- left: project + settings, vertically scrollable only ----
         left_container = QWidget()
+        left_container.setMaximumWidth(LEFT_PANEL_WIDTH - 20)  # leaves room for the scrollbar
         left_layout = QVBoxLayout(left_container)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(4)
         self.project_panel = ProjectPanel()
         self.settings_panel = SettingsPanel()
         self.calibration_panel = CalibrationPanel()
@@ -40,7 +58,8 @@ class MainWindow(QMainWindow):
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
         left_scroll.setWidget(left_container)
-        left_scroll.setMinimumWidth(420)
+        left_scroll.setFixedWidth(LEFT_PANEL_WIDTH)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         layout.addWidget(left_scroll, stretch=0)
 
         # ---- right: preview / run, as tabs ----
