@@ -60,10 +60,12 @@ class RunPanel(QWidget):
         correlation = main_window.settings_panel.get_correlation_settings()
         validation = main_window.settings_panel.get_validation_settings()
         post = main_window.settings_panel.get_postprocess_settings()
+        calibration = main_window.settings_panel.get_calibration_settings()
 
         from piv_suite.config.schema import ProjectConfig
         config = ProjectConfig(project=project, correlation=correlation,
-                                validation=validation, postprocess=post)
+                                validation=validation, postprocess=post,
+                                calibration=calibration)
         if project.mode == "stereo":
             config.stereo = main_window.calibration_panel.get_settings()
         config.output.save_npz = True

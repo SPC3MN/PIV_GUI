@@ -1,15 +1,21 @@
 """Settings panel: multi-pass window/overlap schedule, correlation
-controls, and the "remove invalid vectors" post-processing step.
+controls, per-pass validation, physical-unit calibration, and the
+"remove invalid vectors" post-processing step.
 
-Removing invalid vectors uses exactly two detection methods -- "remove if
-difference to standard deviation [exceeds n*sigma]" and "remove if
-residual [from the local window median exceeds a threshold]", with a
-window-size control for the latter -- see config.schema.PostProcessSettings'
-docstring for why the engines' own internal per-pass validation
-(sig2noise threshold, outlier replace method, smoothn, ...) isn't exposed
-here anymore; ValidationSettings still exists internally with fixed
-defaults, engines need SOME threshold to run their multi-pass loop, it's
-just no longer user-facing.
+Two DIFFERENT "smoothing" and "remove invalid vector" concepts appear in
+this panel, deliberately kept visually separate:
+- Validation group's "Per-pass smoothn"/"Replace rejected vectors" run
+  INSIDE the multi-pass engine loop, between passes -- they affect what
+  the NEXT (finer) pass sees, not just the final reported field.
+- Post-process group's "Gaussian smooth"/"Interpolate removed vectors"
+  run ONCE, after the engine has already produced its final field.
+
+CPU/GPU-specific fields (correlation_method, deformation_method,
+interpolation_order, filter_method are CPU-only; batch_size,
+tile_margin_px are GPU-only) are always shown regardless of the selected
+backend, matching how use_tiling/n_tiles already work -- the inactive
+ones are simply ignored by config.legacy's adapters for the other
+backend, noted via tooltip rather than conditional show/hide.
 """
 
 from PySide6.QtWidgets import (
@@ -19,8 +25,8 @@ from PySide6.QtWidgets import (
 )
 
 from piv_suite.config.schema import (
-    CorrelationSettings, PassSettings, PostProcessSettings, RangeFilterSettings,
-    ValidationSettings,
+    CalibrationSettings, CorrelationSettings, PassSettings, PostProcessSettings,
+    RangeFilterSettings, ValidationSettings,
 )
 
 from ._util import fit_table_to_rows, style_spin
@@ -103,7 +109,10 @@ class SettingsPanel(QWidget):
         corr_grid.setContentsMargins(6, 6, 6, 6)
         corr_grid.setSpacing(4)
         corr_grid.setColumnStretch(1, 1)
-        self.dt_spin = style_spin(QDoubleSpinBox())
+        # decimals=6 (not the shared style_spin default of 2) -- a 2-decimal
+        # cap made any dt below 0.01 (e.g. real microsecond-scale PIV
+        # timings) impossible to enter at all, not just imprecise.
+        self.dt_spin = style_spin(QDoubleSpinBox(), decimals=6)
         self.dt_spin.setRange(1e-6, 1e6)
         self.dt_spin.setValue(1.0)
         self.subpixel_combo = QComboBox()
@@ -113,16 +122,154 @@ class SettingsPanel(QWidget):
         corr_grid.addWidget(QLabel("Subpixel method:"), 1, 0)
         corr_grid.addWidget(self.subpixel_combo, 1, 1)
 
+        self.correlation_method_combo = QComboBox()
+        self.correlation_method_combo.addItems(["circular", "linear"])
+        self.correlation_method_combo.setToolTip("CPU backend only -- ignored on GPU.")
+        corr_grid.addWidget(QLabel("Correlation method:"), 2, 0)
+        corr_grid.addWidget(self.correlation_method_combo, 2, 1)
+
+        self.deformation_method_combo = QComboBox()
+        self.deformation_method_combo.addItems(["symmetric", "second image"])
+        self.deformation_method_combo.setToolTip("CPU backend only -- ignored on GPU.")
+        corr_grid.addWidget(QLabel("Deformation method:"), 3, 0)
+        corr_grid.addWidget(self.deformation_method_combo, 3, 1)
+
+        self.interpolation_order_spin = style_spin(QSpinBox())
+        self.interpolation_order_spin.setRange(0, 5)
+        self.interpolation_order_spin.setValue(3)
+        self.interpolation_order_spin.setToolTip("CPU backend only -- ignored on GPU.")
+        corr_grid.addWidget(QLabel("Interpolation order:"), 4, 0)
+        corr_grid.addWidget(self.interpolation_order_spin, 4, 1)
+
+        self.batch_size_check = QCheckBox("Set GPU batch size:")
+        self.batch_size_check.setToolTip("GPU backend only. Unchecked = piv_gpu's own default (process all windows in one batch).")
+        self.batch_size_check.toggled.connect(lambda c: self.batch_size_spin.setEnabled(c))
+        self.batch_size_spin = style_spin(QSpinBox())
+        self.batch_size_spin.setRange(1, 1_000_000)
+        self.batch_size_spin.setValue(64)
+        self.batch_size_spin.setEnabled(False)
+        corr_grid.addWidget(self.batch_size_check, 5, 0)
+        corr_grid.addWidget(self.batch_size_spin, 5, 1)
+
         self.tiling_check = QCheckBox("GPU tiling (large frames)")
-        self.tiling_check.setToolTip("Split large frames into a grid of tiles to bound peak GPU memory.")
+        self.tiling_check.setToolTip("Split large frames into a grid of tiles to bound peak GPU memory. GPU backend only.")
         self.n_tiles_y_spin = style_spin(QSpinBox()); self.n_tiles_y_spin.setRange(1, 64); self.n_tiles_y_spin.setValue(1)
         self.n_tiles_x_spin = style_spin(QSpinBox()); self.n_tiles_x_spin.setRange(1, 64); self.n_tiles_x_spin.setValue(1)
-        corr_grid.addWidget(self.tiling_check, 2, 0, 1, 2)
-        corr_grid.addWidget(QLabel("n_tiles_y:"), 3, 0)
-        corr_grid.addWidget(self.n_tiles_y_spin, 3, 1)
-        corr_grid.addWidget(QLabel("n_tiles_x:"), 4, 0)
-        corr_grid.addWidget(self.n_tiles_x_spin, 4, 1)
+        corr_grid.addWidget(self.tiling_check, 6, 0, 1, 2)
+        corr_grid.addWidget(QLabel("n_tiles_y:"), 7, 0)
+        corr_grid.addWidget(self.n_tiles_y_spin, 7, 1)
+        corr_grid.addWidget(QLabel("n_tiles_x:"), 8, 0)
+        corr_grid.addWidget(self.n_tiles_x_spin, 8, 1)
+
+        self.tile_margin_check = QCheckBox("Override tile margin (px):")
+        self.tile_margin_check.setToolTip(
+            "Unchecked = auto (3x the finest pass's window size -- see "
+            "engines.gpu_engine.default_tile_margin for why 1x isn't enough).")
+        self.tile_margin_check.toggled.connect(lambda c: self.tile_margin_spin.setEnabled(c))
+        self.tile_margin_spin = style_spin(QSpinBox())
+        self.tile_margin_spin.setRange(1, 100_000)
+        self.tile_margin_spin.setValue(96)
+        self.tile_margin_spin.setEnabled(False)
+        corr_grid.addWidget(self.tile_margin_check, 9, 0)
+        corr_grid.addWidget(self.tile_margin_spin, 9, 1)
         layout.addWidget(corr_box)
+
+        # ---- physical units (calibration) ----
+        cal_box = QGroupBox("Physical units (calibration)")
+        cal_box.setToolTip(
+            "Unset = results stay in px/frame (px/frame for stereo's U/V/W "
+            "too, unless world_scale_px_per_mm on the Calibration tab "
+            "already converts in-plane units).")
+        cal_grid = QGridLayout(cal_box)
+        cal_grid.setContentsMargins(6, 6, 6, 6)
+        cal_grid.setSpacing(4)
+
+        self.pixel_pitch_check = QCheckBox("Pixel pitch (mm/px):")
+        self.pixel_pitch_check.toggled.connect(lambda c: self.pixel_pitch_spin.setEnabled(c))
+        self.pixel_pitch_spin = style_spin(QDoubleSpinBox(), decimals=6)
+        self.pixel_pitch_spin.setRange(1e-9, 1e6)
+        self.pixel_pitch_spin.setEnabled(False)
+        cal_grid.addWidget(self.pixel_pitch_check, 0, 0)
+        cal_grid.addWidget(self.pixel_pitch_spin, 0, 1)
+
+        self.frame_dt_check = QCheckBox("Frame Δt (s):")
+        self.frame_dt_check.toggled.connect(lambda c: self.frame_dt_spin.setEnabled(c))
+        self.frame_dt_spin = style_spin(QDoubleSpinBox(), decimals=6)
+        self.frame_dt_spin.setRange(1e-9, 1e6)
+        self.frame_dt_spin.setEnabled(False)
+        cal_grid.addWidget(self.frame_dt_check, 1, 0)
+        cal_grid.addWidget(self.frame_dt_spin, 1, 1)
+        layout.addWidget(cal_box)
+
+        # ---- per-pass validation (runs inside the multi-pass loop) ----
+        val_box = QGroupBox("Validation (per-pass, inside the engine loop)")
+        val_box.setToolTip(
+            "Runs BETWEEN multi-pass iterations, feeding the next (finer) "
+            "pass -- not the same as 'Remove invalid vectors' below, which "
+            "runs once on the final field.")
+        val_grid = QGridLayout(val_box)
+        val_grid.setContentsMargins(6, 6, 6, 6)
+        val_grid.setSpacing(4)
+        val_grid.setColumnStretch(1, 1)
+
+        self.s2n_method_combo = QComboBox()
+        self.s2n_method_combo.addItems(["peak2mean", "peak2peak"])
+        self.s2n_method_combo.setToolTip(
+            "peak2energy is also GPU-only supported but omitted here so the "
+            "same choice stays valid on both backends.")
+        val_grid.addWidget(QLabel("Sig2noise method:"), 0, 0)
+        val_grid.addWidget(self.s2n_method_combo, 0, 1)
+
+        self.s2n_threshold_spin = style_spin(QDoubleSpinBox(), decimals=3)
+        self.s2n_threshold_spin.setRange(0.0, 100.0)
+        self.s2n_threshold_spin.setValue(1.05)
+        val_grid.addWidget(QLabel("Sig2noise threshold:"), 1, 0)
+        val_grid.addWidget(self.s2n_threshold_spin, 1, 1)
+
+        self.s2n_validate_check = QCheckBox("Validate signal-to-noise")
+        self.s2n_validate_check.setChecked(True)
+        self.s2n_validate_check.setToolTip("CPU backend only -- GPU always validates s2n when sig2noise threshold applies.")
+        val_grid.addWidget(self.s2n_validate_check, 2, 0, 1, 2)
+
+        self.validation_first_pass_check = QCheckBox("Validate after first pass")
+        self.validation_first_pass_check.setChecked(True)
+        val_grid.addWidget(self.validation_first_pass_check, 3, 0, 1, 2)
+
+        self.replace_vectors_check = QCheckBox("Replace rejected vectors between passes")
+        self.replace_vectors_check.setChecked(True)
+        self.replace_vectors_check.setToolTip("CPU backend only -- GPU always replaces between passes (the engine loop needs a real field to deform the next pass's windows).")
+        val_grid.addWidget(self.replace_vectors_check, 4, 0, 1, 2)
+
+        self.filter_method_combo = QComboBox()
+        self.filter_method_combo.addItems(["localmean", "disk", "distance"])
+        self.filter_method_combo.setToolTip(
+            "CPU backend only -- GPU always uses its own 'median' "
+            "replacement between passes (a different vocabulary; see "
+            "config.legacy.to_gpu_settings' docstring).")
+        val_grid.addWidget(QLabel("Replacement filter:"), 5, 0)
+        val_grid.addWidget(self.filter_method_combo, 5, 1)
+
+        self.max_filter_iter_spin = style_spin(QSpinBox())
+        self.max_filter_iter_spin.setRange(0, 100)
+        self.max_filter_iter_spin.setValue(4)
+        val_grid.addWidget(QLabel("Max replacement iterations:"), 6, 0)
+        val_grid.addWidget(self.max_filter_iter_spin, 6, 1)
+
+        self.filter_kernel_size_spin = style_spin(QSpinBox())
+        self.filter_kernel_size_spin.setRange(1, 20)
+        self.filter_kernel_size_spin.setValue(2)
+        val_grid.addWidget(QLabel("Replacement kernel size:"), 7, 0)
+        val_grid.addWidget(self.filter_kernel_size_spin, 7, 1)
+
+        self.smoothn_check = QCheckBox("Per-pass smoothn")
+        self.smoothn_check.toggled.connect(lambda c: self.smoothn_p_spin.setEnabled(c))
+        self.smoothn_p_spin = style_spin(QDoubleSpinBox(), decimals=4)
+        self.smoothn_p_spin.setRange(0.0, 100.0)
+        self.smoothn_p_spin.setValue(0.05)
+        self.smoothn_p_spin.setEnabled(False)
+        val_grid.addWidget(self.smoothn_check, 8, 0)
+        val_grid.addWidget(self.smoothn_p_spin, 8, 1)
+        layout.addWidget(val_box)
 
         # ---- remove invalid vectors ----
         post_box = QGroupBox("Remove invalid vectors")
@@ -188,16 +335,36 @@ class SettingsPanel(QWidget):
         return CorrelationSettings(
             passes=self.passes_table.get_passes(),
             dt=self.dt_spin.value(),
+            correlation_method=self.correlation_method_combo.currentText(),
             subpixel_method=self.subpixel_combo.currentText(),
+            deformation_method=self.deformation_method_combo.currentText(),
+            interpolation_order=self.interpolation_order_spin.value(),
+            batch_size=self.batch_size_spin.value() if self.batch_size_check.isChecked() else None,
             use_tiling=self.tiling_check.isChecked(),
             n_tiles_y=self.n_tiles_y_spin.value(),
             n_tiles_x=self.n_tiles_x_spin.value(),
+            tile_margin_px=self.tile_margin_spin.value() if self.tile_margin_check.isChecked() else None,
         )
 
     def get_validation_settings(self) -> ValidationSettings:
-        """The engines' own internal per-pass validation is no longer
-        user-facing (see module docstring) -- fixed defaults every time."""
-        return ValidationSettings()
+        return ValidationSettings(
+            sig2noise_method=self.s2n_method_combo.currentText(),
+            sig2noise_threshold=self.s2n_threshold_spin.value(),
+            sig2noise_validate=self.s2n_validate_check.isChecked(),
+            validation_first_pass=self.validation_first_pass_check.isChecked(),
+            replace_vectors=self.replace_vectors_check.isChecked(),
+            filter_method=self.filter_method_combo.currentText(),
+            max_filter_iteration=self.max_filter_iter_spin.value(),
+            filter_kernel_size=self.filter_kernel_size_spin.value(),
+            smoothn=self.smoothn_check.isChecked(),
+            smoothn_p=self.smoothn_p_spin.value(),
+        )
+
+    def get_calibration_settings(self) -> CalibrationSettings:
+        return CalibrationSettings(
+            pixel_pitch_mm=self.pixel_pitch_spin.value() if self.pixel_pitch_check.isChecked() else None,
+            frame_dt_s=self.frame_dt_spin.value() if self.frame_dt_check.isChecked() else None,
+        )
 
     def get_postprocess_settings(self) -> PostProcessSettings:
         range_filter = RangeFilterSettings(

@@ -82,24 +82,25 @@ class PreviewPanel(QWidget):
             correlation = main_window.settings_panel.get_correlation_settings()
             validation = main_window.settings_panel.get_validation_settings()
             post = main_window.settings_panel.get_postprocess_settings()
+            calibration = main_window.settings_panel.get_calibration_settings()
 
             self.status_label.setText("Running preview...")
             if project.mode == "stereo":
-                self._preview_stereo(main_window, project, correlation, validation, post)
+                self._preview_stereo(main_window, project, correlation, validation, post, calibration)
             else:
-                self._preview_planar(project, correlation, validation, post)
+                self._preview_planar(project, correlation, validation, post, calibration)
             self.previewed.emit(True)
         except Exception as e:
             self.status_label.setText(f"Preview failed: {e}")
             self.previewed.emit(False)
             raise
 
-    def _preview_planar(self, project, correlation, validation, post):
+    def _preview_planar(self, project, correlation, validation, post, calibration):
         pair_id, frame_a, frame_b = self._first_pair_planar(project)
         engine, x, y = _build_engine(project.backend, frame_a.shape, correlation, validation)
 
         u, v, valid, elapsed, rejects = pipeline.process_frames(engine, frame_a, frame_b, post.for_pipeline())
-        u, v = apply_calibration(u, v, None, None)
+        u, v = apply_calibration(u, v, calibration.pixel_pitch_mm, calibration.frame_dt_s)
 
         n_valid, n_total = int(valid.sum()), int(valid.size)
         self.status_label.setText(
@@ -110,7 +111,7 @@ class PreviewPanel(QWidget):
         fig = make_preview_figure("planar", x, y, u, v, valid, title=f"Preview -- {pair_id}")
         self._set_canvas(fig)
 
-    def _preview_stereo(self, main_window, project, correlation, validation, post):
+    def _preview_stereo(self, main_window, project, correlation, validation, post, calibration):
         stereo_settings = main_window.calibration_panel.get_settings()
         cam0 = CameraMapping(
             stereo_settings.cam0_mapping.x0, stereo_settings.cam0_mapping.x_span,
@@ -139,7 +140,8 @@ class PreviewPanel(QWidget):
         valid = valid1 & valid2
         angles = (np.deg2rad(stereo_settings.alpha1_deg), np.deg2rad(stereo_settings.alpha2_deg),
                   np.deg2rad(stereo_settings.beta1_deg), np.deg2rad(stereo_settings.beta2_deg))
-        U, V, W = pipeline.combine_stereo_pair(u1, v1, u2, v2, angles, stereo_settings.world_scale_px_per_mm)
+        U, V, W = pipeline.combine_stereo_pair(u1, v1, u2, v2, angles, stereo_settings.world_scale_px_per_mm,
+                                                calibration.frame_dt_s)
         U = np.where(valid, U, np.nan)
         V = np.where(valid, V, np.nan)
         W = np.where(valid, W, np.nan)

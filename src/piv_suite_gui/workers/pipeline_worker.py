@@ -37,6 +37,26 @@ def _build_engine(backend, frame_shape, correlation, validation):
     return factory(frame_shape, settings)
 
 
+def _make_tiled_init_fn(backend, correlation, validation):
+    if backend != "gpu":
+        raise ValueError("tiling is only supported on the gpu backend")
+    from piv_suite.engines.gpu_engine import _init_gpu_processor_raw
+    min_search_size, piv_settings = to_gpu_settings(correlation, validation)
+    return lambda shape: _init_gpu_processor_raw(shape, min_search_size, piv_settings)
+
+
+def _tile_margin(backend, correlation, validation):
+    from piv_suite.engines.gpu_engine import default_tile_margin
+    min_search_size, piv_settings = to_gpu_settings(correlation, validation)
+    return correlation.tile_margin_px or default_tile_margin(min_search_size, piv_settings)
+
+
+def _free_gpu(backend):
+    if backend == "gpu":
+        from piv_suite.engines.gpu_engine import free_gpu_pools
+        free_gpu_pools()
+
+
 class PipelineWorker(QObject):
     pair_started = Signal(str)
     pair_finished = Signal(str, dict)   # pair_id, {elapsed, n_valid, n_total, ...}
@@ -141,10 +161,18 @@ class PipelineWorker(QObject):
 
             self.pair_started.emit(pair_id)
             try:
-                if not correlation.use_tiling and engine is None:
-                    engine, x, y = _build_engine(backend, frame_a.shape, correlation, validation)
+                if correlation.use_tiling:
+                    init_fn = _make_tiled_init_fn(backend, correlation, validation)
+                    margin = _tile_margin(backend, correlation, validation)
+                    x, y, u, v, valid, elapsed, rejects = pipeline.process_frames_tiled(
+                        frame_a, frame_b, post, init_fn, correlation.n_tiles_y, correlation.n_tiles_x,
+                        margin, free_pools_fn=lambda: _free_gpu(backend),
+                    )
+                else:
+                    if engine is None:
+                        engine, x, y = _build_engine(backend, frame_a.shape, correlation, validation)
+                    u, v, valid, elapsed, rejects = pipeline.process_frames(engine, frame_a, frame_b, post)
 
-                u, v, valid, elapsed, rejects = pipeline.process_frames(engine, frame_a, frame_b, post)
                 u, v = apply_calibration(u, v, cfg.calibration.pixel_pitch_mm, cfg.calibration.frame_dt_s)
                 n_valid, n_total = int(valid.sum()), int(valid.size)
 

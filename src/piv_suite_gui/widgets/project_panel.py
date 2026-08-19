@@ -12,12 +12,14 @@ Layout notes:
 
 from PySide6.QtWidgets import (
     QButtonGroup, QComboBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QRadioButton, QSizePolicy, QVBoxLayout,
+    QLabel, QLineEdit, QPushButton, QRadioButton, QSizePolicy, QSpinBox, QVBoxLayout,
     QWidget,
 )
 
 from piv_suite.config.schema import ProjectSettings
 from piv_suite.engines.registry import is_gpu_available
+
+from ._util import style_spin
 
 
 class ProjectPanel(QWidget):
@@ -56,6 +58,17 @@ class ProjectPanel(QWidget):
         path_grid.addWidget(QLabel("Path:"), 0, 0)
         path_grid.addWidget(self.input_path_edit, 0, 1)
         path_grid.addWidget(browse_btn, 0, 2)
+
+        # .set-mode-only: which sub-dataset inside a multi-set .set file to
+        # read -- without this control it's silently always sub-dataset 0.
+        self.multiset_index_label = QLabel("Sub-dataset index:")
+        self.multiset_index_spin = style_spin(QSpinBox())
+        self.multiset_index_spin.setRange(0, 100000)
+        self.multiset_index_spin.setToolTip(
+            "Which sub-dataset inside a multi-set .set file to process -- "
+            "0 is the first. Only applies to .set input.")
+        path_grid.addWidget(self.multiset_index_label, 1, 0)
+        path_grid.addWidget(self.multiset_index_spin, 1, 1)
         input_layout.addLayout(path_grid)
 
         # loose-mode-only fields -- hidden entirely in .set mode
@@ -157,6 +170,8 @@ class ProjectPanel(QWidget):
         is_stereo = self.stereo_radio.isChecked()
 
         self.loose_options.setVisible(is_loose)
+        self.multiset_index_label.setVisible(not is_loose)
+        self.multiset_index_spin.setVisible(not is_loose)
 
         for w in (self.planar_suffix_label, self.suffix_a_edit, self.suffix_b_edit):
             w.setVisible(is_loose and not is_stereo)
@@ -194,6 +209,7 @@ class ProjectPanel(QWidget):
             output_dir=self.output_dir_edit.text(),
             backend=self.backend,
             mode="stereo" if self.is_stereo else "planar",
+            multiset_index=self.multiset_index_spin.value(),
             loose_glob=self.loose_glob_edit.text(),
             suffix_a=self.suffix_a_edit.text(),
             suffix_b=self.suffix_b_edit.text(),
@@ -212,7 +228,13 @@ class ProjectPanel(QWidget):
             self.gpu_radio.setChecked(True)
         self.planar_radio.setChecked(project.mode == "planar")
         self.stereo_radio.setChecked(project.mode == "stereo")
+        self.multiset_index_spin.setValue(project.multiset_index)
         self.loose_glob_edit.setText(project.loose_glob)
         self.suffix_a_edit.setText(project.suffix_a)
         self.suffix_b_edit.setText(project.suffix_b)
+        self.suffix_cam0_edit.setText(project.suffix_cam0)
+        self.suffix_cam1_edit.setText(project.suffix_cam1)
+        idx = self.stereo_frame_order_combo.findText(project.stereo_frame_order)
+        if idx >= 0:
+            self.stereo_frame_order_combo.setCurrentIndex(idx)
         self._update_input_field_visibility()

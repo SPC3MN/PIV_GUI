@@ -119,17 +119,29 @@ def test_mode_and_backend_are_separate_group_boxes(qtbot):
     assert mode_parent is not backend_parent
 
 
-def test_no_validation_group_in_settings_panel(qtbot):
+def test_validation_group_is_user_editable(qtbot):
+    # ValidationSettings' 10 fields feed the PIV calculation directly (per-
+    # pass sig2noise/replacement/smoothn inside the engine loop) -- they
+    # were briefly hidden as fixed internal defaults, then explicitly
+    # re-added to the GUI. Confirm the controls exist AND that
+    # get_validation_settings() actually reflects widget state, not a
+    # hardcoded ValidationSettings().
     window = MainWindow()
     qtbot.addWidget(window)
     sp = window.settings_panel
-    assert not hasattr(sp, "s2n_threshold_spin")
-    assert not hasattr(sp, "filter_method_combo")
-    assert not hasattr(sp, "smoothn_check")
-    # engines still need SOME validation defaults to run internally, just
-    # not user-facing anymore
+    assert hasattr(sp, "s2n_threshold_spin")
+    assert hasattr(sp, "filter_method_combo")
+    assert hasattr(sp, "smoothn_check")
+
+    sp.s2n_threshold_spin.setValue(1.3)
+    sp.s2n_method_combo.setCurrentText("peak2peak")
+    sp.smoothn_check.setChecked(True)
+    sp.smoothn_p_spin.setValue(0.2)
     settings = sp.get_validation_settings()
-    assert settings.sig2noise_threshold == 1.05
+    assert settings.sig2noise_threshold == 1.3
+    assert settings.sig2noise_method == "peak2peak"
+    assert settings.smoothn is True
+    assert settings.smoothn_p == 0.2
 
 
 def test_range_filter_has_only_residual_and_window_size(qtbot):
@@ -161,13 +173,109 @@ def test_std_dev_filter_still_present(qtbot):
     assert post.global_outlier_std == 3.0
 
 
-def test_double_spinboxes_use_two_decimals(qtbot):
+def test_double_spinboxes_use_two_decimals_except_deliberate_high_precision_fields(qtbot):
+    # style_spin()'s uniform 2-decimal default is right for most fields,
+    # but was wrong for a few real-valued PIV inputs that legitimately
+    # need finer precision (dt, calibration values, sig2noise threshold,
+    # smoothn_p) -- a 2-decimal cap made sub-0.01 values impossible to
+    # enter at all, not just imprecise. Those fields deliberately override
+    # decimals; everything else still gets the uniform 2-decimal default.
     window = MainWindow()
     qtbot.addWidget(window)
     from PySide6.QtWidgets import QDoubleSpinBox
+    high_precision = {
+        window.settings_panel.dt_spin,
+        window.settings_panel.pixel_pitch_spin,
+        window.settings_panel.frame_dt_spin,
+        window.settings_panel.s2n_threshold_spin,
+        window.settings_panel.smoothn_p_spin,
+    }
     for panel in (window.project_panel, window.settings_panel, window.calibration_panel):
         for spin in panel.findChildren(QDoubleSpinBox):
-            assert spin.decimals() == 2, f"{spin} has {spin.decimals()} decimals, expected 2"
+            if spin in high_precision:
+                assert spin.decimals() > 2, f"{spin} expected to override the 2-decimal default"
+            else:
+                assert spin.decimals() == 2, f"{spin} has {spin.decimals()} decimals, expected 2"
+
+
+def test_calibration_settings_default_unset_but_settable(qtbot):
+    # CalibrationSettings (pixel_pitch_mm, frame_dt_s) previously had no
+    # GUI control anywhere, silently locking every GUI result to px/frame.
+    window = MainWindow()
+    qtbot.addWidget(window)
+    sp = window.settings_panel
+    default = sp.get_calibration_settings()
+    assert default.pixel_pitch_mm is None
+    assert default.frame_dt_s is None
+
+    sp.pixel_pitch_check.setChecked(True)
+    sp.pixel_pitch_spin.setValue(0.012345)
+    sp.frame_dt_check.setChecked(True)
+    sp.frame_dt_spin.setValue(0.002)
+    settings = sp.get_calibration_settings()
+    assert settings.pixel_pitch_mm == pytest.approx(0.012345)
+    assert settings.frame_dt_s == pytest.approx(0.002)
+
+
+def test_multiset_index_is_editable(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    pp = window.project_panel
+    assert pp.get_project_settings().multiset_index == 0
+    pp.multiset_index_spin.setValue(3)
+    assert pp.get_project_settings().multiset_index == 3
+
+
+def test_correlation_settings_exposes_all_calculation_fields(qtbot):
+    # correlation_method/deformation_method/interpolation_order (CPU) and
+    # batch_size/tile_margin_px (GPU) previously had no GUI control and
+    # were silently stuck at dataclass defaults.
+    window = MainWindow()
+    qtbot.addWidget(window)
+    sp = window.settings_panel
+
+    sp.correlation_method_combo.setCurrentText("linear")
+    sp.deformation_method_combo.setCurrentText("second image")
+    sp.interpolation_order_spin.setValue(1)
+    sp.batch_size_check.setChecked(True)
+    sp.batch_size_spin.setValue(128)
+    sp.tile_margin_check.setChecked(True)
+    sp.tile_margin_spin.setValue(200)
+
+    settings = sp.get_correlation_settings()
+    assert settings.correlation_method == "linear"
+    assert settings.deformation_method == "second image"
+    assert settings.interpolation_order == 1
+    assert settings.batch_size == 128
+    assert settings.tile_margin_px == 200
+
+    sp.batch_size_check.setChecked(False)
+    sp.tile_margin_check.setChecked(False)
+    settings = sp.get_correlation_settings()
+    assert settings.batch_size is None
+    assert settings.tile_margin_px is None
+
+
+def test_run_panel_populates_calibration_in_config(qtbot):
+    # run_panel._start_run must attach the settings panel's calibration
+    # settings to the assembled ProjectConfig -- confirmed missing before
+    # (ProjectConfig.calibration stayed at its default, unset, forever).
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.settings_panel.pixel_pitch_check.setChecked(True)
+    window.settings_panel.pixel_pitch_spin.setValue(0.05)
+
+    project = window.project_panel.get_project_settings()
+    correlation = window.settings_panel.get_correlation_settings()
+    validation = window.settings_panel.get_validation_settings()
+    post = window.settings_panel.get_postprocess_settings()
+    calibration = window.settings_panel.get_calibration_settings()
+
+    from piv_suite.config.schema import ProjectConfig
+    config = ProjectConfig(project=project, correlation=correlation,
+                            validation=validation, postprocess=post,
+                            calibration=calibration)
+    assert config.calibration.pixel_pitch_mm == 0.05
 
 
 def test_passes_table_has_no_internal_scrollbar(qtbot):
