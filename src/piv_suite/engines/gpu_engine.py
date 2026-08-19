@@ -186,6 +186,7 @@ def run_tiled(frame_a, frame_b, ctrl, init_raw_fn, n_tiles_y, n_tiles_x, margin_
     xs, ys, us, vs, valids = [], [], [], [], []
     elapsed_total = 0.0
     scaling_par = None
+    min_core = None
 
     for i, tile in enumerate(tiles):
         y0, y1, x0, x1 = tile["core"]
@@ -196,6 +197,27 @@ def run_tiled(frame_a, frame_b, ctrl, init_raw_fn, n_tiles_y, n_tiles_x, margin_
         process, tx, ty = init_raw_fn(tile_a.shape)
         if scaling_par is None:
             scaling_par = process.scaling_par
+            # Confirmed on real GPU hardware: a tile's core can be too
+            # small to safely exclude its halo, WITHOUT tripping piv_gpu's
+            # own too-small-to-process assertion (that only guards the
+            # padded region, not the core/lattice-alignment) -- at
+            # min_core well below min_search_size, the stitched output
+            # silently gained 120 extra, misaligned vectors on a real
+            # test frame (961 vs. the correct 841) instead of erroring or
+            # producing a clean gap. min_core >= min_search_size (the
+            # finest pass's own window size) was confirmed clean; smaller
+            # sizes were the ones that broke, so this check has real
+            # margin, not just the exact observed threshold.
+            min_core = min(t["core"][1] - t["core"][0] for t in tiles)
+            min_core = min(min_core, min(t["core"][3] - t["core"][2] for t in tiles))
+            if min_core < process.min_search_size:
+                raise ValueError(
+                    f"run_tiled: {n_tiles_y}x{n_tiles_x} tiles gives a smallest tile core of "
+                    f"{min_core}px, below the finest pass's window size ({process.min_search_size}px) "
+                    f"-- the stitched result would silently be wrong (extra/misaligned vectors), not "
+                    f"just less accurate. Use fewer tiles for this frame size, or a smaller finest "
+                    f"window/larger frame."
+                )
 
         t0 = time.time()
         u, v = process(tile_a, tile_b)
