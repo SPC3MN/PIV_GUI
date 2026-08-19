@@ -1,25 +1,39 @@
-"""Preview panel: runs the pipeline on just the first pair and renders it
-inline, replacing piv_common.preview_first_snapshot()'s blocking terminal
-y/N prompt. Settings can be tweaked and re-previewed as many times as
-needed before committing to a full batch run (gates run_panel's Run
-button via the `previewed` signal -- see main_window.py). Supports both
-planar (single camera) and stereo (two cameras, dewarped and combined via
-reconstruct_stereo) preview.
+"""Preview panel: runs the pipeline on one selected pair (defaulting to the
+first) and renders it inline, replacing piv_common.preview_first_snapshot()'s
+blocking terminal y/N prompt. Settings can be tweaked and re-previewed as
+many times as needed before committing to a full batch run (gates
+run_panel's Run button via the `previewed` signal -- see main_window.py).
+Supports both planar (single camera) and stereo (two cameras, dewarped and
+combined via reconstruct_stereo) preview.
+
+The plot itself (make_preview_figure) supports per-component (U, V, and W
+for stereo) filled contours with auto or manually-scaled colorbars, an
+optional vector overlay on top, and a choice of colormap -- see
+piv_suite.plotting.preview.
 """
 
-import numpy as np
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from PySide6.QtWidgets import (
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout,
+    QGroupBox, QHBoxLayout, QLabel, QProgressBar, QPushButton, QSizePolicy,
+    QVBoxLayout, QWidget,
+)
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QApplication, QLabel, QProgressBar, QPushButton, QVBoxLayout, QWidget
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+import numpy as np
 
 from piv_suite.calibration.camera_mapping import CameraMapping
 from piv_suite.config.legacy import to_cpu_settings, to_gpu_settings
 from piv_suite.engines.registry import get_engine_factory
-from piv_suite.io.davis_set import iter_pairs_from_set, iter_stereo_from_set, resolve_set_paths
-from piv_suite.io.loose_files import iter_pairs_from_loose_files, iter_stereo_from_loose_files
-from piv_suite.plotting.preview import make_preview_figure
+from piv_suite.io.davis_set import get_pair_from_set, get_stereo_from_set, list_pair_ids_from_set, resolve_set_paths
+from piv_suite.io.loose_files import (
+    get_pair_from_loose_files, get_stereo_from_loose_files,
+    list_pair_ids_from_loose_files, list_pair_ids_stereo_from_loose_files,
+)
+from piv_suite.plotting.preview import AVAILABLE_COLORMAPS, make_preview_figure
 from piv_suite.processing import pipeline
 from piv_suite.processing.postprocess import apply_calibration
+
+from ._util import style_spin
 
 
 def _build_engine(backend, frame_shape, correlation, validation):
@@ -38,11 +52,23 @@ class PreviewPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.canvas = None
+        self._range_rows = {}
         self._build_ui()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        self.preview_btn = QPushButton("Preview first pair")
+
+        pair_row = QHBoxLayout()
+        pair_row.addWidget(QLabel("Pair:"))
+        self.pair_combo = QComboBox()
+        self.pair_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        pair_row.addWidget(self.pair_combo, 1)
+        self.refresh_pairs_btn = QPushButton("Refresh pairs")
+        self.refresh_pairs_btn.clicked.connect(self._refresh_pairs)
+        pair_row.addWidget(self.refresh_pairs_btn)
+        layout.addLayout(pair_row)
+
+        self.preview_btn = QPushButton("Preview selected pair")
         self.preview_btn.clicked.connect(self._do_preview)
         layout.addWidget(self.preview_btn)
 
@@ -58,25 +84,118 @@ class PreviewPanel(QWidget):
         self.status_label = QLabel("No preview yet.")
         layout.addWidget(self.status_label)
 
+        layout.addWidget(self._build_plot_options_box())
+
         self.canvas_container = QVBoxLayout()
         layout.addLayout(self.canvas_container)
         layout.addStretch(1)
 
-    def _first_pair_planar(self, project):
-        if project.input_mode == "set":
-            set_paths, _ = resolve_set_paths(project.input_path)
-            return next(iter(iter_pairs_from_set(set_paths[0], project.multiset_index)))
-        return next(iter(iter_pairs_from_loose_files(
-            project.input_path, project.loose_glob, project.suffix_a, project.suffix_b)))
+    def _build_plot_options_box(self):
+        box = QGroupBox("Plot options")
+        box_layout = QVBoxLayout(box)
 
-    def _first_pair_stereo(self, project):
+        toggle_row = QHBoxLayout()
+        self.show_contour_check = QCheckBox("Contours")
+        self.show_contour_check.setChecked(True)
+        self.show_vectors_check = QCheckBox("Vectors")
+        self.show_vectors_check.setChecked(False)
+        toggle_row.addWidget(self.show_contour_check)
+        toggle_row.addWidget(self.show_vectors_check)
+        toggle_row.addWidget(QLabel("Colormap:"))
+        self.cmap_combo = QComboBox()
+        self.cmap_combo.addItems(AVAILABLE_COLORMAPS)
+        toggle_row.addWidget(self.cmap_combo)
+        toggle_row.addStretch(1)
+        box_layout.addLayout(toggle_row)
+
+        # Per-component (U, V, and stereo-only W) color-range controls --
+        # auto-scaled (min/max of that pair's data) by default, but each
+        # component can be pinned to a manual range independently (e.g. to
+        # compare pairs on a fixed scale instead of one that jumps around
+        # per-pair).
+        range_grid = QGridLayout()
+        range_grid.addWidget(QLabel("Component"), 0, 0)
+        range_grid.addWidget(QLabel("Auto range"), 0, 1)
+        range_grid.addWidget(QLabel("Min"), 0, 2)
+        range_grid.addWidget(QLabel("Max"), 0, 3)
+        for row, name in enumerate(("U", "V", "W"), start=1):
+            label = QLabel(name)
+            auto_check = QCheckBox()
+            auto_check.setChecked(True)
+            min_spin = style_spin(QDoubleSpinBox())
+            min_spin.setRange(-1e6, 1e6)
+            min_spin.setEnabled(False)
+            max_spin = style_spin(QDoubleSpinBox())
+            max_spin.setRange(-1e6, 1e6)
+            max_spin.setEnabled(False)
+            auto_check.toggled.connect(
+                lambda checked, mn=min_spin, mx=max_spin: (mn.setEnabled(not checked), mx.setEnabled(not checked)))
+            range_grid.addWidget(label, row, 0)
+            range_grid.addWidget(auto_check, row, 1)
+            range_grid.addWidget(min_spin, row, 2)
+            range_grid.addWidget(max_spin, row, 3)
+            self._range_rows[name] = (label, auto_check, min_spin, max_spin)
+        box_layout.addLayout(range_grid)
+
+        self.set_stereo_mode(False)
+        return box
+
+    def set_stereo_mode(self, is_stereo):
+        """Called by main_window when the project Mode (planar/stereo)
+        changes -- the W range row only applies to stereo."""
+        for w in self._range_rows["W"]:
+            w.setVisible(is_stereo)
+
+    def _get_ranges(self):
+        ranges = {}
+        for name, (_label, auto_check, min_spin, max_spin) in self._range_rows.items():
+            if not auto_check.isChecked():
+                ranges[name] = (min_spin.value(), max_spin.value())
+        return ranges
+
+    def _list_pair_ids(self, project):
         if project.input_mode == "set":
             set_paths, _ = resolve_set_paths(project.input_path)
-            return next(iter(iter_stereo_from_set(
-                set_paths[0], project.multiset_index, project.stereo_frame_order)))
-        return next(iter(iter_stereo_from_loose_files(
-            project.input_path, project.loose_glob,
-            project.suffix_cam0, project.suffix_cam1, project.stereo_frame_order)))
+            # a .set's pair ids are index-based off the same underlying
+            # dataset for both planar and stereo -- one listing works for
+            # either mode.
+            return list_pair_ids_from_set(set_paths[0], project.multiset_index)
+        if project.mode == "stereo":
+            return list_pair_ids_stereo_from_loose_files(
+                project.input_path, project.loose_glob, project.suffix_cam0, project.suffix_cam1)
+        return list_pair_ids_from_loose_files(
+            project.input_path, project.loose_glob, project.suffix_a, project.suffix_b)
+
+    def _refresh_pairs(self):
+        main_window = self.window()
+        project = main_window.project_panel.get_project_settings()
+        try:
+            pair_ids = self._list_pair_ids(project)
+        except Exception as e:
+            self.status_label.setText(f"Couldn't list pairs: {e}")
+            return
+        self.pair_combo.clear()
+        self.pair_combo.addItems(pair_ids)
+        if pair_ids:
+            self.pair_combo.setCurrentIndex(0)
+            self.status_label.setText(f"{len(pair_ids)} pair(s) found.")
+        else:
+            self.status_label.setText("No pairs found for the current input settings.")
+
+    def _first_pair_planar(self, project, index):
+        if project.input_mode == "set":
+            set_paths, _ = resolve_set_paths(project.input_path)
+            return get_pair_from_set(set_paths[0], index, project.multiset_index)
+        return get_pair_from_loose_files(
+            project.input_path, index, project.loose_glob, project.suffix_a, project.suffix_b)
+
+    def _first_pair_stereo(self, project, index):
+        if project.input_mode == "set":
+            set_paths, _ = resolve_set_paths(project.input_path)
+            return get_stereo_from_set(set_paths[0], index, project.multiset_index, project.stereo_frame_order)
+        return get_stereo_from_loose_files(
+            project.input_path, index, project.loose_glob,
+            project.suffix_cam0, project.suffix_cam1, project.stereo_frame_order)
 
     def _set_canvas(self, fig):
         if self.canvas is not None:
@@ -86,6 +205,14 @@ class PreviewPanel(QWidget):
 
     def _do_preview(self):
         main_window = self.window()
+        if self.pair_combo.count() == 0:
+            self._refresh_pairs()
+        if self.pair_combo.count() == 0:
+            self.status_label.setText("Preview failed: no pairs found for the current input settings.")
+            self.previewed.emit(False)
+            return
+        index = self.pair_combo.currentIndex()
+
         # process_frames() runs synchronously on the GUI thread (a single
         # pair is fast enough that a background thread wasn't worth the
         # complexity) -- the progress bar wouldn't actually paint before
@@ -104,9 +231,9 @@ class PreviewPanel(QWidget):
             calibration = main_window.settings_panel.get_calibration_settings()
 
             if project.mode == "stereo":
-                self._preview_stereo(main_window, project, correlation, validation, post, calibration)
+                self._preview_stereo(main_window, project, correlation, validation, post, calibration, index)
             else:
-                self._preview_planar(project, correlation, validation, post, calibration)
+                self._preview_planar(project, correlation, validation, post, calibration, index)
             self.previewed.emit(True)
         except Exception as e:
             self.status_label.setText(f"Preview failed: {e}")
@@ -116,8 +243,8 @@ class PreviewPanel(QWidget):
             self.progress_bar.setVisible(False)
             self.preview_btn.setEnabled(True)
 
-    def _preview_planar(self, project, correlation, validation, post, calibration):
-        pair_id, frame_a, frame_b = self._first_pair_planar(project)
+    def _preview_planar(self, project, correlation, validation, post, calibration, index):
+        pair_id, frame_a, frame_b = self._first_pair_planar(project, index)
         engine, x, y = _build_engine(project.backend, frame_a.shape, correlation, validation)
 
         u, v, valid, elapsed, rejects = pipeline.process_frames(engine, frame_a, frame_b, post.for_pipeline())
@@ -129,10 +256,15 @@ class PreviewPanel(QWidget):
             f"(range/residual rejected {rejects['range_residual']}, "
             f"std-dev rejected {rejects['std_dev']})"
         )
-        fig = make_preview_figure("planar", x, y, u, v, valid, title=f"Preview -- {pair_id}")
+        fig = make_preview_figure(
+            "planar", x, y, u, v, valid, title=f"Preview -- {pair_id}",
+            show_contour=self.show_contour_check.isChecked(),
+            show_vectors=self.show_vectors_check.isChecked(),
+            cmap=self.cmap_combo.currentText(), ranges=self._get_ranges(),
+        )
         self._set_canvas(fig)
 
-    def _preview_stereo(self, main_window, project, correlation, validation, post, calibration):
+    def _preview_stereo(self, main_window, project, correlation, validation, post, calibration, index):
         stereo_settings = main_window.calibration_panel.get_settings()
         cam0 = CameraMapping(
             stereo_settings.cam0_mapping.x0, stereo_settings.cam0_mapping.x_span,
@@ -147,7 +279,7 @@ class PreviewPanel(QWidget):
             stereo_settings.cam1_mapping.name,
         )
 
-        pair_id, fa0, fb0, fa1, fb1 = self._first_pair_stereo(project)
+        pair_id, fa0, fb0, fa1, fb1 = self._first_pair_stereo(project, index)
         dw_a0 = cam0.dewarp_image(fa0, stereo_settings.world_shape, stereo_settings.dewarp_order)
         dw_b0 = cam0.dewarp_image(fb0, stereo_settings.world_shape, stereo_settings.dewarp_order)
         dw_a1 = cam1.dewarp_image(fa1, stereo_settings.world_shape, stereo_settings.dewarp_order)
@@ -173,5 +305,10 @@ class PreviewPanel(QWidget):
             f"(range/residual rejected {r1['range_residual'] + r2['range_residual']}, "
             f"std-dev rejected {r1['std_dev'] + r2['std_dev']})"
         )
-        fig = make_preview_figure("stereo", x, y, U, V, valid, w=W, title=f"Stereo preview -- {pair_id}")
+        fig = make_preview_figure(
+            "stereo", x, y, U, V, valid, w=W, title=f"Stereo preview -- {pair_id}",
+            show_contour=self.show_contour_check.isChecked(),
+            show_vectors=self.show_vectors_check.isChecked(),
+            cmap=self.cmap_combo.currentText(), ranges=self._get_ranges(),
+        )
         self._set_canvas(fig)

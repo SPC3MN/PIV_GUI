@@ -44,19 +44,26 @@ def set_label(set_path):
     return base
 
 
-def iter_pairs_from_set(set_path, multiset_index=0):
-    """Yield (pair_id, frame_a, frame_b) from a DaVis image set (planar)."""
+def _open_dataset(set_path, multiset_index, quiet=False):
+    """Shared multi-set-vs-single-set resolution for all four
+    iter/list/get functions below. Returns (dataset, owns_dataset) --
+    owns_dataset tells the caller whether it's responsible for closing
+    it (a multi-set's sub-dataset is a view into the parent `sets`
+    object, which itself doesn't need (and can't sensibly) be closed
+    per sub-dataset)."""
     import lvpyio as lv
     if lv.is_multiset(set_path):
-        print(f"[info] '{set_path}' is a multi-set (e.g. multiple cameras) "
-              f"-- using sub-set index {multiset_index}")
+        if not quiet:
+            print(f"[info] '{set_path}' is a multi-set (e.g. multiple cameras) "
+                  f"-- using sub-set index {multiset_index}")
         sets = lv.read_set(set_path)
-        dataset = sets[multiset_index]
-        owns_dataset = False
-    else:
-        dataset = lv.read_set(set_path)
-        owns_dataset = True
+        return sets[multiset_index], False
+    return lv.read_set(set_path), True
 
+
+def iter_pairs_from_set(set_path, multiset_index=0):
+    """Yield (pair_id, frame_a, frame_b) from a DaVis image set (planar)."""
+    dataset, owns_dataset = _open_dataset(set_path, multiset_index)
     try:
         n = len(dataset)
         for i in range(n):
@@ -71,17 +78,7 @@ def iter_pairs_from_set(set_path, multiset_index=0):
 
 def iter_stereo_from_set(set_path, multiset_index=0, stereo_frame_order="camera_major"):
     """Yield (pair_id, fa0, fb0, fa1, fb1) from a DaVis stereo image set."""
-    import lvpyio as lv
-    if lv.is_multiset(set_path):
-        print(f"[info] '{set_path}' is a multi-set -- using sub-set "
-              f"index {multiset_index}")
-        sets = lv.read_set(set_path)
-        dataset = sets[multiset_index]
-        owns_dataset = False
-    else:
-        dataset = lv.read_set(set_path)
-        owns_dataset = True
-
+    dataset, owns_dataset = _open_dataset(set_path, multiset_index)
     try:
         n = len(dataset)
         for i in range(n):
@@ -89,6 +86,43 @@ def iter_stereo_from_set(set_path, multiset_index=0, stereo_frame_order="camera_
             buf = dataset[i]
             fa0, fb0, fa1, fb1 = frames_from_stereo_buffer(buf, stereo_frame_order)
             yield pair_id, fa0, fb0, fa1, fb1
+    finally:
+        if owns_dataset:
+            dataset.close()
+
+
+def list_pair_ids_from_set(set_path, multiset_index=0):
+    """Cheap: just the pair ids (e.g. for a GUI pair-picker), without
+    loading any frame image data."""
+    dataset, owns_dataset = _open_dataset(set_path, multiset_index, quiet=True)
+    try:
+        return [f"{i:04d}" for i in range(len(dataset))]
+    finally:
+        if owns_dataset:
+            dataset.close()
+
+
+def get_pair_from_set(set_path, index, multiset_index=0):
+    """Load a single (pair_id, frame_a, frame_b) at `index` directly,
+    without iterating/loading every pair before it."""
+    dataset, owns_dataset = _open_dataset(set_path, multiset_index, quiet=True)
+    try:
+        buf = dataset[index]
+        frame_a, frame_b = frames_from_buffer(buf)
+        return f"{index:04d}", frame_a, frame_b
+    finally:
+        if owns_dataset:
+            dataset.close()
+
+
+def get_stereo_from_set(set_path, index, multiset_index=0, stereo_frame_order="camera_major"):
+    """Load a single (pair_id, fa0, fb0, fa1, fb1) at `index` directly,
+    without iterating/loading every pair before it."""
+    dataset, owns_dataset = _open_dataset(set_path, multiset_index, quiet=True)
+    try:
+        buf = dataset[index]
+        fa0, fb0, fa1, fb1 = frames_from_stereo_buffer(buf, stereo_frame_order)
+        return f"{index:04d}", fa0, fb0, fa1, fb1
     finally:
         if owns_dataset:
             dataset.close()

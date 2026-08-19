@@ -8,7 +8,9 @@ import pytest
 
 imageio = pytest.importorskip("imageio.v3")
 
-from piv_suite.io.loose_files import iter_pairs_from_loose_files
+from piv_suite.io.loose_files import (
+    get_pair_from_loose_files, iter_pairs_from_loose_files, list_pair_ids_from_loose_files,
+)
 
 
 def _write_png(path, value):
@@ -46,3 +48,35 @@ def test_suffix_matching_no_match_still_exits(tmp_path):
     with pytest.raises(SystemExit):
         list(iter_pairs_from_loose_files(str(tmp_path), loose_glob="*.tif",
                                           suffix_a="_a.tif", suffix_b="_b.tif"))
+
+
+def test_list_pair_ids_is_cheap_and_matches_iter_order(tmp_path):
+    # unlike iter_pairs_from_loose_files, list_pair_ids_from_loose_files
+    # must not raise/exit on zero matches (a GUI pair-picker should show
+    # "no pairs found", not crash) and must not read any image data.
+    assert list_pair_ids_from_loose_files(str(tmp_path), loose_glob="*.tif",
+                                           suffix_a="_a.tif", suffix_b="_b.tif") == []
+
+    _write_png(tmp_path / "0001_a.tif", 10)
+    _write_png(tmp_path / "0001_b.tif", 20)
+    _write_png(tmp_path / "0002_a.tif", 30)
+    _write_png(tmp_path / "0002_b.tif", 40)
+
+    ids = list_pair_ids_from_loose_files(str(tmp_path), loose_glob="*.tif",
+                                          suffix_a="_a.tif", suffix_b="_b.tif")
+    expected_ids = [pid for pid, _, _ in iter_pairs_from_loose_files(
+        str(tmp_path), loose_glob="*.tif", suffix_a="_a.tif", suffix_b="_b.tif")]
+    assert ids == expected_ids == ["0001", "0002"]
+
+
+def test_get_pair_from_loose_files_loads_only_the_requested_index(tmp_path):
+    _write_png(tmp_path / "0001_a.tif", 10)
+    _write_png(tmp_path / "0001_b.tif", 20)
+    _write_png(tmp_path / "0002_a.tif", 30)
+    _write_png(tmp_path / "0002_b.tif", 40)
+
+    pair_id, frame_a, frame_b = get_pair_from_loose_files(
+        str(tmp_path), 1, loose_glob="*.tif", suffix_a="_a.tif", suffix_b="_b.tif")
+    assert pair_id == "0002"
+    assert frame_a[0, 0] == 30
+    assert frame_b[0, 0] == 40

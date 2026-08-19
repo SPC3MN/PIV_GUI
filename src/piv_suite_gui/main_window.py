@@ -73,3 +73,9 @@ class MainWindow(QMainWindow):
         # preview_first_snapshot()'s "confirm before batch" UX -- just
         # inline instead of a blocking terminal prompt (see preview_panel.py).
         self.preview_panel.previewed.connect(self.run_panel.set_run_enabled)
+
+        # the preview plot's W color-range row only makes sense in stereo
+        # mode (planar has no W component at all)
+        self.preview_panel.set_stereo_mode(self.project_panel.is_stereo)
+        self.project_panel.planar_radio.toggled.connect(
+            lambda checked: self.preview_panel.set_stereo_mode(not checked))

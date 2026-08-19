@@ -35,7 +35,7 @@ def test_preview_shows_progress_bar_while_running_and_hides_after(qtbot):
 
     seen_visible_during_run = []
 
-    def fake_preview_planar(project, correlation, validation, post, calibration):
+    def fake_preview_planar(project, correlation, validation, post, calibration, index):
         seen_visible_during_run.append(panel.progress_bar.isVisible())
         seen_visible_during_run.append(panel.preview_btn.isEnabled())
 
@@ -49,12 +49,62 @@ def test_preview_shows_progress_bar_while_running_and_hides_after(qtbot):
             "get_calibration_settings": lambda self: None,
         })(),
     })()
+    panel.pair_combo.addItem("0000")  # skip _refresh_pairs -- the fake window has no real project I/O
 
     panel._do_preview()
 
     assert seen_visible_during_run == [True, False]
     assert panel.progress_bar.isVisible() is False
     assert panel.preview_btn.isEnabled() is True
+
+
+def test_preview_panel_pair_selector_and_plot_options_exist(qtbot):
+    from piv_suite_gui.widgets.preview_panel import PreviewPanel
+
+    panel = PreviewPanel()
+    qtbot.addWidget(panel)
+
+    assert panel.pair_combo.count() == 0
+    assert panel.show_contour_check.isChecked() is True   # contours on by default
+    assert panel.show_vectors_check.isChecked() is False  # vectors off by default
+    assert panel.cmap_combo.count() > 1
+
+    # U/V/W range rows, each auto-scaled (spins disabled) by default
+    for name in ("U", "V", "W"):
+        _label, auto_check, min_spin, max_spin = panel._range_rows[name]
+        assert auto_check.isChecked() is True
+        assert min_spin.isEnabled() is False
+        assert max_spin.isEnabled() is False
+
+
+def test_preview_panel_range_row_toggles_manual_spins(qtbot):
+    from piv_suite_gui.widgets.preview_panel import PreviewPanel
+
+    panel = PreviewPanel()
+    qtbot.addWidget(panel)
+
+    _label, auto_check, min_spin, max_spin = panel._range_rows["U"]
+    auto_check.setChecked(False)
+    assert min_spin.isEnabled() is True
+    assert max_spin.isEnabled() is True
+
+    min_spin.setValue(-2.5)
+    max_spin.setValue(2.5)
+    ranges = panel._get_ranges()
+    assert ranges["U"] == (-2.5, 2.5)
+    assert "V" not in ranges  # still auto
+
+
+def test_preview_panel_w_range_row_hidden_until_stereo(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    pp = window.preview_panel
+    label, auto_check, min_spin, max_spin = pp._range_rows["W"]
+    assert not label.isVisible()
+
+    window.project_panel.stereo_radio.setChecked(True)
+    assert label.isVisible()
 
 
 def test_project_panel_default_settings(qtbot):
