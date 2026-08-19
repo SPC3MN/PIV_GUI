@@ -77,6 +77,12 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
+[UninstallDelete]
+; gpu_setup_log.txt is written at runtime by [Code] (see GpuLogFlush), not
+; declared in [Files] -- without this, the uninstaller wouldn't know about
+; it and {app} could be left behind non-empty after uninstall.
+Type: files; Name: "{app}\gpu_setup_log.txt"
+
 [Code]
 var
   GpuPage: TInputOptionWizardPage;
@@ -133,61 +139,157 @@ begin
   end;
 end;
 
+var
+  GpuLogLines: TArrayOfString;
+
+procedure GpuLog(const S: String);
+begin
+  SetArrayLength(GpuLogLines, GetArrayLength(GpuLogLines) + 1);
+  GpuLogLines[GetArrayLength(GpuLogLines) - 1] := GetDateTimeString('yyyy-mm-dd hh:nn:ss', #0, #0) + '  ' + S;
+end;
+
+procedure GpuLogOutput(const Prefix: String; const Output: TExecOutput);
+var
+  i: Integer;
+begin
+  for i := 0 to GetArrayLength(Output.StdOut) - 1 do
+    GpuLog(Prefix + ' [stdout] ' + Output.StdOut[i]);
+  for i := 0 to GetArrayLength(Output.StdErr) - 1 do
+    GpuLog(Prefix + ' [stderr] ' + Output.StdErr[i]);
+end;
+
+procedure GpuLogFlush;
+begin
+  SaveStringsToFile(ExpandConstant('{app}\gpu_setup_log.txt'), GpuLogLines, False);
+end;
+
+// A bare MsgBox() blocks forever on a silent/unattended install (e.g.
+// /VERYSILENT, or a scripted /GPUCUDA= run) -- /SUPPRESSMSGBOXES only
+// suppresses Inno Setup's OWN built-in dialogs, not custom MsgBox calls
+// from [Code], and there's no one there to click it. Confirmed this
+// hangs a silent run indefinitely. GpuLogFlush already wrote the same
+// information to gpu_setup_log.txt, so silent runs can skip the dialog
+// entirely and still be fully diagnosable after the fact.
+procedure GpuMsgBox(const Msg: String; Kind: TMsgBoxType; Buttons: Cardinal);
+begin
+  if not WizardSilent then
+    MsgBox(Msg, Kind, Buttons);
+end;
+
 // Runs the bundled embeddable Python's pip to fetch cupy+cuda-pathfinder
 // straight into {app}\_internal (PyInstaller's onedir import location),
 // then downloads+extracts openpiv-python-gpu's openpiv_gpu package the
 // same way. Failure here is reported but does NOT roll back the
 // already-successful CPU install -- the app still works CPU-only.
+//
+// Writes {app}\gpu_setup_log.txt with every step's captured stdout/stderr
+// -- confirmed on real hardware that this step can hit a TRANSIENT file
+// lock (antivirus real-time scanning a just-downloaded file) rather than
+// a real failure, so extraction retries up to 3 times with a delay
+// before giving up; error MsgBoxes only ever showed an exit code before,
+// with no way to tell a real failure from this kind of transient one.
 procedure InstallGpuPackages(Choice: Integer);
 var
-  PyExe, PkgName, ZipPath: String;
-  ResultCode: Integer;
-  DownloadOk: Boolean;
+  PyExe, PkgName, ZipPath, InternalDir: String;
+  ResultCode, Attempt: Integer;
+  DownloadOk, PipOk, ExtractOk: Boolean;
+  Output: TExecOutput;
 begin
+  SetArrayLength(GpuLogLines, 0);
   PyExe := ExpandConstant('{tmp}\pyembed\python.exe');
+  InternalDir := ExpandConstant('{app}\_internal');
   PkgName := CudaPackageName(Choice);
+  GpuLog('Starting GPU setup for choice=' + IntToStr(Choice) + ' (' + PkgName + ')');
+
+  if not FileExists(PyExe) then
+  begin
+    GpuLog('ERROR: bundled Python not found at ' + PyExe);
+    GpuLogFlush;
+    GpuMsgBox('GPU setup could not start -- the bundled Python tool is missing (' + PyExe + '). ' +
+      'PIV Suite is installed and works CPU-only. See gpu_setup_log.txt in the install folder.',
+      mbError, MB_OK);
+    Exit;
+  end;
   if PkgName = '' then Exit;
 
   GpuProgressPage.Show;
   try
     GpuProgressPage.SetText('Downloading ' + PkgName + ' (CUDA Python bindings)...', '');
-    if not Exec(PyExe,
-      '-m pip install --target "' + ExpandConstant('{app}\_internal') +
+    GpuLog('Running pip install --target "' + InternalDir + '" ' + PkgName + ' cuda-pathfinder');
+    PipOk := ExecAndCaptureOutput(PyExe,
+      '-m pip install --target "' + InternalDir +
       '" --no-warn-script-location --no-deps ' + PkgName + ' cuda-pathfinder',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode, Output);
+    GpuLogOutput('pip', Output);
+    if not PipOk or (ResultCode <> 0) then
     begin
-      MsgBox('Downloading ' + PkgName + ' failed (exit code ' + IntToStr(ResultCode) + '). ' +
-        'PIV Suite is installed and works CPU-only; you can re-run this installer to retry GPU setup.',
+      GpuLog('ERROR: pip install failed, exit code ' + IntToStr(ResultCode));
+      GpuLogFlush;
+      GpuMsgBox('Downloading ' + PkgName + ' failed (exit code ' + IntToStr(ResultCode) + '). ' +
+        'PIV Suite is installed and works CPU-only; you can re-run this installer to retry GPU setup. ' +
+        'See gpu_setup_log.txt in the install folder for details.',
         mbError, MB_OK);
       Exit;
     end;
+    GpuLog('pip install succeeded');
 
     GpuProgressPage.SetText('Downloading openpiv-python-gpu...', '');
     ZipPath := ExpandConstant('{tmp}\openpiv_gpu.zip');
+    GpuLog('Downloading openpiv-python-gpu zip to ' + ZipPath);
     DownloadOk := DownloadTemporaryFile(
       'https://github.com/ali-sh-96/openpiv-python-gpu/archive/refs/heads/master.zip',
       'openpiv_gpu.zip', '', @OnDownloadProgress) > 0;
     if not DownloadOk then
     begin
-      MsgBox('Downloading openpiv-python-gpu failed -- check your internet connection. ' +
-        'cupy installed OK, but the GPU backend needs both; re-run this installer to retry.',
+      GpuLog('ERROR: openpiv-python-gpu download failed');
+      GpuLogFlush;
+      GpuMsgBox('Downloading openpiv-python-gpu failed -- check your internet connection. ' +
+        'cupy installed OK, but the GPU backend needs both; re-run this installer to retry. ' +
+        'See gpu_setup_log.txt in the install folder for details.',
         mbError, MB_OK);
       Exit;
     end;
+    GpuLog('Download succeeded');
 
     GpuProgressPage.SetText('Extracting openpiv-python-gpu...', '');
-    if not Exec(PyExe,
-      'fetch_openpiv_gpu.py "' + ZipPath + '" "' + ExpandConstant('{app}\_internal') + '"',
-      ExpandConstant('{tmp}\pyembed'), SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+    ExtractOk := False;
+    for Attempt := 1 to 3 do
     begin
-      MsgBox('Extracting openpiv-python-gpu failed (exit code ' + IntToStr(ResultCode) + '). ' +
-        'PIV Suite is installed and works CPU-only; you can re-run this installer to retry GPU setup.',
+      GpuLog('Extraction attempt ' + IntToStr(Attempt));
+      ExtractOk := ExecAndCaptureOutput(PyExe,
+        'fetch_openpiv_gpu.py "' + ZipPath + '" "' + InternalDir + '"',
+        ExpandConstant('{tmp}\pyembed'), SW_HIDE, ewWaitUntilTerminated, ResultCode, Output);
+      GpuLogOutput('extract#' + IntToStr(Attempt), Output);
+      ExtractOk := ExtractOk and (ResultCode = 0);
+      if ExtractOk then
+        Break;
+      // A transient AV-scan lock on the just-downloaded zip is the known
+      // cause here (confirmed manually on real hardware) -- back off and
+      // retry rather than failing on the first attempt.
+      GpuLog('Extraction attempt ' + IntToStr(Attempt) + ' failed (exit code ' + IntToStr(ResultCode) + '), retrying after delay');
+      Sleep(2000);
+    end;
+    if not ExtractOk then
+    begin
+      GpuLog('ERROR: extraction failed after 3 attempts');
+      GpuLogFlush;
+      GpuMsgBox('Extracting openpiv-python-gpu failed after 3 attempts (exit code ' + IntToStr(ResultCode) + '). ' +
+        'PIV Suite is installed and works CPU-only; you can re-run this installer to retry GPU setup. ' +
+        'See gpu_setup_log.txt in the install folder for details.',
         mbError, MB_OK);
       Exit;
     end;
+    GpuLog('Extraction succeeded');
+    GpuLog('GPU setup completed successfully');
+    GpuLogFlush;
   finally
     GpuProgressPage.Hide;
   end;
+
+  GpuMsgBox('GPU support for ' + PkgName + ' installed successfully. Note this still requires a ' +
+    'matching NVIDIA CUDA Toolkit already installed separately (developer.nvidia.com/cuda-downloads) ' +
+    '-- the GPU option in PIV Suite will only work if that''s present and matches.',
+    mbInformation, MB_OK);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

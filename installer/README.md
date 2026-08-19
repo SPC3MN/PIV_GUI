@@ -76,3 +76,35 @@ file itself:**
 For scripted/silent deployments, `/GPUCUDA=11|12|13` on the installer's
 command line selects a CUDA version without showing the wizard page
 (omit it, or CPU-only stays the default under `/VERYSILENT`).
+
+## Debugging a failed GPU setup
+
+`{app}\gpu_setup_log.txt` (e.g. `%LOCALAPPDATA%\Programs\PIV Suite\
+gpu_setup_log.txt`) records every GPU setup step's captured stdout/
+stderr, written whether setup succeeds or fails -- check it first if the
+GPU option stays greyed out after a CUDA version was selected. It's
+regenerated on every install-time GPU setup attempt (re-running the
+installer overwrites it) and removed on uninstall.
+
+Two real bugs were found and fixed by testing this path repeatedly on
+real hardware, worth knowing if a similar issue resurfaces:
+
+- **Extraction can hit a transient file lock.** Antivirus real-time
+  scanning a just-downloaded file (the openpiv-python-gpu zip) can
+  briefly lock it, making the immediate extraction attempt fail with a
+  permission error even though nothing is actually wrong -- confirmed by
+  hitting this manually multiple times while developing this feature.
+  `InstallGpuPackages` now retries extraction up to 3 times with a 2s
+  delay between attempts before giving up.
+- **A custom `MsgBox` blocks forever on a silent/unattended install.**
+  `/SUPPRESSMSGBOXES` only suppresses Inno Setup's own built-in dialogs,
+  not custom `MsgBox` calls from `[Code]` -- with no one there to click
+  it, a silent run (or a scripted `/GPUCUDA=` deployment) would hang
+  indefinitely waiting for input that never comes. All GPU-setup
+  messages now go through `GpuMsgBox`, which checks `WizardSilent` first
+  and skips the dialog on unattended runs -- the log file already has
+  the same information, so nothing is lost.
+
+Stress-tested with 5 consecutive silent `/GPUCUDA=13` installs after
+these fixes: all 5 succeeded cleanly with no retries needed and no
+hangs.
