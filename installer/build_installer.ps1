@@ -1,22 +1,31 @@
 # Builds the Windows installer for PIV Suite (CPU backend).
 #
-# Two-stage build:
-#   1. PyInstaller bundles the venv's piv_suite_gui app into a standalone
+# Three-stage build:
+#   1. prepare_gpu_assets.ps1 bundles a minimal pip-capable Python
+#      (installer\assets\python-embed\) -- an install-time TOOL for
+#      fetching cupy/openpiv_gpu, never run as the app itself. Skipped if
+#      already prepared.
+#   2. PyInstaller bundles the venv's piv_suite_gui app into a standalone
 #      --onedir folder (installer\dist\PIV_Suite\) -- no Python install
 #      needed on the target machine.
-#   2. Inno Setup (ISCC.exe) wraps that folder into a single installer
+#   3. Inno Setup (ISCC.exe) wraps that folder into a single installer
 #      exe (installer\Output\PIV_Suite_Setup_<version>.exe) with Start
-#      Menu shortcuts and a proper uninstaller.
+#      Menu shortcuts, an uninstaller, and an optional GPU-package
+#      install step (see piv_suite.iss).
 #
 # Prerequisites (one-time):
 #   - The project's own .venv, with `pip install -e .[gui]` already done
 #   - pip install pyinstaller   (into that same .venv)
 #   - Inno Setup 6: winget install --id JRSoftware.InnoSetup -e
 #
-# GPU backend (cupy + openpiv-python-gpu) is deliberately NOT bundled --
-# see piv_suite.iss's header comment for why. Run this from the repo root
-# or from installer\ directly; paths below are relative to this script's
-# own location either way.
+# The CPU/GUI app itself is bundled as-is; cupy/openpiv-python-gpu are
+# NOT baked into the installer file -- the installer downloads them at
+# INSTALL time if the user opts into a CUDA version, since they need to
+# match cp313-win_amd64 anyway and bundling all CUDA variants would
+# balloon the installer file to gigabytes. See piv_suite.iss's header
+# comment for the full reasoning. Run this from the repo root or from
+# installer\ directly; paths below are relative to this script's own
+# location either way.
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
@@ -33,7 +42,11 @@ if (-not $iscc) {
     throw "ISCC.exe (Inno Setup) not found -- run: winget install --id JRSoftware.InnoSetup -e"
 }
 
-Write-Host "== Stage 1/2: PyInstaller bundle ==" -ForegroundColor Cyan
+Write-Host "== Stage 1/3: GPU install-time assets ==" -ForegroundColor Cyan
+& (Join-Path $PSScriptRoot "prepare_gpu_assets.ps1")
+if ($LASTEXITCODE -ne 0) { throw "prepare_gpu_assets.ps1 failed (exit $LASTEXITCODE)" }
+
+Write-Host "== Stage 2/3: PyInstaller bundle ==" -ForegroundColor Cyan
 & $venvPyInstaller --noconfirm --windowed --name "PIV_Suite" `
     --distpath installer\dist --workpath installer\build --specpath installer `
     --exclude-module cupy --exclude-module cupyx --exclude-module cupy_backends --exclude-module openpiv_gpu `
@@ -46,7 +59,7 @@ Write-Host "== Stage 1/2: PyInstaller bundle ==" -ForegroundColor Cyan
     "src\piv_suite_gui\app.py"
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed (exit $LASTEXITCODE)" }
 
-Write-Host "== Stage 2/2: Inno Setup installer ==" -ForegroundColor Cyan
+Write-Host "== Stage 3/3: Inno Setup installer ==" -ForegroundColor Cyan
 & $iscc "installer\piv_suite.iss"
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup compile failed (exit $LASTEXITCODE)" }
 
