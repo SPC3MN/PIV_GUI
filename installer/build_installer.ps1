@@ -46,11 +46,31 @@ Write-Host "== Stage 1/3: GPU install-time assets ==" -ForegroundColor Cyan
 & (Join-Path $PSScriptRoot "prepare_gpu_assets.ps1")
 if ($LASTEXITCODE -ne 0) { throw "prepare_gpu_assets.ps1 failed (exit $LASTEXITCODE)" }
 
+# --hidden-import=graphlib: cupy imports this stdlib module internally
+# (cupy._core._scalar -> ... -> graphlib), but PyInstaller's static
+# analysis can't see that need since cupy itself is --exclude-module'd
+# from this build (fetched separately at install time, see piv_suite.iss)
+# -- confirmed on real hardware: without this, cupy fails with
+# "ModuleNotFoundError: No module named 'graphlib'" INSIDE the frozen
+# app even though the exact same cupy install works fine from a normal
+# venv, and is_gpu_available() silently reports False with no visible
+# error (see gpu_engine.py's is_gpu_available() for the diagnostic log
+# that surfaced this).
+#
+# --copy-metadata=imageio: imageio/__init__.py calls
+# importlib.metadata.version('imageio') on itself at import time to set
+# its own __version__ -- PyInstaller doesn't bundle a package's
+# .dist-info metadata folder by default unless told to, so this raised
+# "No package metadata was found for imageio" the first time the CPU
+# preview path (which imports openpiv -> scikit-image -> imageio) ran
+# in the frozen app, despite working fine unfrozen.
 Write-Host "== Stage 2/3: PyInstaller bundle ==" -ForegroundColor Cyan
 & $venvPyInstaller --noconfirm --windowed --name "PIV_Suite" `
     --distpath installer\dist --workpath installer\build --specpath installer `
     --exclude-module cupy --exclude-module cupyx --exclude-module cupy_backends --exclude-module openpiv_gpu `
     --exclude-module pytest --exclude-module pytest_qt --exclude-module openpiv.test `
+    --hidden-import=graphlib `
+    --copy-metadata=imageio `
     --paths src `
     --collect-submodules openpiv `
     --collect-data lvpyio `

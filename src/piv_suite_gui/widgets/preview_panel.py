@@ -10,7 +10,7 @@ reconstruct_stereo) preview.
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QProgressBar, QPushButton, QVBoxLayout, QWidget
 
 from piv_suite.calibration.camera_mapping import CameraMapping
 from piv_suite.config.legacy import to_cpu_settings, to_gpu_settings
@@ -46,6 +46,15 @@ class PreviewPanel(QWidget):
         self.preview_btn.clicked.connect(self._do_preview)
         layout.addWidget(self.preview_btn)
 
+        # Indeterminate ("busy") mode -- there's no meaningful percentage
+        # for a single preview pair, just a running/not-running state.
+        # Hidden except while a preview is in progress.
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setVisible(False)
+        layout.addWidget(self.progress_bar)
+
         self.status_label = QLabel("No preview yet.")
         layout.addWidget(self.status_label)
 
@@ -77,6 +86,16 @@ class PreviewPanel(QWidget):
 
     def _do_preview(self):
         main_window = self.window()
+        # process_frames() runs synchronously on the GUI thread (a single
+        # pair is fast enough that a background thread wasn't worth the
+        # complexity) -- the progress bar wouldn't actually paint before
+        # that blocking call otherwise, since Qt only repaints on its own
+        # event loop. Disabling the button also blocks double-clicks
+        # from queuing up a second preview while one is still running.
+        self.preview_btn.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.status_label.setText("Running preview...")
+        QApplication.processEvents()
         try:
             project = main_window.project_panel.get_project_settings()
             correlation = main_window.settings_panel.get_correlation_settings()
@@ -84,7 +103,6 @@ class PreviewPanel(QWidget):
             post = main_window.settings_panel.get_postprocess_settings()
             calibration = main_window.settings_panel.get_calibration_settings()
 
-            self.status_label.setText("Running preview...")
             if project.mode == "stereo":
                 self._preview_stereo(main_window, project, correlation, validation, post, calibration)
             else:
@@ -94,6 +112,9 @@ class PreviewPanel(QWidget):
             self.status_label.setText(f"Preview failed: {e}")
             self.previewed.emit(False)
             raise
+        finally:
+            self.progress_bar.setVisible(False)
+            self.preview_btn.setEnabled(True)
 
     def _preview_planar(self, project, correlation, validation, post, calibration):
         pair_id, frame_a, frame_b = self._first_pair_planar(project)

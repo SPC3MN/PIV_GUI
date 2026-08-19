@@ -1,10 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import copy_metadata
 
 datas = []
-hiddenimports = []
+hiddenimports = ['graphlib']
 datas += collect_data_files('lvpyio')
+datas += copy_metadata('imageio')
 hiddenimports += collect_submodules('openpiv')
 hiddenimports += collect_submodules('piv_suite')
 hiddenimports += collect_submodules('piv_suite_gui')

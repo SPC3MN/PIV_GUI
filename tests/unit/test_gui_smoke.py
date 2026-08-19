@@ -19,6 +19,44 @@ def test_main_window_constructs(qtbot):
     assert window.run_panel is not None
 
 
+def test_preview_shows_progress_bar_while_running_and_hides_after(qtbot):
+    # A slow preview (real PIV correlation, up to several seconds) had no
+    # visual feedback beyond the static "Running preview..." text -- the
+    # button stayed enabled with no indication whether it was doing
+    # anything until the field/error appeared. Uses a stub _preview_planar
+    # to check the bar's visibility state DURING the run without needing
+    # a real image pair.
+    from piv_suite_gui.widgets.preview_panel import PreviewPanel
+
+    panel = PreviewPanel()
+    qtbot.addWidget(panel)
+    panel.show()
+    assert panel.progress_bar.isVisible() is False
+
+    seen_visible_during_run = []
+
+    def fake_preview_planar(project, correlation, validation, post, calibration):
+        seen_visible_during_run.append(panel.progress_bar.isVisible())
+        seen_visible_during_run.append(panel.preview_btn.isEnabled())
+
+    panel._preview_planar = fake_preview_planar
+    panel.window = lambda: type("W", (), {
+        "project_panel": type("P", (), {"get_project_settings": lambda self: type("S", (), {"mode": "planar"})()})(),
+        "settings_panel": type("SP", (), {
+            "get_correlation_settings": lambda self: None,
+            "get_validation_settings": lambda self: None,
+            "get_postprocess_settings": lambda self: None,
+            "get_calibration_settings": lambda self: None,
+        })(),
+    })()
+
+    panel._do_preview()
+
+    assert seen_visible_during_run == [True, False]
+    assert panel.progress_bar.isVisible() is False
+    assert panel.preview_btn.isEnabled() is True
+
+
 def test_project_panel_default_settings(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)

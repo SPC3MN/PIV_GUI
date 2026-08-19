@@ -5,7 +5,10 @@ piv_common.py's GPU section and spatial-tiling section (identical across
 Stereo_PIV_GPU and Planar_PIV_GPU).
 """
 
+import os
+import sys
 import time
+import traceback
 
 import numpy as np
 
@@ -24,22 +27,58 @@ PIV_GPU_SETTINGS_KEYS = frozenset({
 })
 
 
+def _gpu_check_log_path():
+    """Next to the frozen exe (same folder as the installer's own
+    gpu_setup_log.txt) when frozen, so both are discoverable in one
+    place; next to this source file otherwise."""
+    base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(__file__)
+    return os.path.join(base, "gpu_availability_check.log")
+
+
 def is_gpu_available():
     """Probe whether the GPU backend can actually be used on this
     machine: cupy and openpiv_gpu importable, and at least one CUDA
     device visible. Used by the GUI to gray out the GPU option with an
     explanatory tooltip instead of letting a user pick GPU and crash
-    mid-batch on an ImportError."""
+    mid-batch on an ImportError.
+
+    Any failure writes the full exception to gpu_availability_check.log
+    (overwritten each call) -- confirmed on real hardware that this can
+    fail for reasons having nothing to do with the packages themselves
+    being missing/broken (e.g. cupy's `import numpy` resolving
+    differently inside a frozen app than a plain venv), which a bare
+    True/False can't distinguish from "not installed at all". Without
+    this, a report of "GPU stays greyed out" was undebuggable -- the
+    installer's own gpu_setup_log.txt only covers whether the packages
+    were successfully fetched, not whether they actually work once
+    installed."""
     try:
         import cupy  # noqa: F401
         import openpiv_gpu  # noqa: F401
     except ImportError:
+        _log_gpu_check_failure("import cupy / openpiv_gpu")
         return False
     try:
         import cupy as cp
-        return cp.cuda.runtime.getDeviceCount() > 0
-    except Exception:
+        count = cp.cuda.runtime.getDeviceCount()
+        if count > 0:
+            return True
+        _log_gpu_check_failure(f"cupy.cuda.runtime.getDeviceCount() returned {count}")
         return False
+    except Exception:
+        _log_gpu_check_failure("cupy.cuda.runtime.getDeviceCount()")
+        return False
+
+
+def _log_gpu_check_failure(step):
+    try:
+        with open(_gpu_check_log_path(), "w") as f:
+            f.write(f"is_gpu_available() failed at: {step}\n")
+            f.write(f"sys.executable: {sys.executable}\n")
+            f.write(f"frozen: {getattr(sys, 'frozen', False)}\n\n")
+            traceback.print_exc(file=f)
+    except Exception:
+        pass  # diagnostics are best-effort -- never let logging itself break the check
 
 
 def check_piv_settings(piv_settings):

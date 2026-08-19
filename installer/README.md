@@ -86,8 +86,34 @@ GPU option stays greyed out after a CUDA version was selected. It's
 regenerated on every install-time GPU setup attempt (re-running the
 installer overwrites it) and removed on uninstall.
 
-Two real bugs were found and fixed by testing this path repeatedly on
-real hardware, worth knowing if a similar issue resurfaces:
+**The actual root cause of "packages installed successfully but GPU
+still greyed out"** turned out to be a separate bug from all of the
+above, in the PyInstaller build itself, not the install-time fetch:
+`cupy` imports the stdlib module `graphlib` internally, but since `cupy`
+is `--exclude-module`'d from the frozen build (fetched separately at
+install time, see the header comment above), PyInstaller's static
+analysis never saw that dependency and didn't bundle `graphlib` --
+`import cupy` then failed inside the frozen app with `ModuleNotFoundError:
+No module named 'graphlib'`, even though the exact same cupy install
+worked fine imported from a normal venv. `is_gpu_available()`
+(`engines/gpu_engine.py`) silently swallowed this into a bare `False`
+with no visible error anywhere, which is exactly why this was hard to
+diagnose -- it's now fixed with `--hidden-import=graphlib` in
+`build_installer.ps1`, and `is_gpu_available()` now writes the real
+exception to `{app}\gpu_availability_check.log` on any failure instead
+of swallowing it silently, so a similar issue wouldn't be a mystery
+again. The same PyInstaller gap (something needed at runtime that static
+analysis couldn't see because the importing package wasn't part of the
+frozen build) also caused a separate, CPU-only bug: `imageio` (pulled in
+via `openpiv` -> `scikit-image`) calls `importlib.metadata.version
+('imageio')` on itself at import time, which failed with "No package
+metadata was found for imageio" since PyInstaller doesn't bundle a
+package's `.dist-info` folder unless told to -- fixed with
+`--copy-metadata=imageio`.
+
+Two more real bugs were found and fixed by testing the install-time
+fetch path repeatedly on real hardware, worth knowing if a similar issue
+resurfaces:
 
 - **Extraction can hit a transient file lock.** Antivirus real-time
   scanning a just-downloaded file (the openpiv-python-gpu zip) can
