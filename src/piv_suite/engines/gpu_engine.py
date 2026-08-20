@@ -70,6 +70,27 @@ def is_gpu_available():
         return False
 
 
+def gpu_summary():
+    """Short human-readable description of the GPU backend for the GUI's
+    status header -- e.g. "CUDA 13" -- or None when the GPU backend isn't
+    usable at all. Names WHICH CUDA runtime got picked up rather than a
+    bare available/unavailable, since the installer offers 11/12/13 and a
+    mismatch against the machine's actual NVIDIA toolkit is a real,
+    previously hard-to-spot failure mode (see installer/README.md).
+
+    Lives here rather than in the GUI so cupy stays confined to this
+    module, matching how is_gpu_available() is already wrapped by
+    engines.registry."""
+    if not is_gpu_available():
+        return None
+    try:
+        import cupy as cp
+        # runtimeGetVersion() reports e.g. 13000 for CUDA 13.0
+        return f"CUDA {cp.cuda.runtime.runtimeGetVersion() // 1000}"
+    except Exception:
+        return "CUDA"  # available, just couldn't name the version
+
+
 def _log_gpu_check_failure(step):
     try:
         with open(_gpu_check_log_path(), "w") as f:

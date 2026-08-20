@@ -60,7 +60,7 @@ class ProjectPanel(QWidget):
         layout.setSpacing(6)
 
         # ---- input source ----
-        input_box = QGroupBox("Input")
+        input_box = QGroupBox("INPUT")
         input_layout = QVBoxLayout(input_box)
         input_layout.setSpacing(4)
 
@@ -175,7 +175,7 @@ class ProjectPanel(QWidget):
         mode_backend_row = QHBoxLayout()
         mode_backend_row.setSpacing(6)
 
-        mode_box = QGroupBox("Mode")
+        mode_box = QGroupBox("MODE")
         mode_layout = QHBoxLayout(mode_box)
         self.planar_radio = QRadioButton("Planar")
         self.planar_radio.setToolTip(
@@ -193,7 +193,7 @@ class ProjectPanel(QWidget):
         mode_layout.addWidget(self.stereo_radio)
         mode_backend_row.addWidget(mode_box)
 
-        backend_box = QGroupBox("Backend")
+        backend_box = QGroupBox("BACKEND")
         backend_layout = QHBoxLayout(backend_box)
         self.cpu_radio = QRadioButton("CPU")
         self.cpu_radio.setToolTip("Runs on openpiv-python. Always available, no GPU/CUDA needed.")
@@ -219,7 +219,7 @@ class ProjectPanel(QWidget):
         layout.addLayout(mode_backend_row)
 
         # ---- output ----
-        out_box = QGroupBox("Output")
+        out_box = QGroupBox("OUTPUT")
         out_grid = QGridLayout(out_box)
         out_grid.setColumnStretch(1, 1)
         self.output_dir_edit = QLineEdit("piv_output")

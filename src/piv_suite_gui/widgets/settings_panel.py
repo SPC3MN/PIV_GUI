@@ -42,7 +42,7 @@ class _PassesTable(QGroupBox):
     row -- no scroll bar of its own."""
 
     def __init__(self, parent=None):
-        super().__init__("Window schedule (coarse -> fine)", parent)
+        super().__init__("WINDOW SCHEDULE (COARSE → FINE)", parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(4)
@@ -115,7 +115,7 @@ class SettingsPanel(QWidget):
         layout.addWidget(self.passes_table)
 
         # ---- correlation ----
-        corr_box = QGroupBox("Correlation")
+        corr_box = QGroupBox("CORRELATION")
         corr_grid = QGridLayout(corr_box)
         corr_grid.setContentsMargins(6, 6, 6, 6)
         corr_grid.setSpacing(4)
@@ -200,7 +200,7 @@ class SettingsPanel(QWidget):
         layout.addWidget(corr_box)
 
         # ---- physical units (calibration) ----
-        cal_box = QGroupBox("Physical units (calibration)")
+        cal_box = QGroupBox("PHYSICAL UNITS")
         cal_box.setToolTip(
             "Unset = results stay in px/frame (px/frame for stereo's U/V/W "
             "too, unless world_scale_px_per_mm on the Calibration tab "
@@ -238,7 +238,7 @@ class SettingsPanel(QWidget):
         layout.addWidget(cal_box)
 
         # ---- per-pass validation (runs inside the multi-pass loop) ----
-        val_box = QGroupBox("Validation (per-pass, inside the engine loop)")
+        val_box = QGroupBox("VALIDATION (PER-PASS)")
         val_box.setToolTip(
             "Runs BETWEEN multi-pass iterations, feeding the next (finer) "
             "pass -- not the same as 'Remove invalid vectors' below, which "
@@ -330,7 +330,7 @@ class SettingsPanel(QWidget):
         layout.addWidget(val_box)
 
         # ---- remove invalid vectors ----
-        post_box = QGroupBox("Remove invalid vectors")
+        post_box = QGroupBox("REMOVE INVALID VECTORS")
         post_grid = QGridLayout(post_box)
         post_grid.setContentsMargins(6, 6, 6, 6)
         post_grid.setSpacing(4)

@@ -4,7 +4,7 @@ construct worker -> moveToThread -> connect signals -> thread.start();
 on cancel, sets the worker's cancellation flag and waits for a clean exit.
 """
 
-from PySide6.QtCore import QThread
+from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout, QHeaderView, QPlainTextEdit, QProgressBar, QPushButton,
     QTableView, QVBoxLayout, QWidget,
@@ -15,6 +15,12 @@ from piv_suite_gui.workers.pipeline_worker import PipelineWorker
 
 
 class RunPanel(QWidget):
+    # Mirrors every change to the Run button's enabled state so a second
+    # surface for the same action (main_window's header button) can follow
+    # it without duplicating the gating rules -- which are: enabled only
+    # after a successful preview, and disabled again while a batch runs.
+    run_enabled_changed = Signal(bool)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._thread = None
@@ -54,6 +60,7 @@ class RunPanel(QWidget):
 
     def set_run_enabled(self, enabled: bool):
         self.run_btn.setEnabled(enabled)
+        self.run_enabled_changed.emit(enabled)
 
     def _start_run(self):
         main_window = self.window()
@@ -75,7 +82,7 @@ class RunPanel(QWidget):
         self.job_model.reset()
         self.progress_bar.setValue(0)
         self.log_console.clear()
-        self.run_btn.setEnabled(False)
+        self.set_run_enabled(False)
         self.cancel_btn.setEnabled(True)
 
         self._thread = QThread()
@@ -105,7 +112,7 @@ class RunPanel(QWidget):
 
     def _on_finished(self, cancelled):
         self.log_console.appendPlainText("Cancelled." if cancelled else "Done.")
-        self.run_btn.setEnabled(True)
+        self.set_run_enabled(True)
         self.cancel_btn.setEnabled(False)
         if self._thread is not None:
             self._thread.quit()

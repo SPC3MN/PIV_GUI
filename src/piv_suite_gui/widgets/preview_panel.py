@@ -94,7 +94,7 @@ class PreviewPanel(QWidget):
         layout.addStretch(1)
 
     def _build_plot_options_box(self):
-        box = QGroupBox("Plot options")
+        box = QGroupBox("PLOT OPTIONS")
         box_layout = QVBoxLayout(box)
 
         toggle_row = QHBoxLayout()

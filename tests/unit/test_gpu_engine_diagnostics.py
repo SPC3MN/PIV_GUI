@@ -61,6 +61,13 @@ def test_gpu_check_log_path_uses_executable_dir_when_frozen(monkeypatch, tmp_pat
     assert os.path.basename(path) == "gpu_availability_check.log"
 
 
+def test_gpu_summary_is_none_or_names_a_cuda_version():
+    # Feeds the GUI header's backend badge -- must be a safe, printable
+    # value on ANY machine, including one with no cupy at all.
+    result = gpu_engine.gpu_summary()
+    assert result is None or result.startswith("CUDA")
+
+
 def test_is_gpu_available_never_raises():
     # Whatever this machine's actual GPU/cupy state is, the check itself
     # must always return a plain bool, never propagate an exception.

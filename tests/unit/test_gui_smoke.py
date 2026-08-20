@@ -58,6 +58,67 @@ def test_preview_shows_progress_bar_while_running_and_hides_after(qtbot):
     assert panel.preview_btn.isEnabled() is True
 
 
+def test_header_badge_reflects_backend_availability(qtbot):
+    from piv_suite.engines.registry import is_gpu_available
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    text = window.header.backend_badge.text()
+    if is_gpu_available():
+        assert "GPU" in text
+    else:
+        assert "CPU only" in text
+
+
+def test_header_run_button_mirrors_run_panel_state(qtbot):
+    # The header's Run button is a second surface for run_panel's action,
+    # so it must never be clickable when run_panel's own button isn't --
+    # including while a batch is already in flight, which is why
+    # run_panel emits on every enabled-state change rather than the
+    # header just listening to `previewed` directly.
+    window = MainWindow()
+    qtbot.addWidget(window)
+    assert window.header.run_btn.isEnabled() is False
+
+    window.preview_panel.previewed.emit(True)
+    assert window.run_panel.run_btn.isEnabled() is True
+    assert window.header.run_btn.isEnabled() is True
+
+    window.run_panel.set_run_enabled(False)  # what _start_run does
+    assert window.header.run_btn.isEnabled() is False
+
+
+def test_header_run_forwards_to_run_panel_and_shows_run_tab(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    # swap the real _start_run connection for a recorder -- this test is
+    # about the forwarding wiring, not about launching a batch thread
+    window.run_panel.run_btn.clicked.disconnect()
+    started = []
+    window.run_panel.run_btn.clicked.connect(lambda: started.append(True))
+
+    # while disabled, forwarding must not start anything, but should still
+    # bring the Run tab forward so the user sees the disabled button
+    window.header.run_requested.emit()
+    assert window.tabs.currentWidget() is window.run_panel
+    assert started == []
+
+    window.tabs.setCurrentWidget(window.preview_panel)
+    window.preview_panel.previewed.emit(True)
+    window.header.run_requested.emit()
+    assert window.tabs.currentWidget() is window.run_panel
+    assert started == [True]
+
+
+def test_status_bar_shows_backend_and_version(qtbot):
+    from piv_suite import __version__
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    assert __version__ in window.header.version_text()
+    assert window.status_backend_label.text()  # non-empty backend summary
+
+
 def test_preview_panel_pair_selector_and_plot_options_exist(qtbot):
     from piv_suite_gui.widgets.preview_panel import PreviewPanel
 

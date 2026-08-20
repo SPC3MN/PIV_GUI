@@ -31,3 +31,7 @@ def get_engine_factory(backend):
 
 def is_gpu_available():
     return gpu_engine.is_gpu_available()
+
+
+def gpu_summary():
+    return gpu_engine.gpu_summary()

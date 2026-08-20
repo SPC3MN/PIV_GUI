@@ -137,7 +137,7 @@ class CalibrationPanel(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(6)
 
-        cam_box = QGroupBox("Camera calibration")
+        cam_box = QGroupBox("CAMERA CALIBRATION")
         cam_layout = QVBoxLayout(cam_box)
         cam_layout.setContentsMargins(4, 4, 4, 4)
         cam_tabs = QTabWidget()
@@ -148,7 +148,7 @@ class CalibrationPanel(QWidget):
         cam_layout.addWidget(cam_tabs)
         layout.addWidget(cam_box)
 
-        geom_box = QGroupBox("World grid / dewarp")
+        geom_box = QGroupBox("WORLD GRID / DEWARP")
         geom_grid = QGridLayout(geom_box)
         geom_grid.setContentsMargins(6, 6, 6, 6)
         geom_grid.setSpacing(4)
@@ -169,7 +169,7 @@ class CalibrationPanel(QWidget):
         geom_grid.addWidget(self.dewarp_order_spin, 2, 1)
         layout.addWidget(geom_box)
 
-        angle_box = QGroupBox("Stereo viewing angles (deg)")
+        angle_box = QGroupBox("STEREO VIEWING ANGLES (DEG)")
         angle_box.setToolTip(
             "See the original Stereo_PIV_GPU/Stereo_PIV_CPU README: these "
             "angles are placeholders that should be verified per Z-plane "

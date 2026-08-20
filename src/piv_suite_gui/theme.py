@@ -17,6 +17,10 @@ a future palette swap only touches this one block):
     LINE      -- borders/hairlines
     INK_ON_ACCENT -- text color used ON TOP of an INK-colored fill (e.g. a
                  primary button) -- needs to be dark, not the accent itself
+    OK        -- the one non-neutral color, reserved for "this is working"
+                 status (the header's GPU-ready dot). Deliberately NOT an
+                 accent: the palette is hueless by design, so green here
+                 reads as state, never as branding.
 """
 
 BACKDROP = "#242527"
@@ -27,6 +31,7 @@ INK_SOFT = "#B4B2B2"
 INK_FAINT = "#8B8989"
 LINE = "#4C4D4F"
 INK_ON_ACCENT = "#1C1D1E"
+OK = "#7CC79A"
 
 _MONO_FONTS = '"Consolas", "Cascadia Mono", "Courier New", monospace'
 _UI_FONTS = '"Segoe UI", "Helvetica Neue", Arial, sans-serif'
@@ -52,21 +57,62 @@ QMainWindow, QScrollArea, QScrollArea > QWidget > QWidget, QTabWidget::pane {{
     border: none;
 }}
 
+/* ---- branded header + status bar (see widgets/header_bar.py) ---- */
+QWidget#appHeader {{
+    background-color: {PAPER};
+    border-bottom: 1px solid {LINE};
+}}
+QLabel#brandName {{
+    font-size: 13pt;
+    font-weight: 700;
+    color: {INK};
+}}
+QLabel#brandTagline {{
+    font-size: 7pt;
+    font-weight: 600;
+    color: {INK_SOFT};
+}}
+QLabel#statusBadge {{
+    background-color: {BACKDROP};
+    border: 1px solid {LINE};
+    border-radius: 11px;
+    padding: 4px 11px;
+    font-family: {_MONO_FONTS};
+    font-size: 8.5pt;
+}}
+QPushButton#headerRunButton {{ padding: 6px 16px; }}
+
+QStatusBar {{
+    background-color: {PAPER};
+    border-top: 1px solid {LINE};
+    color: {INK_FAINT};
+}}
+QStatusBar QLabel {{
+    color: {INK_FAINT};
+    font-family: {_MONO_FONTS};
+    font-size: 8pt;
+}}
+QStatusBar::item {{ border: none; }}
+
 QGroupBox {{
     background-color: {PANEL};
     border: 1px solid {LINE};
     border-radius: 8px;
-    margin-top: 16px;
+    /* margin-top must clear the title's full line height, or the box's
+       top border draws straight through the text -- confirmed on a real
+       screenshot, where the taller titles were struck through and the
+       shorter ones happened to clear it. */
+    margin-top: 21px;
     padding: 14px 12px 12px 12px;
     font-weight: 600;
 }}
 QGroupBox::title {{
     subcontrol-origin: margin;
     subcontrol-position: top left;
-    left: 10px;
-    top: 3px;
+    left: 4px;
+    top: 1px;
     padding: 0 4px;
-    color: {INK};
+    color: {INK_SOFT};
     font-weight: 600;
 }}
 

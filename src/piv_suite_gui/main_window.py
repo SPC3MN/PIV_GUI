@@ -1,5 +1,6 @@
-"""Main window: assembles the project/settings panels (left), preview and
-run panels (right, as tabs) into one window.
+"""Main window: a branded header across the top, then the project/settings
+panels (left) and preview/run panels (right, as tabs) below it, with a
+status bar along the bottom.
 
 The window itself is freely resizable (no fixed width) -- only the left
 panel has a fixed, comfortable width with its QScrollArea's horizontal
@@ -9,9 +10,13 @@ anywhere.
 """
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QScrollArea, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout, QLabel, QMainWindow, QScrollArea, QTabWidget, QVBoxLayout, QWidget,
+)
 
+from piv_suite import __version__
 from piv_suite_gui.widgets.calibration_panel import CalibrationPanel
+from piv_suite_gui.widgets.header_bar import HeaderBar
 from piv_suite_gui.widgets.preview_panel import PreviewPanel
 from piv_suite_gui.widgets.project_panel import ProjectPanel
 from piv_suite_gui.widgets.run_panel import RunPanel
@@ -26,13 +31,22 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("PIV Suite")
-        self.resize(INITIAL_WINDOW_WIDTH, 800)
+        self.resize(INITIAL_WINDOW_WIDTH, 860)
         self._build_ui()
 
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        layout = QHBoxLayout(central)
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self.header = HeaderBar(version=__version__)
+        outer.addWidget(self.header)
+
+        body = QWidget()
+        outer.addWidget(body, stretch=1)
+        layout = QHBoxLayout(body)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
 
@@ -70,20 +84,43 @@ class MainWindow(QMainWindow):
         layout.addWidget(left_scroll, stretch=0)
 
         # ---- right: preview / run, as tabs ----
-        tabs = QTabWidget()
+        self.tabs = QTabWidget()
         self.preview_panel = PreviewPanel()
         self.run_panel = RunPanel()
-        tabs.addTab(self.preview_panel, "Preview")
-        tabs.addTab(self.run_panel, "Run")
-        layout.addWidget(tabs, stretch=1)
+        self.tabs.addTab(self.preview_panel, "Preview")
+        self.tabs.addTab(self.run_panel, "Run")
+        layout.addWidget(self.tabs, stretch=1)
+
+        self._build_status_bar()
 
         # Run is gated behind a successful preview, matching the original
         # preview_first_snapshot()'s "confirm before batch" UX -- just
         # inline instead of a blocking terminal prompt (see preview_panel.py).
         self.preview_panel.previewed.connect(self.run_panel.set_run_enabled)
 
+        # The header's Run button is a second surface for the SAME action,
+        # not a second code path: run_panel stays the single source of
+        # truth for whether running is allowed (it also disables while a
+        # batch is in flight), and the header mirrors its state.
+        self.run_panel.run_enabled_changed.connect(self.header.set_run_enabled)
+        self.header.run_requested.connect(self._run_from_header)
+
         # the preview plot's W color-range row only makes sense in stereo
         # mode (planar has no W component at all)
         self.preview_panel.set_stereo_mode(self.project_panel.is_stereo)
         self.project_panel.planar_radio.toggled.connect(
             lambda checked: self.preview_panel.set_stereo_mode(not checked))
+
+    def _build_status_bar(self):
+        bar = self.statusBar()
+        bar.setSizeGripEnabled(False)
+        self.status_backend_label = QLabel(self.header.status_text())
+        bar.addWidget(self.status_backend_label)
+        bar.addPermanentWidget(QLabel(self.header.version_text()))
+
+    def _run_from_header(self):
+        """Bring the Run tab forward so the user can see progress, then
+        click run_panel's own button -- forwarding rather than calling
+        _start_run() keeps the enabled-state check in exactly one place."""
+        self.tabs.setCurrentWidget(self.run_panel)
+        self.run_panel.run_btn.click()

@@ -29,7 +29,7 @@
 ; its own separate license/installer). The wizard page says so.
 
 #define MyAppName "PIV Suite"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.2.0"
 #define MyAppPublisher "SPC3MN"
 #define MyAppExeName "PIV_Suite.exe"
 
