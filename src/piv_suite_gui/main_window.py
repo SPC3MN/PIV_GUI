@@ -36,6 +36,10 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self):
         central = QWidget()
+        # Named so the stylesheet can paint the window ground here rather
+        # than on a blanket QWidget rule, which would also fill plain
+        # container widgets sitting inside the white cards (see theme.py).
+        central.setObjectName("centralSurface")
         self.setCentralWidget(central)
         outer = QVBoxLayout(central)
         outer.setContentsMargins(0, 0, 0, 0)

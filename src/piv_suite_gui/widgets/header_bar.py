@@ -14,7 +14,7 @@ it that way means one less thing that can silently fail to be included
 broke the packaged app before -- see installer/README.md).
 """
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
@@ -22,16 +22,36 @@ from PySide6.QtWidgets import (
 
 from piv_suite.engines.registry import gpu_summary
 
-from ..theme import INK, INK_SOFT, OK
+from ..theme import INK_SOFT, LOGO_INK, OK
 
-MARK_BOX = 26.0  # logical coordinate box the mark is drawn in, then scaled
+MARK_BOX = 100.0  # logical coordinate box the mark is drawn in, then scaled
+
+# Each entry is one flow line of the lab mark: (bar_start_x, bar_end_x,
+# y, curl_radius, curls_up). The bar runs left-to-right at height `y` and
+# terminates in a ~270-degree curl -- the wind/vortex figure from the
+# Flow and Turbulence Engineering Laboratory logo. Bars start left of 0
+# so they run flush to the rounded square's edge, which clips them.
+_FLOW_LINES = (
+    (-4.0, 38.0, 32.0, 11.0, True),
+    (-4.0, 68.0, 51.0, 11.0, True),
+    (-4.0, 54.0, 70.0, 11.0, False),
+)
+_STROKE = 10.0
+# The knocked-out lines are the logo's own white, not a theme surface --
+# they sit on LOGO_INK, which never changes with the palette.
+_LINE_ON_LOGO = "#FFFFFF"
 
 
 class _ProductMark(QWidget):
-    """A ring with two opposed arcs and arrowheads -- a rotating flow
-    field, the thing this whole application measures."""
+    """The Flow and Turbulence Engineering Laboratory mark: three curling
+    flow lines knocked out of a solid rounded square.
 
-    def __init__(self, size=28, parent=None):
+    Drawn with QPainter rather than loaded from an image or SVG file so
+    the frozen build stays free of loose GUI assets -- see this module's
+    docstring for why that matters here.
+    """
+
+    def __init__(self, size=34, parent=None):
         super().__init__(parent)
         self.setFixedSize(size, size)
 
@@ -41,29 +61,36 @@ class _ProductMark(QWidget):
         scale = self.width() / MARK_BOX
         painter.scale(scale, scale)
 
-        color = QColor(INK)
-        painter.setPen(QPen(color, 1.6, Qt.SolidLine, Qt.RoundCap))
+        square = QPainterPath()
+        square.addRoundedRect(QRectF(0, 0, MARK_BOX, MARK_BOX), 11, 11)
+        painter.setClipPath(square)  # so bars can overrun the left edge
+        painter.fillPath(square, QColor(LOGO_INK))
+
+        painter.setPen(QPen(QColor(_LINE_ON_LOGO), _STROKE, Qt.SolidLine,
+                            Qt.RoundCap, Qt.RoundJoin))
         painter.setBrush(Qt.NoBrush)
-        painter.drawEllipse(1.2, 1.2, MARK_BOX - 2.4, MARK_BOX - 2.4)
-
-        # Two 90-degree arcs on the inner radius, opposite each other, so
-        # the mark reads as rotation rather than as a plain target/circle.
-        # Qt angles are 1/16th degree, 0 at 3 o'clock, counter-clockwise.
-        painter.setPen(QPen(color, 1.8, Qt.SolidLine, Qt.RoundCap))
-        inner = (6.0, 6.0, 14.0, 14.0)  # x, y, w, h -- radius 7 about (13, 13)
-        painter.drawArc(*inner, 180 * 16, -90 * 16)
-        painter.drawArc(*inner, 0 * 16, -90 * 16)
-
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(color)
-        for tip_y, base_y, flip in ((5.4, 9.4, 1.0), (20.6, 16.6, -1.0)):
-            head = QPainterPath()
-            head.moveTo(13.0, tip_y)
-            head.lineTo(13.0 + 2.1 * flip, base_y)
-            head.lineTo(13.0 - 2.1 * flip, base_y)
-            head.closeSubpath()
-            painter.drawPath(head)
+        for x0, cx, y, radius, up in _FLOW_LINES:
+            painter.drawPath(_flow_line(x0, cx, y, radius, up))
         painter.end()
+
+
+def _flow_line(x0, cx, y, radius, curls_up):
+    """A horizontal bar ending in a ~270-degree curl.
+
+    Qt arc angles: 0 deg at 3 o'clock, positive counter-clockwise on
+    screen. An upward curl centres the circle above the bar's end, meets
+    it at the circle's 6 o'clock point (-90 deg) and sweeps +270 deg, all
+    the way round to 9 o'clock -- which is what leaves the curl's tail
+    tucked back over itself the way the logo's do.
+    """
+    path = QPainterPath()
+    path.moveTo(x0, y)
+    path.lineTo(cx, y)
+    if curls_up:
+        path.arcTo(QRectF(cx - radius, y - 2 * radius, 2 * radius, 2 * radius), -90, 270)
+    else:
+        path.arcTo(QRectF(cx - radius, y, 2 * radius, 2 * radius), 90, -270)
+    return path
 
 
 class HeaderBar(QWidget):
@@ -72,6 +99,11 @@ class HeaderBar(QWidget):
     def __init__(self, version="", parent=None):
         super().__init__(parent)
         self.setObjectName("appHeader")
+        # A plain QWidget SUBCLASS ignores background-color/border from a
+        # stylesheet unless it opts in here -- without this the header
+        # silently renders in the window's ground color instead of its own
+        # (confirmed by sampling the pixel, which came back as BACKDROP).
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self._build_ui(version)
 
@@ -86,7 +118,7 @@ class HeaderBar(QWidget):
         wordmark.setSpacing(0)
         name = QLabel("PIV SUITE")
         name.setObjectName("brandName")
-        tagline = QLabel("PARTICLE IMAGE VELOCIMETRY")
+        tagline = QLabel("FLOW AND TURBULENCE ENGINEERING LABORATORY")
         tagline.setObjectName("brandTagline")
         # Letter-spacing has no QSS equivalent, so it's set on the font --
         # safe here because this label has no children to inherit it.
