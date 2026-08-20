@@ -4,6 +4,19 @@ Migrated unchanged from piv_common.CPUPIVProcess/init_cpu_processor
 (identical across Planar_PIV_CPU and Stereo_PIV_CPU). No cupy/GPU imports
 anywhere in this module -- this engine works on any machine with plain
 openpiv-python installed.
+
+CPUPIVProcess.__init__ applies _openpiv_speedups.apply_speedups() before
+any processing -- three drop-in, numerically-verified-equivalent
+vectorized replacements for openpiv functions that otherwise dominate
+wall-clock time on large, high-overlap, multi-pass runs (confirmed on a
+real 3008x4096 frame pair: ~49% of a single 32px/75%-overlap pass was
+replace_nans, ~35% was a pure-Python per-window loop in
+correlation_to_displacement, ~13% was local_median_val's generic_filter
+callback). Full multi-pass output matches the unpatched baseline to
+~1e-15 per vector on real data -- see _openpiv_speedups.py for exactly
+what's patched, what was tried and rejected (an FFT-backend swap that
+looked safe in isolation but compounded into real divergence across
+passes), and why.
 """
 
 import dataclasses
@@ -69,6 +82,9 @@ class CPUPIVProcess:
     def __init__(self, frame_shape, **cpu_settings):
         from openpiv.settings import PIVSettings
         from openpiv.pyprocess import get_rect_coordinates
+
+        from ._openpiv_speedups import apply_speedups
+        apply_speedups()
 
         settings = PIVSettings()
         valid_fields = {f.name for f in dataclasses.fields(settings)}
