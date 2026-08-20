@@ -71,6 +71,7 @@ class PreviewPanel(QWidget):
         layout.addLayout(pair_row)
 
         self.preview_btn = QPushButton("Preview selected pair")
+        self.preview_btn.setProperty("accent", True)
         self.preview_btn.clicked.connect(self._do_preview)
         layout.addWidget(self.preview_btn)
 

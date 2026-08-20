@@ -26,6 +26,7 @@ class RunPanel(QWidget):
 
         btn_row = QHBoxLayout()
         self.run_btn = QPushButton("Run batch")
+        self.run_btn.setProperty("accent", True)
         self.run_btn.setEnabled(False)
         self.run_btn.setToolTip("Preview the first pair successfully before running a batch.")
         self.run_btn.clicked.connect(self._start_run)
