@@ -62,10 +62,19 @@ def range_filter(u, v, residual_max=None, window_size=3):
 
 
 def _nan_median_filter(a, size):
-    """NaN-aware local median filter -- scipy.ndimage.median_filter isn't
-    NaN-aware, so this uses generic_filter with nanmedian instead (slower,
-    but correct on fields that already have NaN gaps from prior validation
-    steps)."""
+    """Local median filter, NaN-aware only when needed. In the current
+    architecture u/v reaching range_filter are always NaN-free (the
+    engine fills residual NaN before returning -- see cpu_engine.py's
+    module docstring), so the compiled scipy.ndimage.median_filter (not
+    NaN-aware, but exact and orders of magnitude faster than a per-pixel
+    Python callback -- measured ~6.7s vs well under 1s on a ~185k-cell
+    finest-pass grid) is used whenever there's nothing for it to trip on.
+    Falls back to the slower NaN-aware generic_filter(nanmedian) path if
+    NaN is actually present, so this stays correct even if a future
+    caller doesn't guarantee NaN-free input."""
+    if not np.isnan(a).any():
+        from scipy.ndimage import median_filter
+        return median_filter(a, size=size, mode="nearest")
     from scipy.ndimage import generic_filter
     return generic_filter(a, np.nanmedian, size=size, mode="nearest")
 

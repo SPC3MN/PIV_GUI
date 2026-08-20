@@ -14,6 +14,7 @@ import argparse
 import csv
 import os
 import sys
+import time
 
 import numpy as np
 
@@ -83,6 +84,7 @@ def handle_pair_planar(pair_id, frame_a, frame_b, cfg, output_dir, engine, x, y)
     correlation, validation = cfg.correlation, cfg.validation
     backend = cfg.project.backend
 
+    t_post0 = time.time()
     if correlation.use_tiling:
         init_fn = _make_tiled_init_fn(backend, correlation, validation)
         margin = _tile_margin(backend, correlation, validation)
@@ -95,11 +97,13 @@ def handle_pair_planar(pair_id, frame_a, frame_b, cfg, output_dir, engine, x, y)
             engine, frame_a, frame_b, post, report_gpu_mem=True,
             on_gpu_report=_gpu_report_fn(backend, verbose),
         )
+    t_post = time.time() - t_post0 - elapsed
 
     u, v = apply_calibration(u, v, cfg.calibration.pixel_pitch_mm, cfg.calibration.frame_dt_s)
     n_valid, n_total = int(valid.sum()), int(valid.size)
     if verbose:
-        print(f"{elapsed:.3f} s, {n_valid}/{n_total} valid vectors")
+        print(f"{elapsed:.3f} s, {n_valid}/{n_total} valid vectors "
+              f"(postprocess {t_post:.3f}s)")
 
     if cfg.output.save_npz:
         np.savez(os.path.join(output_dir, f"{pair_id}_velocity.npz"),
@@ -121,7 +125,10 @@ def process_pairs_planar(pair_source, cfg, output_dir, interactive_preview):
     summary_rows = []
 
     for idx, (pair_id, frame_a, frame_b) in enumerate(pair_source):
+        t_pre0 = time.time()
         frame_a, frame_b = apply_preprocess_pair(frame_a, frame_b, cfg.preprocess)
+        if cfg.output.verbose and cfg.preprocess.min_max_filter_enabled:
+            print(f"[timing] {pair_id}: preprocess {time.time() - t_pre0:.3f}s")
         if not cfg.correlation.use_tiling and engine is None:
             engine, x, y = _build_engine(backend, frame_a.shape, cfg.correlation, cfg.validation)
 
@@ -150,6 +157,7 @@ def _run_camera(frame_a, frame_b, cfg):
     post = cfg.postprocess.for_pipeline()
     verbose = cfg.output.verbose
 
+    t_post0 = time.time()
     if correlation.use_tiling:
         init_fn = _make_tiled_init_fn(backend, correlation, validation)
         margin = _tile_margin(backend, correlation, validation)
@@ -157,13 +165,14 @@ def _run_camera(frame_a, frame_b, cfg):
             frame_a, frame_b, post, init_fn, correlation.n_tiles_y, correlation.n_tiles_x,
             margin, report_gpu_mem=True, free_pools_fn=lambda: _free_gpu(backend), verbose=verbose,
         )
-        return u, v, valid, elapsed, x, y, rejects
+        return u, v, valid, elapsed, x, y, rejects, time.time() - t_post0 - elapsed
 
     engine, x, y = _build_engine(backend, frame_a.shape, correlation, validation)
     u, v, valid, elapsed, rejects = pipeline.process_frames(
         engine, frame_a, frame_b, post, report_gpu_mem=True,
         on_gpu_report=_gpu_report_fn(backend, verbose),
     )
+    t_post = time.time() - t_post0 - elapsed
     del engine
     if backend == "gpu":
         _free_gpu(backend)
@@ -175,8 +184,8 @@ def handle_pair_stereo(pair_id, dw_a0, dw_b0, dw_a1, dw_b1, cfg, angles, output_
     if verbose:
         print(f"Processing {pair_id} ...", end=" ", flush=True)
 
-    u1, v1, valid1, elapsed1, x, y, r1 = _run_camera(dw_a0, dw_b0, cfg)
-    u2, v2, valid2, elapsed2, _, _, r2 = _run_camera(dw_a1, dw_b1, cfg)
+    u1, v1, valid1, elapsed1, x, y, r1, t_post1 = _run_camera(dw_a0, dw_b0, cfg)
+    u2, v2, valid2, elapsed2, _, _, r2, t_post2 = _run_camera(dw_a1, dw_b1, cfg)
     valid = valid1 & valid2
     elapsed = elapsed1 + elapsed2
 
@@ -189,7 +198,8 @@ def handle_pair_stereo(pair_id, dw_a0, dw_b0, dw_a1, dw_b1, cfg, angles, output_
 
     n_valid, n_total = int(valid.sum()), int(valid.size)
     if verbose:
-        print(f"{elapsed:.3f} s, {n_valid}/{n_total} valid vectors")
+        print(f"{elapsed:.3f} s, {n_valid}/{n_total} valid vectors "
+              f"(postprocess {t_post1 + t_post2:.3f}s)")
 
     if cfg.output.save_npz:
         np.savez(os.path.join(output_dir, f"{pair_id}_stereo_velocity.npz"),

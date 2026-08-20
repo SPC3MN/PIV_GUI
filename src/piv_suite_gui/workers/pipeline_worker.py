@@ -10,6 +10,7 @@ cli.main.process_pairs_planar/process_pairs_stereo.
 import csv
 import os
 import threading
+import time
 
 import numpy as np
 from PySide6.QtCore import QObject, Signal
@@ -162,18 +163,29 @@ class PipelineWorker(QObject):
 
             self.pair_started.emit(pair_id)
             try:
+                t_pre0 = time.time()
                 frame_a, frame_b = apply_preprocess_pair(frame_a, frame_b, cfg.preprocess)
+                t_pre = time.time() - t_pre0
                 if correlation.use_tiling:
                     init_fn = _make_tiled_init_fn(backend, correlation, validation)
                     margin = _tile_margin(backend, correlation, validation)
+                    t_post0 = time.time()
                     x, y, u, v, valid, elapsed, rejects = pipeline.process_frames_tiled(
                         frame_a, frame_b, post, init_fn, correlation.n_tiles_y, correlation.n_tiles_x,
                         margin, free_pools_fn=lambda: _free_gpu(backend),
                     )
+                    t_post = time.time() - t_post0 - elapsed
                 else:
                     if engine is None:
                         engine, x, y = _build_engine(backend, frame_a.shape, correlation, validation)
+                    t_post0 = time.time()
                     u, v, valid, elapsed, rejects = pipeline.process_frames(engine, frame_a, frame_b, post)
+                    t_post = time.time() - t_post0 - elapsed
+
+                if cfg.output.verbose:
+                    self.log.emit(f"[timing] {pair_id}: preprocess={t_pre:.3f}s "
+                                   f"correlation={elapsed:.3f}s postprocess={t_post:.3f}s "
+                                   f"total={t_pre + elapsed + t_post:.3f}s")
 
                 u, v = apply_calibration(u, v, cfg.calibration.pixel_pitch_mm, cfg.calibration.frame_dt_s)
                 n_valid, n_total = int(valid.sum()), int(valid.size)
@@ -226,17 +238,26 @@ class PipelineWorker(QObject):
 
             self.pair_started.emit(pair_id)
             try:
+                t_pre0 = time.time()
                 fa0, fb0 = apply_preprocess_pair(fa0, fb0, cfg.preprocess)
                 fa1, fb1 = apply_preprocess_pair(fa1, fb1, cfg.preprocess)
                 dw_a0 = cam0.dewarp_image(fa0, cfg.stereo.world_shape, cfg.stereo.dewarp_order)
                 dw_b0 = cam0.dewarp_image(fb0, cfg.stereo.world_shape, cfg.stereo.dewarp_order)
                 dw_a1 = cam1.dewarp_image(fa1, cfg.stereo.world_shape, cfg.stereo.dewarp_order)
                 dw_b1 = cam1.dewarp_image(fb1, cfg.stereo.world_shape, cfg.stereo.dewarp_order)
+                t_pre = time.time() - t_pre0
 
+                t_run0 = time.time()
                 u1, v1, valid1, elapsed1, x, y, r1 = self._run_camera(dw_a0, dw_b0, cfg)
                 u2, v2, valid2, elapsed2, _, _, r2 = self._run_camera(dw_a1, dw_b1, cfg)
                 valid = valid1 & valid2
                 elapsed = elapsed1 + elapsed2
+                t_post = time.time() - t_run0 - elapsed
+
+                if cfg.output.verbose:
+                    self.log.emit(f"[timing] {pair_id}: preprocess/dewarp={t_pre:.3f}s "
+                                   f"correlation={elapsed:.3f}s postprocess={t_post:.3f}s "
+                                   f"total={t_pre + elapsed + t_post:.3f}s")
 
                 U, V, W = pipeline.combine_stereo_pair(
                     u1, v1, u2, v2, angles, cfg.stereo.world_scale_px_per_mm, cfg.calibration.frame_dt_s)

@@ -2,9 +2,32 @@ import numpy as np
 import pytest
 
 from piv_suite.processing.postprocess import (
-    apply_calibration, global_outlier_mask, range_filter, replace_invalid_vectors,
-    smooth_vector_field,
+    _nan_median_filter, apply_calibration, global_outlier_mask, range_filter,
+    replace_invalid_vectors, smooth_vector_field,
 )
+
+
+def test_nan_median_filter_fast_path_matches_slow_nan_aware_path():
+    # _nan_median_filter's fast path (compiled scipy.ndimage.median_filter,
+    # used when input is NaN-free) must produce IDENTICAL output to the
+    # slow NaN-aware generic_filter(nanmedian) path it replaces -- see
+    # postprocess.py's docstring for why NaN-free is now the common case.
+    from scipy.ndimage import generic_filter
+
+    rng = np.random.default_rng(3)
+    for size in (3, 5):
+        a = rng.normal(size=(15, 17))
+        fast = _nan_median_filter(a, size)
+        slow = generic_filter(a, np.nanmedian, size=size, mode="nearest")
+        assert np.allclose(fast, slow)
+
+
+def test_nan_median_filter_falls_back_when_nan_present():
+    a = np.array([[1.0, 2.0, 3.0], [4.0, np.nan, 6.0], [7.0, 8.0, 9.0]])
+    from scipy.ndimage import generic_filter
+    expected = generic_filter(a, np.nanmedian, size=3, mode="nearest")
+    result = _nan_median_filter(a, 3)
+    assert np.allclose(result, expected, equal_nan=True)
 
 
 def test_global_outlier_mask_none_disables():
