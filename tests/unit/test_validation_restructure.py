@@ -66,19 +66,26 @@ def test_process_frames_valid_is_all_true_with_postprocess_disabled_gpu():
     assert rejects["std_dev"] == 0
 
 
-def test_per_pass_validation_defaults_off_and_leaves_module_on_loose():
-    # ValidationSettings.per_pass_validation defaults False -- constructing
-    # a CPU engine must leave openpiv.validation.typical_validation on the
-    # NaN-only patch, preserving the invariant this file is named for.
+def test_per_pass_validation_defaults_on_and_switches_module_to_real():
+    # ValidationSettings.per_pass_validation defaults True (matching DaVis's
+    # own per-pass scheme -- confirmed via real-dataset comparison to raise
+    # U/V correlation ~0.6->0.8) -- constructing a CPU engine with default
+    # settings must switch openpiv.validation.typical_validation to the
+    # real (non-loose) implementation.
     import openpiv.validation
-    from piv_suite.engines._openpiv_speedups import loose_typical_validation
+    from piv_suite.engines import _openpiv_speedups
 
     correlation = CorrelationSettings()
     validation = ValidationSettings()
-    assert validation.per_pass_validation is False
+    assert validation.per_pass_validation is True
     cpu_settings = to_cpu_settings(correlation, validation)
     init_cpu_processor((64, 64), cpu_settings)
-    assert openpiv.validation.typical_validation is loose_typical_validation
+    assert openpiv.validation.typical_validation is _openpiv_speedups._REAL_TYPICAL_VALIDATION
+
+    # Explicitly disabling it must restore the NaN-only patch.
+    disabled = ValidationSettings(per_pass_validation=False)
+    init_cpu_processor((64, 64), to_cpu_settings(correlation, disabled))
+    assert openpiv.validation.typical_validation is _openpiv_speedups.loose_typical_validation
 
 
 def test_per_pass_validation_enabled_switches_to_real_validation_with_tuned_thresholds():
@@ -96,9 +103,10 @@ def test_per_pass_validation_enabled_switches_to_real_validation_with_tuned_thre
     assert engine._settings.median_threshold == 2.0
     assert engine._settings.median_size == 1
 
-    # Switching back to a default (per_pass_validation=False) engine must
-    # restore the loose patch -- confirms the toggle is live, not sticky.
-    init_cpu_processor((64, 64), to_cpu_settings(correlation, ValidationSettings()))
+    # Explicitly disabling it must restore the loose patch -- confirms the
+    # toggle is live, not sticky.
+    disabled = ValidationSettings(per_pass_validation=False)
+    init_cpu_processor((64, 64), to_cpu_settings(correlation, disabled))
     assert openpiv.validation.typical_validation is _openpiv_speedups.loose_typical_validation
 
 

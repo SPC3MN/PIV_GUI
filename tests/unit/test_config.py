@@ -28,11 +28,11 @@ def test_json_roundtrip_stability(tmp_path):
 
 def test_remove_small_groups_threshold_default_and_roundtrip(tmp_path):
     cfg = ProjectConfig()
-    assert cfg.postprocess.remove_small_groups_threshold is None
-    cfg.postprocess.remove_small_groups_threshold = 5
+    assert cfg.postprocess.remove_small_groups_threshold == 5  # on by default, matching DaVis
+    cfg.postprocess.remove_small_groups_threshold = None
     d1 = to_dict(cfg)
     cfg2 = from_dict(d1)
-    assert cfg2.postprocess.remove_small_groups_threshold == 5
+    assert cfg2.postprocess.remove_small_groups_threshold is None
 
 
 def test_load_project_writes_defaults_when_missing(tmp_path):
