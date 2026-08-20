@@ -30,7 +30,7 @@ INITIAL_WINDOW_WIDTH = LEFT_PANEL_WIDTH + RIGHT_PANEL_WIDTH
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PIV Suite")
+        self.setWindowTitle("PIV Testing")
         self.resize(INITIAL_WINDOW_WIDTH, 860)
         self._build_ui()
 

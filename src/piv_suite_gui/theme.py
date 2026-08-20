@@ -23,9 +23,6 @@ a future palette swap only touches this one block):
     INK_FAINT -- disabled text, status-bar text
     LINE      -- borders and hairlines
     INK_ON_ACCENT -- text drawn ON TOP of an ACCENT fill
-    LOGO_INK  -- the lab mark's solid square (see widgets/header_bar.py);
-                 kept separate from INK because it is artwork, not text,
-                 and must stay the logo's own black if INK is ever tuned
     OK        -- the one non-neutral color, reserved for "this is working"
                  status. Darker than a dark theme's green would be, so it
                  still reads against white.
@@ -40,7 +37,6 @@ INK_SOFT = "#6C6D6F"
 INK_FAINT = "#9A9B9C"
 LINE = "#D9D7D7"
 INK_ON_ACCENT = "#FFFFFF"
-LOGO_INK = "#111111"
 OK = "#2E7D51"
 
 _MONO_FONTS = '"Consolas", "Cascadia Mono", "Courier New", monospace'
