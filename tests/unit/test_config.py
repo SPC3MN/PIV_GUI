@@ -26,6 +26,15 @@ def test_json_roundtrip_stability(tmp_path):
     assert cfg2.postprocess.range_filter.window_size == 5
 
 
+def test_remove_small_groups_threshold_default_and_roundtrip(tmp_path):
+    cfg = ProjectConfig()
+    assert cfg.postprocess.remove_small_groups_threshold is None
+    cfg.postprocess.remove_small_groups_threshold = 5
+    d1 = to_dict(cfg)
+    cfg2 = from_dict(d1)
+    assert cfg2.postprocess.remove_small_groups_threshold == 5
+
+
 def test_load_project_writes_defaults_when_missing(tmp_path):
     path = tmp_path / "proj.pivproj"
     assert not path.exists()

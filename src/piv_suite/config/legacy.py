@@ -108,6 +108,9 @@ def to_cpu_settings(correlation: CorrelationSettings, validation: ValidationSett
         "filter_kernel_size": validation.filter_kernel_size,
         "smoothn": validation.smoothn,
         "smoothn_p": validation.smoothn_p,
+        "per_pass_validation": validation.per_pass_validation,
+        "per_pass_median_threshold": validation.per_pass_median_threshold,
+        "per_pass_median_size": validation.per_pass_median_size,
     }
 
 

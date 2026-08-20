@@ -66,6 +66,42 @@ def test_process_frames_valid_is_all_true_with_postprocess_disabled_gpu():
     assert rejects["std_dev"] == 0
 
 
+def test_per_pass_validation_defaults_off_and_leaves_module_on_loose():
+    # ValidationSettings.per_pass_validation defaults False -- constructing
+    # a CPU engine must leave openpiv.validation.typical_validation on the
+    # NaN-only patch, preserving the invariant this file is named for.
+    import openpiv.validation
+    from piv_suite.engines._openpiv_speedups import loose_typical_validation
+
+    correlation = CorrelationSettings()
+    validation = ValidationSettings()
+    assert validation.per_pass_validation is False
+    cpu_settings = to_cpu_settings(correlation, validation)
+    init_cpu_processor((64, 64), cpu_settings)
+    assert openpiv.validation.typical_validation is loose_typical_validation
+
+
+def test_per_pass_validation_enabled_switches_to_real_validation_with_tuned_thresholds():
+    import openpiv.validation
+    from piv_suite.engines import _openpiv_speedups
+
+    correlation = CorrelationSettings()
+    validation = ValidationSettings(per_pass_validation=True, per_pass_median_threshold=2.0,
+                                     per_pass_median_size=1)
+    cpu_settings = to_cpu_settings(correlation, validation)
+    engine, x, y = init_cpu_processor((64, 64), cpu_settings)
+
+    assert openpiv.validation.typical_validation is _openpiv_speedups._REAL_TYPICAL_VALIDATION
+    assert engine._settings.median_normalized is True
+    assert engine._settings.median_threshold == 2.0
+    assert engine._settings.median_size == 1
+
+    # Switching back to a default (per_pass_validation=False) engine must
+    # restore the loose patch -- confirms the toggle is live, not sticky.
+    init_cpu_processor((64, 64), to_cpu_settings(correlation, ValidationSettings()))
+    assert openpiv.validation.typical_validation is _openpiv_speedups.loose_typical_validation
+
+
 def test_to_gpu_settings_hardcodes_validation_tolerances_to_none():
     correlation = CorrelationSettings()
     validation = ValidationSettings()

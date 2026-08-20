@@ -26,13 +26,18 @@ import pytest
 from openpiv.lib import replace_nans as orig_replace_nans
 from openpiv.pyprocess import correlation_to_displacement as orig_correlation_to_displacement
 from openpiv.validation import local_median_val as orig_local_median_val
+from openpiv.validation import local_norm_median_val as orig_local_norm_median_val
+from openpiv.validation import typical_validation as orig_typical_validation
 
 from piv_suite.engines._openpiv_speedups import (
     apply_speedups,
     fast_correlation_to_displacement,
     fast_local_median_val,
+    fast_local_norm_median_val,
     fast_replace_nans,
     loose_typical_validation,
+    use_loose_validation,
+    use_real_validation,
 )
 
 
@@ -297,6 +302,40 @@ def test_local_median_val_masked_array_input():
 
 
 # ============================================================
+# fast_local_norm_median_val
+# ============================================================
+
+@pytest.mark.parametrize("size", [1, 2, 3])
+def test_local_norm_median_val_matches_original(size):
+    rng = np.random.RandomState(13)
+    u = rng.rand(20, 25) * 5
+    v = rng.rand(20, 25) * 5
+    u[3, 3] = 100.0
+    v[10, 10] = -100.0
+    u[0, 0] = np.nan
+    v[19, 24] = np.nan
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ind_orig = orig_local_norm_median_val(u, v, 0.2, threshold=2.0, size=size)
+    ind_fast = fast_local_norm_median_val(u, v, 0.2, threshold=2.0, size=size)
+    assert np.array_equal(ind_orig, ind_fast)
+
+
+def test_local_norm_median_val_masked_array_input():
+    rng = np.random.RandomState(5)
+    u = rng.rand(15, 15) * 5
+    v = rng.rand(15, 15) * 5
+    mask = rng.rand(15, 15) < 0.1
+    u_m = np.ma.masked_array(u, mask=mask)
+    v_m = np.ma.masked_array(v, mask=mask)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ind_orig = orig_local_norm_median_val(u_m, v_m, 0.2, threshold=2.0, size=1)
+    ind_fast = fast_local_norm_median_val(u_m, v_m, 0.2, threshold=2.0, size=1)
+    assert np.array_equal(ind_orig, ind_fast)
+
+
+# ============================================================
 # apply_speedups() wiring
 # ============================================================
 
@@ -324,17 +363,19 @@ def test_apply_speedups_patches_correlation_to_displacement_and_typical_validati
     assert openpiv.validation.typical_validation is loose_typical_validation
 
 
-def test_apply_speedups_does_not_patch_local_median_val():
-    # local_median_val was only ever called from inside typical_validation,
-    # which apply_speedups() now replaces wholesale with
-    # loose_typical_validation -- nothing calls local_median_val on the
-    # CPU calculation path any more, so it must stay unpatched. This test
-    # exists so nobody re-adds the patch line without re-reading why it
-    # was removed (see _openpiv_speedups.py's module docstring).
+def test_apply_speedups_patches_local_median_val_and_local_norm_median_val():
+    # Both are only ever reached from inside REAL typical_validation
+    # (openpiv.validation.typical_validation, not the default
+    # loose_typical_validation patch) -- i.e. only when a caller opts into
+    # CPUPIVProcess's per_pass_validation and switches the module
+    # attribute back via use_real_validation(). Patched unconditionally
+    # here anyway since it's harmless when unreached (apply_speedups()
+    # only runs once) and avoids a second global-patch call site.
     import openpiv.validation
 
     apply_speedups()
-    assert openpiv.validation.local_median_val is orig_local_median_val
+    assert openpiv.validation.local_median_val is fast_local_median_val
+    assert openpiv.validation.local_norm_median_val is fast_local_norm_median_val
 
 
 def test_apply_speedups_does_not_patch_fft_correlate_images():
@@ -355,6 +396,23 @@ def test_apply_speedups_is_idempotent():
     apply_speedups()  # must not raise or double-wrap anything
     import openpiv.filters
     assert openpiv.filters.replace_nans is fast_replace_nans
+
+
+# ============================================================
+# use_real_validation() / use_loose_validation() toggle
+# ============================================================
+
+def test_use_real_and_loose_validation_toggle():
+    import openpiv.validation
+
+    apply_speedups()
+    use_real_validation()
+    assert openpiv.validation.typical_validation is orig_typical_validation
+    use_loose_validation()
+    assert openpiv.validation.typical_validation is loose_typical_validation
+    # leave the module on the default (loose) so later tests in this
+    # file/session aren't affected by this test's own toggling
+    use_loose_validation()
 
 
 # ============================================================

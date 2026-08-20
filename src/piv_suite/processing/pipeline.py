@@ -66,6 +66,13 @@ def process_frames(engine, frame_a, frame_b, post, report_gpu_mem=False, on_gpu_
         n_std_rejected = int((std_invalid & valid).sum())
         valid = valid & ~std_invalid
 
+    n_group_rejected = 0
+    group_threshold = getattr(post, "remove_small_groups_threshold", None)
+    if group_threshold:
+        grouped_valid = postprocess.remove_small_groups(valid, group_threshold)
+        n_group_rejected = int((valid & ~grouped_valid).sum())
+        valid = grouped_valid
+
     u_out, v_out = u.copy(), v.copy()
     u_out[~valid] = np.nan
     v_out[~valid] = np.nan
@@ -77,7 +84,11 @@ def process_frames(engine, frame_a, frame_b, post, report_gpu_mem=False, on_gpu_
     if post.smooth_field:
         u_out, v_out = postprocess.smooth_vector_field(u_out, v_out, post.smooth_sigma)
 
-    reject_counts = {"range_residual": n_range_rejected, "std_dev": n_std_rejected}
+    reject_counts = {
+        "range_residual": n_range_rejected,
+        "std_dev": n_std_rejected,
+        "small_groups": n_group_rejected,
+    }
     return u_out, v_out, valid, elapsed, reject_counts
 
 
@@ -120,6 +131,12 @@ def process_frames_tiled(frame_a, frame_b, post, init_raw_fn, n_tiles_y, n_tiles
         n_std_rejected = int((std_invalid & valid).sum())
         valid = valid & ~std_invalid
 
+    if getattr(post, "remove_small_groups_threshold", None):
+        print("[warn] remove_small_groups_threshold is ignored for tiled "
+              "output -- it needs a regular (ny, nx) grid to define "
+              "connectivity, and tiled results are an unstructured point "
+              "set stitched from multiple tiles' own local grids instead")
+
     u_out, v_out = u.copy(), v.copy()
     u_out[~valid] = np.nan
     v_out[~valid] = np.nan
@@ -133,7 +150,7 @@ def process_frames_tiled(frame_a, frame_b, post, init_raw_fn, n_tiles_y, n_tiles
               "are an unstructured point set stitched from multiple tiles' "
               "own local grids instead")
 
-    reject_counts = {"range_residual": n_range_rejected, "std_dev": n_std_rejected}
+    reject_counts = {"range_residual": n_range_rejected, "std_dev": n_std_rejected, "small_groups": 0}
     return x, y, u_out, v_out, valid, elapsed, reject_counts
 
 

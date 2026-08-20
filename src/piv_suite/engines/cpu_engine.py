@@ -93,14 +93,27 @@ class CPUPIVProcess:
     unknown keys are warned about, not silently dropped. sig2noise_*/
     validation_first_pass/replace_vectors are accepted if present (for
     backward compatibility with older settings dicts) but have no effect
-    -- see this module's docstring."""
+    -- see this module's docstring.
+
+    per_pass_validation/per_pass_median_threshold/per_pass_median_size
+    (not PIVSettings fields; popped before the above) opt into openpiv's
+    own real local-median/UOD validation between passes instead of the
+    NaN-only default -- see config.schema.ValidationSettings' docstring."""
 
     def __init__(self, frame_shape, **cpu_settings):
         from openpiv.settings import PIVSettings
         from openpiv.pyprocess import get_rect_coordinates
 
-        from ._openpiv_speedups import apply_speedups
+        from ._openpiv_speedups import apply_speedups, use_loose_validation, use_real_validation
         apply_speedups()
+
+        # Opt-in per-pass validation (see config.schema.ValidationSettings'
+        # docstring) -- popped before the unknown-fields check below since
+        # these aren't PIVSettings fields themselves, they control WHICH
+        # validation function windef's per-pass calls resolve to.
+        per_pass_validation = cpu_settings.pop("per_pass_validation", False)
+        per_pass_median_threshold = cpu_settings.pop("per_pass_median_threshold", 2.0)
+        per_pass_median_size = cpu_settings.pop("per_pass_median_size", 1)
 
         settings = PIVSettings()
         valid_fields = {f.name for f in dataclasses.fields(settings)}
@@ -131,6 +144,28 @@ class CPUPIVProcess:
         # sig2noise ratio nothing here uses (see windef.py's read of this
         # flag before each pass's correlation call).
         settings.sig2noise_validate = False
+
+        # Global module-level toggle, set once per engine construction --
+        # safe because this app runs one CPUPIVProcess per project/batch
+        # sequentially (never multiple engines with different validation
+        # settings concurrently in the same process).
+        self._per_pass_validation = per_pass_validation
+        if per_pass_validation:
+            settings.median_normalized = True
+            settings.median_threshold = per_pass_median_threshold
+            settings.median_size = per_pass_median_size
+            # DaVis's per-pass "multi-pass postprocessing" step is a pure
+            # local-median/UOD test -- no global range or std-dev
+            # criterion -- so widen openpiv's other typical_validation
+            # checks to effectively never trigger, isolating the local
+            # median test as the only one that can actually reject a
+            # vector here.
+            settings.min_max_u_disp = (-1e6, 1e6)
+            settings.min_max_v_disp = (-1e6, 1e6)
+            settings.std_threshold = 1e6
+            use_real_validation()
+        else:
+            use_loose_validation()
 
         self._settings = settings
         self.scaling_par = 1.0

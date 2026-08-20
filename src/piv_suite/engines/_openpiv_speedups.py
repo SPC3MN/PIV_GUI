@@ -382,16 +382,12 @@ def fast_local_median_val(u, v, u_threshold, v_threshold, size=1):
     (2*size+1)^2) values fed to the same nanmedian function per cell,
     just without a quarter-million individual Python calls to get there.
 
-    NOT USED -- deliberately excluded from apply_speedups(). openpiv's
-    own openpiv.validation.local_median_val was only ever called from
-    inside validation.typical_validation, which apply_speedups() now
-    replaces wholesale with loose_typical_validation (see this module's
-    docstring), so nothing calls local_median_val on the CPU calculation
-    path any more. Kept defined -- not dead code needing deletion, just
-    unused today -- since processing.postprocess's own local-median
-    filter (range_filter) could reuse this vectorized implementation for
-    a future perf pass if its scipy.ndimage.generic_filter call ever
-    becomes a bottleneck.
+    Wired in by apply_speedups() (patches openpiv.validation.local_median_val)
+    -- reached only when CPUPIVProcess's opt-in per_pass_validation is on
+    AND median_normalized is left False (the default is True, matching
+    DaVis's own per-pass scheme -- see fast_local_norm_median_val below
+    for the one actually exercised by that default); kept active for the
+    non-normalized case too since it's the same cost problem either way.
     """
     if np.ma.is_masked(u):
         masked_u = np.where(np.ma.getmask(u), np.nan, np.ma.getdata(u))
@@ -420,6 +416,77 @@ def _sliding_nanmedian(a, size):
         # keeping this path's console output no noisier than the original.
         warnings.filterwarnings("ignore", message="All-NaN slice encountered")
         return np.nanmedian(windows, axis=(-2, -1))
+
+
+def fast_local_norm_median_val(u, v, ε, threshold, size=1):
+    # Parameter literally named `ε` (not `eps`) -- openpiv's own
+    # typical_validation calls local_norm_median_val(u, v, ε=0.2,
+    # threshold=..., size=...) with that exact unicode keyword, and
+    # apply_speedups() patches this function in as a drop-in replacement
+    # for that same call site.
+    """Faithful vectorized re-implementation of
+    openpiv.validation.local_norm_median_val (the Westerweel & Scarano
+    "universal outlier detection" test -- DaVis's own per-pass validation
+    method, hence median_normalized=True's default in CPUPIVProcess's
+    opt-in per_pass_validation mode). The original calls
+    scipy.ndimage.generic_filter FOUR TIMES per pass (um, vm, rm_u, rm_v),
+    each a Python callback per grid cell -- confirmed the dominant new
+    cost once per_pass_validation is enabled (measured ~+80s per frame
+    pair on a real ~4000x3000 job, 4 passes x 4 generic_filter calls each
+    on grids up to ~195k cells).
+
+    Reproduces the original's exact per-window arithmetic vectorized
+    across all cells at once via a single NaN-padded sliding-window view
+    per array (shape (ny, nx, k*k), k=2*size+1) instead of one Python
+    callback invocation per cell per generic_filter call:
+    - um/vm: nanmedian over the FULL k*k window (center included),
+      matching the original's plain generic_filter(nanmedian, ...) calls.
+    - rm_u/rm_v: the original's rfunc sets the window's OWN center to NaN
+      before taking its median (ym) and then the median of |window - ym|
+      (also excluding center, since NaN propagates through the
+      subtraction and nanmedian ignores it) -- reproduced by building a
+      second window array with the middle column of the flattened k*k
+      window set to NaN before both nanmedian calls.
+    """
+    from numpy.lib.stride_tricks import sliding_window_view
+    import warnings
+
+    if np.ma.is_masked(u):
+        masked_u = np.where(np.ma.getmask(u), np.nan, np.ma.getdata(u))
+        masked_v = np.where(np.ma.getmask(v), np.nan, np.ma.getdata(v))
+    else:
+        masked_u = np.asarray(u, dtype=np.float64)
+        masked_v = np.asarray(v, dtype=np.float64)
+
+    k = 2 * size + 1
+    center = k * k // 2
+
+    def windows_of(a):
+        padded = np.pad(a.astype(np.float64, copy=False), size, mode="constant", constant_values=np.nan)
+        w = sliding_window_view(padded, (k, k)).reshape(a.shape[0], a.shape[1], k * k)
+        return w
+
+    wu, wv = windows_of(masked_u), windows_of(masked_v)
+    wu_excl, wv_excl = wu.copy(), wv.copy()
+    wu_excl[..., center] = np.nan
+    wv_excl[..., center] = np.nan
+
+    with warnings.catch_warnings():
+        # Same "All-NaN slice"/"Mean of empty slice" RuntimeWarnings the
+        # original's generic_filter(nanmedian, ...) calls already emit at
+        # the frame's border cells -- not a new behavior.
+        warnings.filterwarnings("ignore", message="All-NaN slice encountered")
+        warnings.filterwarnings("ignore", message="Mean of empty slice")
+        um = np.nanmedian(wu, axis=-1)
+        vm = np.nanmedian(wv, axis=-1)
+        ym_u = np.nanmedian(wu_excl, axis=-1)
+        ym_v = np.nanmedian(wv_excl, axis=-1)
+        rm_u = np.nanmedian(np.abs(wu_excl - ym_u[..., None]), axis=-1)
+        rm_v = np.nanmedian(np.abs(wv_excl - ym_v[..., None]), axis=-1)
+
+    r0ast_u = np.abs(masked_u - um) / (rm_u + ε)
+    r0ast_v = np.abs(masked_v - vm) / (rm_v + ε)
+    return np.sqrt(r0ast_u ** 2 + r0ast_v ** 2) > threshold
 
 
 def loose_typical_validation(u, v, s2n, settings):
@@ -453,6 +520,30 @@ def loose_typical_validation(u, v, s2n, settings):
 
 
 _PATCHED = False
+_REAL_TYPICAL_VALIDATION = None
+
+
+def use_loose_validation():
+    """Switch openpiv.validation.typical_validation to the NaN-only patch
+    (this codebase's default calculation-time behavior -- see
+    loose_typical_validation's docstring). Requires apply_speedups() to
+    have run at least once."""
+    import openpiv.validation
+    openpiv.validation.typical_validation = loose_typical_validation
+
+
+def use_real_validation():
+    """Switch openpiv.validation.typical_validation to openpiv's OWN
+    unpatched implementation (global range + std-dev + local-median/UOD,
+    driven by whatever settings.min_max_u_disp/std_threshold/
+    median_threshold/median_size/median_normalized the caller has set) --
+    for CPUPIVProcess's opt-in per_pass_validation mode, see
+    cpu_engine.py. Requires apply_speedups() to have run at least once
+    (that's what captures the real function before patching it away)."""
+    import openpiv.validation
+    if _REAL_TYPICAL_VALIDATION is None:
+        raise RuntimeError("apply_speedups() must run before use_real_validation()")
+    openpiv.validation.typical_validation = _REAL_TYPICAL_VALIDATION
 
 
 def apply_speedups():
@@ -472,7 +563,7 @@ def apply_speedups():
     extended_search_area_piv, windef.py's multipass_img_deform calling
     `validation.typical_validation`), so patching the module attribute
     there is sufficient."""
-    global _PATCHED
+    global _PATCHED, _REAL_TYPICAL_VALIDATION
     if _PATCHED:
         return
     import openpiv.filters
@@ -483,7 +574,15 @@ def apply_speedups():
     openpiv.lib.replace_nans = fast_replace_nans
     openpiv.filters.replace_nans = fast_replace_nans
     openpiv.pyprocess.correlation_to_displacement = fast_correlation_to_displacement
+    _REAL_TYPICAL_VALIDATION = openpiv.validation.typical_validation
     openpiv.validation.typical_validation = loose_typical_validation
+    # Only reached when a caller opts into per_pass_validation and
+    # switches the module attribute above back to _REAL_TYPICAL_VALIDATION
+    # (see use_real_validation()) -- patched unconditionally here anyway
+    # since it's harmless when unreached and this is the only place
+    # apply_speedups() ever runs.
+    openpiv.validation.local_median_val = fast_local_median_val
+    openpiv.validation.local_norm_median_val = fast_local_norm_median_val
     # fast_fft_correlate_images is intentionally NOT wired in here -- see
     # its docstring's final paragraph. It passed every isolated check
     # (peak location unchanged in 2000/2000 real windows, diff exactly at

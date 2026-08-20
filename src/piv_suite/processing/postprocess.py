@@ -79,6 +79,27 @@ def _nan_median_filter(a, size):
     return generic_filter(a, np.nanmedian, size=size, mode="nearest")
 
 
+def remove_small_groups(valid_mask, min_group_size):
+    """Reject vectors belonging to a connected group of valid vectors
+    smaller than min_group_size (4-connectivity), matching LaVision's
+    "remove groups" final post-processing step -- catches small isolated
+    islands of spuriously-agreeing vectors that neither the field-wide
+    std-dev filter nor the local-median residual filter reject (each
+    vector in a small cluster can look locally consistent with its few
+    neighbors while still being wrong). Returns a new bool mask (True =
+    still valid); does not mutate the input."""
+    from scipy.ndimage import label
+    if min_group_size is None or min_group_size <= 1:
+        return valid_mask
+    labels, n = label(valid_mask)
+    if n == 0:
+        return valid_mask
+    sizes = np.bincount(labels.ravel())
+    keep = sizes >= min_group_size
+    keep[0] = False  # background label
+    return keep[labels]
+
+
 def replace_invalid_vectors(x, y, u, v, valid_mask):
     from scipy.interpolate import griddata
     invalid = ~valid_mask

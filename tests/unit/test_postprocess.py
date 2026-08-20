@@ -3,7 +3,7 @@ import pytest
 
 from piv_suite.processing.postprocess import (
     _nan_median_filter, apply_calibration, global_outlier_mask, range_filter,
-    replace_invalid_vectors, smooth_vector_field,
+    remove_small_groups, replace_invalid_vectors, smooth_vector_field,
 )
 
 
@@ -77,6 +77,24 @@ def test_range_filter_no_bounds_rejects_nothing():
     v = np.array([1.0, 1000.0])
     invalid = range_filter(u, v)
     assert not invalid.any()
+
+
+def test_remove_small_groups_drops_island_keeps_cluster():
+    valid = np.zeros((6, 6), dtype=bool)
+    valid[0, 0] = True
+    valid[0, 1] = True  # isolated 2-vector island
+    valid[3:5, 3:5] = True  # 4-vector cluster
+    valid[5, 4] = True  # touches cluster -> 5-vector cluster total
+    out = remove_small_groups(valid, min_group_size=5)
+    assert not out[0, 0] and not out[0, 1]
+    assert out[3:5, 3:5].all()
+    assert out[5, 4]
+
+
+def test_remove_small_groups_none_or_le_one_disables():
+    valid = np.array([[True, False], [False, True]])
+    np.testing.assert_array_equal(remove_small_groups(valid, None), valid)
+    np.testing.assert_array_equal(remove_small_groups(valid, 1), valid)
 
 
 def test_replace_invalid_vectors_interpolates():
