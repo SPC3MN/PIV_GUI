@@ -58,13 +58,15 @@ def migrate(legacy: dict) -> ProjectConfig:
             subpixel_method=piv_settings.get("subpixel_method", "gaussian"),
             batch_size=piv_settings.get("batch_size"),
         )
+        # sig2noise_*/revalidate are intentionally dropped here -- those
+        # ValidationSettings fields were removed when real vector
+        # validation moved entirely to PostProcessSettings (see schema.py's
+        # ValidationSettings docstring); what's migrated is purely the
+        # internal per-pass NaN-safety-fill mechanism that's left.
         validation = ValidationSettings(
-            sig2noise_method=piv_settings.get("s2n_method", "peak2mean"),
-            sig2noise_threshold=piv_settings.get("s2n_tol", 1.05),
             filter_method=piv_settings.get("replacing_method", "localmean"),
             max_filter_iteration=piv_settings.get("num_replacing_iters", 4),
             filter_kernel_size=piv_settings.get("replacing_size", 2),
-            validation_first_pass=piv_settings.get("revalidate", True),
             smoothn=piv_settings.get("smooth", False),
             smoothn_p=piv_settings.get("smoothing_par", 0.05),
         )
@@ -87,12 +89,9 @@ def migrate(legacy: dict) -> ProjectConfig:
             deformation_method=cpu_settings.get("deformation_method", "symmetric"),
             interpolation_order=cpu_settings.get("interpolation_order", 3),
         )
+        # sig2noise_*/validation_first_pass/replace_vectors are intentionally
+        # dropped here -- see the GPU branch's comment above.
         validation = ValidationSettings(
-            sig2noise_method=cpu_settings.get("sig2noise_method", "peak2mean"),
-            sig2noise_threshold=cpu_settings.get("sig2noise_threshold", 1.05),
-            sig2noise_validate=cpu_settings.get("sig2noise_validate", True),
-            validation_first_pass=cpu_settings.get("validation_first_pass", True),
-            replace_vectors=cpu_settings.get("replace_vectors", True),
             filter_method=cpu_settings.get("filter_method", "localmean"),
             max_filter_iteration=cpu_settings.get("max_filter_iteration", 4),
             filter_kernel_size=cpu_settings.get("filter_kernel_size", 2),

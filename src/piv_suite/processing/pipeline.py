@@ -44,6 +44,13 @@ def process_frames(engine, frame_a, frame_b, post, report_gpu_mem=False, on_gpu_
         on_gpu_report()
     elapsed = time.time() - t0
 
+    # `engine.val_locations` is always all-False on both backends (see
+    # engines/cpu_engine.py and config/legacy.py's to_gpu_settings) --
+    # validation is no longer decided during calculation, so `valid`
+    # below is determined ENTIRELY by the filters that follow, driven by
+    # `post` (PostProcessSettings). This invariant is load-bearing: don't
+    # reintroduce a rejecting engine-side validation without updating it
+    # here too.
     valid = ~engine.val_locations
 
     range_cfg = getattr(post, "range_filter", None)
@@ -79,8 +86,12 @@ def process_frames_tiled(frame_a, frame_b, post, init_raw_fn, n_tiles_y, n_tiles
     """Tiled counterpart to process_frames() -- runs the GPU engine tile
     by tile (engines.gpu_engine.run_tiled) to bound peak GPU memory on
     very large frames, then applies the same post-processing chain.
-    smooth_field is intentionally skipped (with a warning) since tiled
-    output is an unstructured point set, not a regular grid."""
+    range_filter and smooth_field are intentionally skipped (with a
+    warning) since tiled output is an unstructured point set, not a
+    regular (ny, nx) grid -- range_filter's local-window median needs a
+    grid to define "local," and smooth_field's Gaussian blur does too.
+    global_outlier_mask has no such requirement (field-wide mean/std over
+    a flat array works the same regardless of shape), so it still runs."""
     from ..engines.gpu_engine import run_tiled
 
     class _Ctrl:  # minimal shim -- run_tiled only reads .verbose
@@ -97,9 +108,11 @@ def process_frames_tiled(frame_a, frame_b, post, init_raw_fn, n_tiles_y, n_tiles
     range_cfg = getattr(post, "range_filter", None)
     n_range_rejected = 0
     if range_cfg:
-        range_invalid = postprocess.range_filter(u, v, **range_cfg)
-        n_range_rejected = int((range_invalid & valid).sum())
-        valid = valid & ~range_invalid
+        print("[warn] range_filter (universal outlier detection) is "
+              "ignored for tiled output -- its local-window median needs "
+              "a regular (ny, nx) grid, and tiled results are an "
+              "unstructured point set stitched from multiple tiles' own "
+              "local grids instead")
 
     n_std_rejected = 0
     if post.global_outlier_std is not None:

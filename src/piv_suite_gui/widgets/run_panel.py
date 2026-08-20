@@ -65,15 +65,16 @@ class RunPanel(QWidget):
     def _start_run(self):
         main_window = self.window()
         project = main_window.project_panel.get_project_settings()
+        preprocess = main_window.project_panel.get_preprocess_settings()
         correlation = main_window.settings_panel.get_correlation_settings()
         validation = main_window.settings_panel.get_validation_settings()
         post = main_window.settings_panel.get_postprocess_settings()
         calibration = main_window.settings_panel.get_calibration_settings()
 
         from piv_suite.config.schema import ProjectConfig
-        config = ProjectConfig(project=project, correlation=correlation,
-                                validation=validation, postprocess=post,
-                                calibration=calibration)
+        config = ProjectConfig(project=project, preprocess=preprocess,
+                                correlation=correlation, validation=validation,
+                                postprocess=post, calibration=calibration)
         if project.mode == "stereo":
             config.stereo = main_window.calibration_panel.get_settings()
         config.output.save_npz = True

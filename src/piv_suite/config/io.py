@@ -10,8 +10,9 @@ import os
 
 from .schema import (
     CalibrationSettings, CameraMappingSettings, CorrelationSettings,
-    OutputSettings, PassSettings, PostProcessSettings, ProjectConfig,
-    ProjectSettings, RangeFilterSettings, StereoSettings, ValidationSettings,
+    OutputSettings, PassSettings, PostProcessSettings, PreprocessSettings,
+    ProjectConfig, ProjectSettings, RangeFilterSettings, StereoSettings,
+    ValidationSettings,
 )
 
 
@@ -23,42 +24,60 @@ def _passes_from_dicts(items):
     return [PassSettings(**d) for d in items]
 
 
+def _filtered_kwargs(cls, d):
+    """Drop unknown/stale keys before constructing `cls` from a dict --
+    protects from_dict against a TypeError when an older .pivproj file
+    has fields a newer schema version removed (e.g. ValidationSettings'
+    sig2noise_*/validation_first_pass/replace_vectors fields, removed
+    when validation moved to PostProcessSettings). Applied to every
+    section below so a future field removal doesn't hard-break loading
+    every pre-existing project file the same way."""
+    valid = {f.name for f in dataclasses.fields(cls)}
+    unknown = set(d) - valid
+    if unknown:
+        print(f"[warn] config.io: dropping unknown/stale keys {sorted(unknown)} "
+              f"for {cls.__name__} (likely from an older .pivproj file)")
+    return {k: v for k, v in d.items() if k in valid}
+
+
 def from_dict(d: dict) -> ProjectConfig:
     """Reconstruct a typed ProjectConfig from a plain (JSON-loaded) dict.
     Explicit per-section reconstruction rather than generic reflection --
     the schema is small and stable enough that this is more robust than a
     generic dict->dataclass walker, and keeps failures localized/legible
     (a bad section raises with that section's name in the traceback)."""
-    project = ProjectSettings(**d.get("project", {}))
+    project = ProjectSettings(**_filtered_kwargs(ProjectSettings, d.get("project", {})))
+
+    preprocess = PreprocessSettings(**_filtered_kwargs(PreprocessSettings, d.get("preprocess", {})))
 
     corr_d = dict(d.get("correlation", {}))
     if "passes" in corr_d:
         corr_d["passes"] = _passes_from_dicts(corr_d["passes"])
-    correlation = CorrelationSettings(**corr_d)
+    correlation = CorrelationSettings(**_filtered_kwargs(CorrelationSettings, corr_d))
 
-    validation = ValidationSettings(**d.get("validation", {}))
+    validation = ValidationSettings(**_filtered_kwargs(ValidationSettings, d.get("validation", {})))
 
     post_d = dict(d.get("postprocess", {}))
     if "range_filter" in post_d and post_d["range_filter"] is not None:
-        post_d["range_filter"] = RangeFilterSettings(**post_d["range_filter"])
-    postprocess = PostProcessSettings(**post_d)
+        post_d["range_filter"] = RangeFilterSettings(**_filtered_kwargs(RangeFilterSettings, post_d["range_filter"]))
+    postprocess = PostProcessSettings(**_filtered_kwargs(PostProcessSettings, post_d))
 
-    calibration = CalibrationSettings(**d.get("calibration", {}))
+    calibration = CalibrationSettings(**_filtered_kwargs(CalibrationSettings, d.get("calibration", {})))
 
     stereo_d = dict(d.get("stereo", {}))
     for key in ("cam0_mapping", "cam1_mapping"):
         if key in stereo_d and stereo_d[key] is not None:
-            stereo_d[key] = CameraMappingSettings(**stereo_d[key])
+            stereo_d[key] = CameraMappingSettings(**_filtered_kwargs(CameraMappingSettings, stereo_d[key]))
     if "world_shape" in stereo_d and stereo_d["world_shape"] is not None:
         stereo_d["world_shape"] = tuple(stereo_d["world_shape"])
-    stereo = StereoSettings(**stereo_d)
+    stereo = StereoSettings(**_filtered_kwargs(StereoSettings, stereo_d))
 
-    output = OutputSettings(**d.get("output", {}))
+    output = OutputSettings(**_filtered_kwargs(OutputSettings, d.get("output", {})))
 
     return ProjectConfig(
-        project=project, correlation=correlation, validation=validation,
-        postprocess=postprocess, calibration=calibration, stereo=stereo,
-        output=output,
+        project=project, preprocess=preprocess, correlation=correlation,
+        validation=validation, postprocess=postprocess,
+        calibration=calibration, stereo=stereo, output=output,
     )
 
 

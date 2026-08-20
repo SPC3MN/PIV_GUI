@@ -87,7 +87,13 @@ def passes_from_gpu(min_search_size, search_size_iters, overlap_ratio):
 
 def to_cpu_settings(correlation: CorrelationSettings, validation: ValidationSettings) -> dict:
     """-> cpu_settings dict, ready for engines.cpu_engine.CPUPIVProcess /
-    init_cpu_processor (openpiv.settings.PIVSettings field names)."""
+    init_cpu_processor (openpiv.settings.PIVSettings field names).
+
+    No sig2noise_*/validation_first_pass/replace_vectors keys -- those
+    ValidationSettings fields were removed (validation now lives entirely
+    in PostProcessSettings; CPUPIVProcess itself force-disables
+    sig2noise_validate and always runs its NaN-only per-pass fill, see
+    engines/cpu_engine.py)."""
     windowsizes, overlap = passes_to_cpu(correlation.passes)
     return {
         "windowsizes": windowsizes,
@@ -97,11 +103,6 @@ def to_cpu_settings(correlation: CorrelationSettings, validation: ValidationSett
         "subpixel_method": correlation.subpixel_method,
         "deformation_method": correlation.deformation_method,
         "interpolation_order": correlation.interpolation_order,
-        "sig2noise_method": validation.sig2noise_method,
-        "sig2noise_threshold": validation.sig2noise_threshold,
-        "sig2noise_validate": validation.sig2noise_validate,
-        "validation_first_pass": validation.validation_first_pass,
-        "replace_vectors": validation.replace_vectors,
         "filter_method": validation.filter_method,
         "max_filter_iteration": validation.max_filter_iteration,
         "filter_kernel_size": validation.filter_kernel_size,
@@ -131,7 +132,18 @@ def to_gpu_settings(correlation: CorrelationSettings, validation: ValidationSett
     drawn from {'median', 'spring', 'mean'} -- a different vocabulary AND
     shape than CPU's scalar filter_method (which allows 'localmean',
     'disk', 'distance' -- none of which piv_gpu accepts). 'median' per
-    pass is the closest equivalent to CPU's 'localmean' default."""
+    pass is the closest equivalent to CPU's 'localmean' default.
+
+    s2n_tol/median_tol/mad_tol/mean_tol/rms_tol are ALL hard-coded to
+    None (validation now lives entirely in PostProcessSettings, not
+    here): ValidationGPU only computes/ORs a criterion when its tol is
+    not None, so with all five None, piv_gpu.val_locations is always
+    all-False -- confirmed by reading openpiv_gpu/gpu_validation.py and
+    gpu_process.py directly, no vendored-repo changes needed.
+    num_replacing_iters is hard-coded to 0 (replace_outliers short-
+    circuits immediately once val_locations is always empty, so any
+    other value would be inert -- 0 says so honestly) and revalidate is
+    hard-coded to False (nothing to revalidate against)."""
     min_search_size, search_size_iters, overlap_ratio = passes_to_gpu(correlation.passes)
     num_passes = len(search_size_iters)
     piv_settings = {
@@ -139,12 +151,15 @@ def to_gpu_settings(correlation: CorrelationSettings, validation: ValidationSett
         "overlap_ratio": overlap_ratio,
         "dt": correlation.dt,
         "subpixel_method": correlation.subpixel_method,
-        "s2n_method": validation.sig2noise_method,
-        "s2n_tol": validation.sig2noise_threshold,
+        "s2n_tol": None,
+        "median_tol": None,
+        "mad_tol": None,
+        "mean_tol": None,
+        "rms_tol": None,
         "replacing_method": ("median",) * num_passes,
-        "num_replacing_iters": validation.max_filter_iteration,
+        "num_replacing_iters": 0,
         "replacing_size": validation.filter_kernel_size,
-        "revalidate": validation.validation_first_pass,
+        "revalidate": False,
         "smooth": validation.smoothn,
         "smoothing_par": validation.smoothn_p,
     }

@@ -32,6 +32,7 @@ from piv_suite.io.loose_files import (
 from piv_suite.plotting.preview import AVAILABLE_COLORMAPS, make_preview_figure
 from piv_suite.processing import pipeline
 from piv_suite.processing.postprocess import apply_calibration
+from piv_suite.processing.preprocess import apply_preprocess_pair
 
 from ._util import style_spin
 
@@ -234,15 +235,16 @@ class PreviewPanel(QWidget):
         QApplication.processEvents()
         try:
             project = main_window.project_panel.get_project_settings()
+            preprocess = main_window.project_panel.get_preprocess_settings()
             correlation = main_window.settings_panel.get_correlation_settings()
             validation = main_window.settings_panel.get_validation_settings()
             post = main_window.settings_panel.get_postprocess_settings()
             calibration = main_window.settings_panel.get_calibration_settings()
 
             if project.mode == "stereo":
-                self._preview_stereo(main_window, project, correlation, validation, post, calibration, index)
+                self._preview_stereo(main_window, project, preprocess, correlation, validation, post, calibration, index)
             else:
-                self._preview_planar(project, correlation, validation, post, calibration, index)
+                self._preview_planar(project, preprocess, correlation, validation, post, calibration, index)
             self.previewed.emit(True)
         except Exception as e:
             self.status_label.setText(f"Preview failed: {e}")
@@ -252,8 +254,9 @@ class PreviewPanel(QWidget):
             self.progress_bar.setVisible(False)
             self.preview_btn.setEnabled(True)
 
-    def _preview_planar(self, project, correlation, validation, post, calibration, index):
+    def _preview_planar(self, project, preprocess, correlation, validation, post, calibration, index):
         pair_id, frame_a, frame_b = self._first_pair_planar(project, index)
+        frame_a, frame_b = apply_preprocess_pair(frame_a, frame_b, preprocess)
         engine, x, y = _build_engine(project.backend, frame_a.shape, correlation, validation)
 
         u, v, valid, elapsed, rejects = pipeline.process_frames(engine, frame_a, frame_b, post.for_pipeline())
@@ -273,7 +276,7 @@ class PreviewPanel(QWidget):
         )
         self._set_canvas(fig)
 
-    def _preview_stereo(self, main_window, project, correlation, validation, post, calibration, index):
+    def _preview_stereo(self, main_window, project, preprocess, correlation, validation, post, calibration, index):
         stereo_settings = main_window.calibration_panel.get_settings()
         cam0 = CameraMapping(
             stereo_settings.cam0_mapping.x0, stereo_settings.cam0_mapping.x_span,
@@ -289,6 +292,8 @@ class PreviewPanel(QWidget):
         )
 
         pair_id, fa0, fb0, fa1, fb1 = self._first_pair_stereo(project, index)
+        fa0, fb0 = apply_preprocess_pair(fa0, fb0, preprocess)
+        fa1, fb1 = apply_preprocess_pair(fa1, fb1, preprocess)
         dw_a0 = cam0.dewarp_image(fa0, stereo_settings.world_shape, stereo_settings.dewarp_order)
         dw_b0 = cam0.dewarp_image(fb0, stereo_settings.world_shape, stereo_settings.dewarp_order)
         dw_a1 = cam1.dewarp_image(fa1, stereo_settings.world_shape, stereo_settings.dewarp_order)

@@ -110,6 +110,43 @@ def check_piv_settings(piv_settings):
               "kwargs (they're silently ignored, not an error)")
 
 
+class _NanSafeGPUProcess:
+    """Thin __call__-only proxy around a piv_gpu instance -- NaN-median-
+    fills the FINAL u/v output, a safety net for validation now living
+    entirely in processing.postprocess (config.legacy.to_gpu_settings
+    hard-codes every ValidationGPU tolerance to None, so piv_gpu's own
+    per-pass validate/replace loop is fully inert, not just non-
+    rejecting -- unlike the CPU backend's loose_typical_validation, which
+    still catches literal NaN between passes, ValidationGPU's
+    `abs(f - stat) > tol`-style comparisons never flag NaN regardless of
+    tolerance, so nothing currently protects an intermediate pass's NaN
+    from reaching PIVGPU.interpolate_displacement's RegularGridInterp
+    -- see the perf/validation investigation notes). This only cleans the
+    final returned field, not mid-pipeline NaN; that gap is currently
+    latent, not live, since PIV_GUI doesn't wire piv_gpu's `mask` kwarg
+    (the only way today to introduce field NaN) into the GUI/CLI at all
+    -- revisit with a real per-pass fix if/when that changes.
+
+    Everything else (`.coords`, `.val_locations`, `.scaling_par`,
+    `.min_search_size`, ...) passes straight through via __getattr__ so
+    run_tiled()/init_gpu_processor() see no difference from the raw
+    piv_gpu instance."""
+
+    def __init__(self, process):
+        self._process = process
+
+    def __call__(self, frame_a, frame_b):
+        u, v = self._process(frame_a, frame_b)
+        if np.isnan(u).any():
+            u = np.where(np.isnan(u), np.nanmedian(u), u)
+        if np.isnan(v).any():
+            v = np.where(np.isnan(v), np.nanmedian(v), v)
+        return u, v
+
+    def __getattr__(self, name):
+        return getattr(self._process, name)
+
+
 def _init_gpu_processor_raw(frame_shape, min_search_size, piv_settings):
     """Like init_gpu_processor(), but returns coords BEFORE the top-down-
     to-bottom-up y-flip -- used directly by the non-tiled path (which
@@ -124,7 +161,7 @@ def _init_gpu_processor_raw(frame_shape, min_search_size, piv_settings):
     # anything loaded from the config file needs converting back to a
     # tuple, or piv_gpu rejects it even though the values are correct.
     piv_settings = {k: (tuple(v) if isinstance(v, list) else v) for k, v in piv_settings.items()}
-    process = piv_gpu(frame_shape, min_search_size, **piv_settings)
+    process = _NanSafeGPUProcess(piv_gpu(frame_shape, min_search_size, **piv_settings))
     x, y = process.coords
     return process, x, y
 

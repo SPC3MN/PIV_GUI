@@ -72,19 +72,22 @@ class CorrelationSettings:
 
 @dataclass
 class ValidationSettings:
-    """Per-pass validation/replacement the CPU/GPU engines run internally
-    between multi-pass window-deformation passes (openpiv.windef /
-    piv_gpu need SOME threshold to decide which vectors get replaced
-    before the next pass can deform the image) -- kept as an internal
-    dataclass with fixed defaults, no longer exposed in the GUI. The
-    user-facing "remove invalid vectors" step is PostProcessSettings'
-    std-dev and residual filters instead, applied once after the engine
-    has already produced its final field, not this per-pass mechanism."""
-    sig2noise_method: str = "peak2mean"
-    sig2noise_threshold: float = 1.05
-    sig2noise_validate: bool = True
-    validation_first_pass: bool = True
-    replace_vectors: bool = True
+    """Internal per-pass NUMERICAL STABILITY mechanism only -- NOT
+    validation in the user-facing sense, despite the class name (kept for
+    config-file/backward-compatibility continuity). CPU/GPU both need
+    SOME per-pass fill so a NaN cell doesn't poison the next pass's
+    deformation grid (openpiv.windef.multipass_img_deform calls
+    validation.typical_validation + filters.replace_outliers
+    unconditionally, with no flag to disable it) -- but on the CPU
+    backend that per-pass check is patched (see
+    engines/_openpiv_speedups.loose_typical_validation) to flag literal
+    NaN ONLY, never a real outlier, and on the GPU backend
+    config.legacy.to_gpu_settings hard-codes every ValidationGPU
+    tolerance to None so nothing is ever flagged there either. No vector
+    is ever counted invalid because of anything here. The user-facing
+    "remove invalid vectors" step is PostProcessSettings' std-dev and
+    residual filters instead, applied exactly once, after the engine has
+    already produced its final field -- see that class's docstring."""
     filter_method: str = "localmean"
     max_filter_iteration: int = 4
     filter_kernel_size: int = 2
@@ -99,8 +102,8 @@ class RangeFilterSettings:
     exceeds residual_max. This is the sole "remove if residual..."
     detection method (no magnitude/component range option -- see
     PostProcessSettings' docstring for why)."""
-    enabled: bool = False
-    residual_max: Optional[float] = None
+    enabled: bool = True
+    residual_max: Optional[float] = 3.0
     window_size: int = 3
 
     def to_kwargs(self):
@@ -114,15 +117,17 @@ class RangeFilterSettings:
 
 @dataclass
 class PostProcessSettings:
-    """Removing invalid vectors uses exactly two detection methods,
-    deliberately -- not the engines' own internal per-pass validation
-    (see ValidationSettings' docstring): "remove if difference to
-    standard deviation exceeds n_std" (global_outlier_std) and "remove if
-    residual [from the local window median] exceeds residual_max"
-    (range_filter, with a window_size control). replace_invalid/
-    smooth_field are a separate, later step (filling gaps in what's left
-    after removal), not a third detection method."""
-    global_outlier_std: Optional[float] = None   # std-dev spurious-vector filter; None disables
+    """The SOLE source of vector validation (see ValidationSettings'
+    docstring -- the engines themselves never reject anything). Two
+    detection methods, matching standard LaVision-style post-processing,
+    both ON by default: "remove if difference from the field mean
+    exceeds n_std standard deviations" (global_outlier_std) and "remove
+    if residual [from the local window median] exceeds residual_max"
+    (range_filter, i.e. universal outlier detection, with a window_size
+    control). replace_invalid/smooth_field are a separate, later step
+    (filling gaps in what's left after removal), not a third detection
+    method."""
+    global_outlier_std: Optional[float] = 3.0   # std-dev spurious-vector filter; None disables
     range_filter: RangeFilterSettings = field(default_factory=RangeFilterSettings)
     replace_invalid: bool = False
     smooth_field: bool = False
@@ -141,6 +146,21 @@ class PostProcessSettings:
         p.smooth_field = self.smooth_field
         p.smooth_sigma = self.smooth_sigma
         return p
+
+
+@dataclass
+class PreprocessSettings:
+    """LaVision-style min/max intensity filter (processing.preprocess.
+    min_max_filter), applied to RAW camera frames before any correlation
+    -- for stereo, applied per-camera BEFORE dewarping (each camera's own
+    raw pixel grid, not the calibrated/mapped one). Removes local
+    background intensity level and normalizes local contrast over a
+    window of min_max_filter_length pixels (see processing/preprocess.py
+    for the exact 5-step formula). Off by default -- unlike the
+    validation filters, this changes the input images themselves, so
+    it's opt-in."""
+    min_max_filter_enabled: bool = False
+    min_max_filter_length: int = 5   # L, in pixels
 
 
 @dataclass
@@ -193,6 +213,7 @@ class ProjectConfig:
     """The full, canonical settings tree for one PIV project -- what
     gets saved to/loaded from a `.pivproj` JSON file (config.io)."""
     project: ProjectSettings = field(default_factory=ProjectSettings)
+    preprocess: PreprocessSettings = field(default_factory=PreprocessSettings)
     correlation: CorrelationSettings = field(default_factory=CorrelationSettings)
     validation: ValidationSettings = field(default_factory=ValidationSettings)
     postprocess: PostProcessSettings = field(default_factory=PostProcessSettings)

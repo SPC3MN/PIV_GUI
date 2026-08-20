@@ -28,6 +28,7 @@ from ..plotting.preview import preview_first_snapshot_cli
 from ..plotting.stereo import plot_and_save_stereo
 from ..processing import pipeline
 from ..processing.postprocess import apply_calibration
+from ..processing.preprocess import apply_preprocess_pair
 
 
 def _engine_settings(backend, correlation, validation):
@@ -120,6 +121,7 @@ def process_pairs_planar(pair_source, cfg, output_dir, interactive_preview):
     summary_rows = []
 
     for idx, (pair_id, frame_a, frame_b) in enumerate(pair_source):
+        frame_a, frame_b = apply_preprocess_pair(frame_a, frame_b, cfg.preprocess)
         if not cfg.correlation.use_tiling and engine is None:
             engine, x, y = _build_engine(backend, frame_a.shape, cfg.correlation, cfg.validation)
 
@@ -208,6 +210,8 @@ def handle_pair_stereo(pair_id, dw_a0, dw_b0, dw_a1, dw_b1, cfg, angles, output_
 def process_pairs_stereo(pair_source, cfg, angles, output_dir, interactive_preview):
     summary_rows = []
     for idx, (pair_id, fa0, fb0, fa1, fb1) in enumerate(pair_source):
+        fa0, fb0 = apply_preprocess_pair(fa0, fb0, cfg.preprocess)
+        fa1, fb1 = apply_preprocess_pair(fa1, fb1, cfg.preprocess)
         dw_a0 = cfg.stereo._cam0.dewarp_image(fa0, cfg.stereo.world_shape, cfg.stereo.dewarp_order)
         dw_b0 = cfg.stereo._cam0.dewarp_image(fb0, cfg.stereo.world_shape, cfg.stereo.dewarp_order)
         dw_a1 = cfg.stereo._cam1.dewarp_image(fa1, cfg.stereo.world_shape, cfg.stereo.dewarp_order)

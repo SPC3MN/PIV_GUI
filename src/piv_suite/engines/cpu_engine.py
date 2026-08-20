@@ -5,18 +5,32 @@ Migrated unchanged from piv_common.CPUPIVProcess/init_cpu_processor
 anywhere in this module -- this engine works on any machine with plain
 openpiv-python installed.
 
-CPUPIVProcess.__init__ applies _openpiv_speedups.apply_speedups() before
-any processing -- three drop-in, numerically-verified-equivalent
-vectorized replacements for openpiv functions that otherwise dominate
-wall-clock time on large, high-overlap, multi-pass runs (confirmed on a
-real 3008x4096 frame pair: ~49% of a single 32px/75%-overlap pass was
-replace_nans, ~35% was a pure-Python per-window loop in
-correlation_to_displacement, ~13% was local_median_val's generic_filter
-callback). Full multi-pass output matches the unpatched baseline to
-~1e-15 per vector on real data -- see _openpiv_speedups.py for exactly
-what's patched, what was tried and rejected (an FFT-backend swap that
-looked safe in isolation but compounded into real divergence across
-passes), and why.
+VALIDATION LIVES IN POST-PROCESSING, NOT HERE. This engine's job is
+purely to produce a displacement field; the openpiv internals it drives
+(windef.first_pass / windef.multipass_img_deform) still call
+validation.typical_validation and filters.replace_outliers
+unconditionally every pass -- openpiv gives no settings flag to disable
+that -- but _openpiv_speedups.apply_speedups() replaces
+typical_validation with a version that flags a vector invalid ONLY when
+it is literal NaN (see _openpiv_speedups.loose_typical_validation).
+That keeps replace_outliers as a pure numerical-stability mechanism
+(preventing a residual-NaN cell from poisoning the NEXT pass's
+RectBivariateSpline deformation -- see _fill_residual_nan below for the
+documented crash this guards against) without ever causing a vector to
+be counted "invalid" mid-calculation. self.val_locations is therefore
+always all-False (all-valid): the ENTIRE final valid/invalid decision is
+made once, downstream, in processing.postprocess, driven by
+PostProcessSettings.
+
+CPUPIVProcess.__init__ also applies the two remaining faithful,
+numerically-verified-equivalent speedups from the same module for
+functions that otherwise dominate wall-clock time on large,
+high-overlap, multi-pass runs (confirmed on a real 3008x4096 frame pair:
+~49% of a single 32px/75%-overlap pass was replace_nans, ~35% was a
+pure-Python per-window loop in correlation_to_displacement). See
+_openpiv_speedups.py for exactly what's patched, what was tried and
+rejected (an FFT-backend swap that looked safe in isolation but
+compounded into real divergence across passes), and why.
 """
 
 import dataclasses
@@ -27,10 +41,12 @@ import numpy as np
 def _fill_residual_nan(u, v):
     """openpiv's own filters.replace_outliers (method=localmean, bounded
     by max_filter_iteration/filter_kernel_size) can't always fully repair
-    a pass's flagged-invalid vectors -- e.g. a no-signal region sitting
-    right at the frame edge has no far-side valid neighbor for a local
-    mean to converge from, no matter how many iterations run. Confirmed
-    on a real image pair (Windows/CUDA hardware): 310 vectors survived
+    a pass's literal-NaN cells (flagged by loose_typical_validation, see
+    this module's docstring -- "flagged" here means NaN, not a
+    value-based rejection) -- e.g. a no-signal region sitting right at
+    the frame edge has no far-side valid neighbor for a local mean to
+    converge from, no matter how many iterations run. Confirmed on a
+    real image pair (Windows/CUDA hardware): 310 vectors survived
     pass 1's own replace_outliers call as literal NaN, all clustered in
     the bottom few grid rows.
 
@@ -70,14 +86,14 @@ class CPUPIVProcess:
 
     This replicates the per-pair body of `openpiv.windef.piv()` (coarse
     grid, decreasing window size per pass, image deformation between
-    passes, sig2noise/global/median validation, iterative outlier
-    replacement, optional smoothn) directly on in-memory frame arrays --
-    i.e. the same multi-pass + validation + replacement feature set as
-    piv_gpu, just via openpiv-python's implementation of it instead of
-    piv_gpu's own. cpu_settings keys are `PIVSettings` field names (e.g.
-    windowsizes, overlap, sig2noise_threshold, filter_method, smoothn,
-    ...) -- see openpiv.settings.PIVSettings for the full list; unknown
-    keys are warned about, not silently dropped."""
+    passes, a NaN-only safety fill between passes, optional smoothn)
+    directly on in-memory frame arrays. cpu_settings keys are
+    `PIVSettings` field names (e.g. windowsizes, overlap, filter_method,
+    smoothn, ...) -- see openpiv.settings.PIVSettings for the full list;
+    unknown keys are warned about, not silently dropped. sig2noise_*/
+    validation_first_pass/replace_vectors are accepted if present (for
+    backward compatibility with older settings dicts) but have no effect
+    -- see this module's docstring."""
 
     def __init__(self, frame_shape, **cpu_settings):
         from openpiv.settings import PIVSettings
@@ -107,6 +123,15 @@ class CPUPIVProcess:
             )
         settings.num_iterations = len(settings.windowsizes)
 
+        # Sig2noise-based rejection is dropped entirely from the
+        # calculation path (validation now lives solely in
+        # processing.postprocess -- see this module's docstring). Forcing
+        # this off also skips the extra correlation peak-search cost
+        # extended_search_area_piv would otherwise pay for computing a
+        # sig2noise ratio nothing here uses (see windef.py's read of this
+        # flag before each pass's correlation call).
+        settings.sig2noise_validate = False
+
         self._settings = settings
         self.scaling_par = 1.0
         self.coords = get_rect_coordinates(frame_shape, settings.windowsizes[-1], settings.overlap[-1])
@@ -125,18 +150,18 @@ class CPUPIVProcess:
         u = np.ma.masked_array(u, mask=grid_mask)
         v = np.ma.masked_array(v, mask=grid_mask)
 
-        if settings.validation_first_pass:
-            flags = validation.typical_validation(u, v, s2n, settings)
-        else:
-            flags = np.zeros_like(u, dtype=bool)
-
-        if (settings.num_iterations == 1 and settings.replace_vectors) or settings.num_iterations > 1:
-            u, v = filters.replace_outliers(
-                u, v, flags, method=settings.filter_method,
-                max_iter=settings.max_filter_iteration,
-                kernel_size=settings.filter_kernel_size,
-            )
-            u, v = _fill_residual_nan(u, v)
+        # loose_typical_validation (patched in via apply_speedups) only
+        # ever flags literal NaN -- always run it and the paired
+        # replace_outliers call, unconditionally, as a pure numerical-
+        # stability fill. No real vector is ever rejected here; see this
+        # module's docstring.
+        flags = validation.typical_validation(u, v, s2n, settings)
+        u, v = filters.replace_outliers(
+            u, v, flags, method=settings.filter_method,
+            max_iter=settings.max_filter_iteration,
+            kernel_size=settings.filter_kernel_size,
+        )
+        u, v = _fill_residual_nan(u, v)
 
         if settings.smoothn:
             from openpiv import smoothn as _smoothn
@@ -162,9 +187,11 @@ class CPUPIVProcess:
         u = u / settings.dt
         v = v / settings.dt
 
-        # flags from the final (finest) pass -- True = invalid, same
-        # convention as piv_gpu's val_locations
-        self.val_locations = np.asarray(flags, dtype=bool)
+        # Always all-valid: validation is no longer decided during
+        # calculation -- pipeline.process_frames' `valid = ~val_locations`
+        # is meant to be entirely determined by processing.postprocess
+        # (PostProcessSettings) instead. See this module's docstring.
+        self.val_locations = np.zeros_like(u, dtype=bool)
         return u, v
 
 

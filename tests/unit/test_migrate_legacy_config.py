@@ -47,7 +47,7 @@ def test_migrate_cpu_planar_legacy_config():
         "input_mode": "loose", "input_path": "/data",
         "cpu_settings": {
             "windowsizes": [64, 32, 32, 32], "overlap": [32, 24, 24, 24],
-            "dt": 1.0, "sig2noise_threshold": 1.2,
+            "dt": 1.0, "filter_kernel_size": 3,
         },
         "global_outlier_std": 4.0, "smooth_field": True, "smooth_sigma": 2.0,
         "pixel_pitch_mm": 0.01, "frame_dt_s": 0.002,
@@ -57,7 +57,10 @@ def test_migrate_cpu_planar_legacy_config():
     assert cfg.project.mode == "planar"
     passes = [(p.window_size, p.overlap_fraction) for p in cfg.correlation.passes]
     assert passes == [(64, 0.5), (32, 0.75), (32, 0.75), (32, 0.75)]
-    assert cfg.validation.sig2noise_threshold == 1.2
+    # sig2noise_threshold no longer migrates -- validation moved entirely
+    # to PostProcessSettings, see migrate_legacy_config.py's comment
+    assert not hasattr(cfg.validation, "sig2noise_threshold")
+    assert cfg.validation.filter_kernel_size == 3
     assert cfg.postprocess.global_outlier_std == 4.0
     assert cfg.postprocess.smooth_field is True
     assert cfg.calibration.pixel_pitch_mm == 0.01

@@ -11,12 +11,12 @@ Layout notes:
 """
 
 from PySide6.QtWidgets import (
-    QButtonGroup, QComboBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QRadioButton, QSizePolicy, QSpinBox, QVBoxLayout,
-    QWidget,
+    QButtonGroup, QCheckBox, QComboBox, QFileDialog, QGridLayout, QGroupBox,
+    QHBoxLayout, QLabel, QLineEdit, QPushButton, QRadioButton, QSizePolicy,
+    QSpinBox, QVBoxLayout, QWidget,
 )
 
-from piv_suite.config.schema import ProjectSettings
+from piv_suite.config.schema import PreprocessSettings, ProjectSettings
 from piv_suite.engines.registry import is_gpu_available
 
 from ._util import style_spin
@@ -171,6 +171,29 @@ class ProjectPanel(QWidget):
         input_layout.addWidget(self.loose_options)
         layout.addWidget(input_box)
 
+        # ---- pre-processing (applied to raw frames, before correlation --
+        # for stereo, before dewarping too) ----
+        prep_box = QGroupBox("PRE-PROCESSING")
+        prep_layout = QHBoxLayout(prep_box)
+        self.min_max_check = QCheckBox("Min/max filter (L px):")
+        self.min_max_check.setToolTip(
+            "LaVision-style sliding min/max background removal + local "
+            "contrast normalization, applied to each raw frame before "
+            "correlation. For stereo, applied per-camera BEFORE "
+            "dewarping.")
+        self.min_max_length_spin = style_spin(QSpinBox())
+        self.min_max_length_spin.setRange(1, 10000)
+        self.min_max_length_spin.setValue(5)
+        self.min_max_length_spin.setToolTip(
+            "L, in pixels -- the sliding window size for the min/max "
+            "filter's background-removal and local-contrast steps.")
+        self.min_max_length_spin.setEnabled(False)
+        self.min_max_check.toggled.connect(self.min_max_length_spin.setEnabled)
+        prep_layout.addWidget(self.min_max_check)
+        prep_layout.addWidget(self.min_max_length_spin)
+        prep_layout.addStretch(1)
+        layout.addWidget(prep_box)
+
         # ---- mode + backend, separate boxes side by side ----
         mode_backend_row = QHBoxLayout()
         mode_backend_row.setSpacing(6)
@@ -295,6 +318,12 @@ class ProjectPanel(QWidget):
             suffix_cam0=_apply_glob_extension(self.suffix_cam0_edit.text(), glob_text),
             suffix_cam1=_apply_glob_extension(self.suffix_cam1_edit.text(), glob_text),
             stereo_frame_order=self.stereo_frame_order_combo.currentText(),
+        )
+
+    def get_preprocess_settings(self) -> PreprocessSettings:
+        return PreprocessSettings(
+            min_max_filter_enabled=self.min_max_check.isChecked(),
+            min_max_filter_length=self.min_max_length_spin.value(),
         )
 
     def set_from(self, project: ProjectSettings):

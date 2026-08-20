@@ -25,6 +25,7 @@ from piv_suite.plotting.planar import plot_and_save_planar
 from piv_suite.plotting.stereo import plot_and_save_stereo
 from piv_suite.processing import pipeline
 from piv_suite.processing.postprocess import apply_calibration
+from piv_suite.processing.preprocess import apply_preprocess_pair
 
 
 def _build_engine(backend, frame_shape, correlation, validation):
@@ -161,6 +162,7 @@ class PipelineWorker(QObject):
 
             self.pair_started.emit(pair_id)
             try:
+                frame_a, frame_b = apply_preprocess_pair(frame_a, frame_b, cfg.preprocess)
                 if correlation.use_tiling:
                     init_fn = _make_tiled_init_fn(backend, correlation, validation)
                     margin = _tile_margin(backend, correlation, validation)
@@ -224,6 +226,8 @@ class PipelineWorker(QObject):
 
             self.pair_started.emit(pair_id)
             try:
+                fa0, fb0 = apply_preprocess_pair(fa0, fb0, cfg.preprocess)
+                fa1, fb1 = apply_preprocess_pair(fa1, fb1, cfg.preprocess)
                 dw_a0 = cam0.dewarp_image(fa0, cfg.stereo.world_shape, cfg.stereo.dewarp_order)
                 dw_b0 = cam0.dewarp_image(fb0, cfg.stereo.world_shape, cfg.stereo.dewarp_order)
                 dw_a1 = cam1.dewarp_image(fa1, cfg.stereo.world_shape, cfg.stereo.dewarp_order)

@@ -79,7 +79,18 @@ def _build_dewarped_pairs():
 
 def _run_and_reconstruct(dw_a0, dw_b0, dw_a1, dw_b1, engine0, x, engine1):
     correlation = CorrelationSettings()
-    post = PostProcessSettings().for_pipeline()
+    # Post-processing's std-dev/residual filters default ON now (see
+    # config/schema.py's PostProcessSettings docstring) -- explicitly
+    # disabled here since this test's purpose is checking 3D-reconstruction
+    # accuracy against a known displacement, not validation behavior
+    # (which has its own coverage in test_validation_restructure.py). A
+    # clean synthetic field can still have a few boundary-window vectors
+    # with a locally elevated residual from spline-deformation edge
+    # effects -- real signal, not something this test should reject.
+    disabled_post = PostProcessSettings(global_outlier_std=None)
+    disabled_post.range_filter.enabled = False
+    disabled_post.range_filter.residual_max = None
+    post = disabled_post.for_pipeline()
     u1, v1, valid1, _, _ = pipeline.process_frames(engine0, dw_a0, dw_b0, post)
     u2, v2, valid2, _, _ = pipeline.process_frames(engine1, dw_a1, dw_b1, post)
     valid = valid1 & valid2

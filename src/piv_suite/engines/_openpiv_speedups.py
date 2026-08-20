@@ -1,20 +1,39 @@
-"""Drop-in, numerically-faithful vectorized replacements for three
-openpiv-python functions that dominate CPU wall-clock time on large,
-high-overlap, multi-pass runs -- confirmed via cProfile against a real
+"""Drop-in vectorized replacements for openpiv-python functions used
+during CPU-backend PIV calculation. Two kinds of patch live here, and
+they are NOT the same kind of change:
+
+FAITHFUL SPEEDUPS (fast_replace_nans, fast_correlation_to_displacement):
+each is a faithful re-expression of the SAME formula as the original in
+vectorized numpy -- not openpiv's own alternate "vectorized_*" functions
+(which were checked and found to differ subtly: a `<= 0` vs `< 0`
+gaussian-fallback threshold, and a forced float32 cast, either of which
+would silently change results for a science-critical PIV run -- not
+acceptable here, hence writing faithful equivalents instead of flipping
+`use_vectorized=True`). Confirmed via cProfile against a real
 3008x4096 frame pair (see the perf investigation this module came out
 of): a single 32px/75%-overlap pass took ~113s, of which ~49% was
-`openpiv.lib.replace_nans`, ~35% was `openpiv.pyprocess.
-correlation_to_displacement` (a pure-Python loop over every window), and
-~13% was `openpiv.validation.local_median_val` (scipy.ndimage.
-generic_filter, which invokes a Python callback per output pixel).
+`openpiv.lib.replace_nans` and ~35% was `openpiv.pyprocess.
+correlation_to_displacement` (a pure-Python loop over every window).
 
-None of these are algorithm changes -- each function here is a faithful
-re-expression of the SAME formula as the original in vectorized numpy,
-not openpiv's own alternate "vectorized_*" functions (which were checked
-and found to differ subtly: a `<= 0` vs `< 0` gaussian-fallback threshold,
-and a forced float32 cast, either of which would silently change results
-for a science-critical PIV run -- not acceptable here, hence writing
-faithful equivalents instead of flipping `use_vectorized=True`).
+BEHAVIOR-CHANGING PATCH (loose_typical_validation): unlike the two
+above, this one deliberately does NOT reproduce openpiv's own
+validation.typical_validation. Vector validation has been moved
+entirely to processing.postprocess (driven by PostProcessSettings, one
+explicit step after the engine returns) -- see cpu_engine.py's module
+docstring for the full rationale. openpiv's own multi-pass loop
+(windef.multipass_img_deform) still calls `validation.typical_validation`
+unconditionally with no settings flag to disable it, so this patch
+replaces it with a version that flags a vector invalid ONLY when it is
+literal NaN -- never for any global-range/std/median/sig2noise
+criterion. This keeps the per-pass replace_outliers call (also
+unconditional in openpiv) as a pure numerical-stability mechanism (see
+cpu_engine._fill_residual_nan for why residual NaN between passes is
+dangerous, not just a validation artifact) without it ever causing a
+vector to be counted "invalid" in the final output.
+
+fast_local_median_val exists but is NOT wired into apply_speedups() --
+see its own docstring; nothing calls openpiv.validation.local_median_val
+any more now that typical_validation itself is replaced wholesale.
 
 apply_speedups() monkeypatches these onto the installed openpiv package
 at runtime -- openpiv's own files are never touched on disk, so this is
@@ -23,12 +42,14 @@ openpiv version upgrade without a vendored fork to maintain. Called once
 from cpu_engine.py before any processing happens.
 
 Every function here has a paired regression test in
-tests/unit/test_openpiv_speedups.py asserting near-exact numerical
-equality against the ORIGINAL unpatched openpiv function on the same
-inputs (including real-data-derived edge cases: all-NaN neighborhoods,
-correlation-map borders, negative correlation values) -- run that suite
-again after any openpiv version bump, since these re-implementations
-assume the current (0.25.4) algorithms exactly.
+tests/unit/test_openpiv_speedups.py: the two faithful speedups assert
+near-exact numerical equality against the ORIGINAL unpatched openpiv
+function on the same inputs (including real-data-derived edge cases:
+all-NaN neighborhoods, correlation-map borders, negative correlation
+values); loose_typical_validation asserts it flags literal NaN only,
+never a finite outlier -- run that suite again after any openpiv
+version bump, since the faithful re-implementations assume the current
+(0.25.4) algorithms exactly.
 """
 
 import numpy as np
@@ -360,6 +381,17 @@ def fast_local_median_val(u, v, u_threshold, v_threshold, size=1):
     vectorized np.nanmedian call over the window axes -- same 5 (or
     (2*size+1)^2) values fed to the same nanmedian function per cell,
     just without a quarter-million individual Python calls to get there.
+
+    NOT USED -- deliberately excluded from apply_speedups(). openpiv's
+    own openpiv.validation.local_median_val was only ever called from
+    inside validation.typical_validation, which apply_speedups() now
+    replaces wholesale with loose_typical_validation (see this module's
+    docstring), so nothing calls local_median_val on the CPU calculation
+    path any more. Kept defined -- not dead code needing deletion, just
+    unused today -- since processing.postprocess's own local-median
+    filter (range_filter) could reuse this vectorized implementation for
+    a future perf pass if its scipy.ndimage.generic_filter call ever
+    becomes a bottleneck.
     """
     if np.ma.is_masked(u):
         masked_u = np.where(np.ma.getmask(u), np.nan, np.ma.getdata(u))
@@ -390,11 +422,41 @@ def _sliding_nanmedian(a, size):
         return np.nanmedian(windows, axis=(-2, -1))
 
 
+def loose_typical_validation(u, v, s2n, settings):
+    """Replacement for openpiv.validation.typical_validation, wired in by
+    apply_speedups(). Flags a vector invalid ONLY if it is literal NaN --
+    never for any global-range, global-std, local-median, or sig2noise
+    criterion. This is a deliberate BEHAVIOR CHANGE, not a faithful
+    speedup: see this module's docstring for why (vector validation now
+    lives entirely in processing.postprocess/PostProcessSettings, run
+    once after the engine returns, not mid-calculation).
+
+    Feeds directly into the SAME filters.replace_outliers() call that
+    openpiv.windef.multipass_img_deform already makes unconditionally
+    every pass -- so NaN cells (numerical instability, e.g. a window
+    with no correlation peak) still get a bounded local-mean fill,
+    protecting the next pass's RectBivariateSpline deformation (see
+    cpu_engine.CPUPIVProcess/_fill_residual_nan for the documented crash
+    this guards against), but no vector is ever treated as "invalid" for
+    a value-based reason during calculation.
+
+    `s2n` and `settings` are accepted (matching typical_validation's
+    signature, since windef.py calls this by position/keyword) but
+    unused -- sig2noise-based rejection is dropped entirely from this
+    path; see cpu_engine.CPUPIVProcess forcing settings.sig2noise_validate
+    = False, which also skips the extra correlation peak-search cost
+    typical_validation's sig2noise branch would otherwise still pay
+    for."""
+    u_data = np.ma.getdata(u) if np.ma.is_masked(u) else np.asarray(u)
+    v_data = np.ma.getdata(v) if np.ma.is_masked(v) else np.asarray(v)
+    return np.isnan(u_data) | np.isnan(v_data)
+
+
 _PATCHED = False
 
 
 def apply_speedups():
-    """Monkeypatch the three functions above onto the installed openpiv
+    """Monkeypatch the functions above onto the installed openpiv
     package. Idempotent -- safe to call more than once. Never touches
     openpiv's own files on disk.
 
@@ -405,10 +467,11 @@ def apply_speedups():
     namespace -- patching only openpiv.lib.replace_nans would silently
     do nothing, since openpiv.filters.replace_outliers (the actual
     caller) already holds its own reference to the original function.
-    correlation_to_displacement and local_median_val are both called
+    correlation_to_displacement and typical_validation are both called
     from within their OWN defining module (pyprocess.py's
-    extended_search_area_piv, validation.py's typical_validation), so
-    patching the module attribute there is sufficient."""
+    extended_search_area_piv, windef.py's multipass_img_deform calling
+    `validation.typical_validation`), so patching the module attribute
+    there is sufficient."""
     global _PATCHED
     if _PATCHED:
         return
@@ -420,7 +483,7 @@ def apply_speedups():
     openpiv.lib.replace_nans = fast_replace_nans
     openpiv.filters.replace_nans = fast_replace_nans
     openpiv.pyprocess.correlation_to_displacement = fast_correlation_to_displacement
-    openpiv.validation.local_median_val = fast_local_median_val
+    openpiv.validation.typical_validation = loose_typical_validation
     # fast_fft_correlate_images is intentionally NOT wired in here -- see
     # its docstring's final paragraph. It passed every isolated check
     # (peak location unchanged in 2000/2000 real windows, diff exactly at
@@ -430,10 +493,15 @@ def apply_speedups():
     # pass's sub-pixel estimate re-positions the NEXT pass's deformed
     # sampling window) into real divergence: up to 0.13 px, on 126,162 of
     # 189,857 vectors -- confirmed by A/B-testing the exact same 4-pass
-    # run with and without just this one patch. The other three patches
-    # were confirmed NOT to have this compounding effect (the combined
-    # 3-patch end-to-end run matches the unpatched baseline to ~1e-15 on
-    # every vector) -- keeping this function defined but unused so a
-    # future attempt doesn't have to rediscover why it's unsafe from
-    # scratch.
+    # run with and without just this one patch. The two faithful-speedup
+    # patches above (replace_nans, correlation_to_displacement) were
+    # separately confirmed NOT to have this compounding effect (a
+    # combined end-to-end run with only those two active, validation
+    # held constant, matched the unpatched baseline to ~1e-15 on every
+    # vector) -- keeping fast_fft_correlate_images defined but unused so
+    # a future attempt doesn't have to rediscover why it's unsafe from
+    # scratch. typical_validation's replacement above is a separate,
+    # deliberate behavior change (not a faithful speedup) and is NOT
+    # expected to match the unpatched baseline -- see
+    # loose_typical_validation's docstring.
     _PATCHED = True

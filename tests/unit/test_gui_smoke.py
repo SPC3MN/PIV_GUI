@@ -35,13 +35,16 @@ def test_preview_shows_progress_bar_while_running_and_hides_after(qtbot):
 
     seen_visible_during_run = []
 
-    def fake_preview_planar(project, correlation, validation, post, calibration, index):
+    def fake_preview_planar(project, preprocess, correlation, validation, post, calibration, index):
         seen_visible_during_run.append(panel.progress_bar.isVisible())
         seen_visible_during_run.append(panel.preview_btn.isEnabled())
 
     panel._preview_planar = fake_preview_planar
     panel.window = lambda: type("W", (), {
-        "project_panel": type("P", (), {"get_project_settings": lambda self: type("S", (), {"mode": "planar"})()})(),
+        "project_panel": type("P", (), {
+            "get_project_settings": lambda self: type("S", (), {"mode": "planar"})(),
+            "get_preprocess_settings": lambda self: None,
+        })(),
         "settings_panel": type("SP", (), {
             "get_correlation_settings": lambda self: None,
             "get_validation_settings": lambda self: None,
@@ -239,8 +242,7 @@ def test_settings_panel_greys_out_inapplicable_backend_fields(qtbot):
     gpu_only = [sp.batch_size_check, sp.tiling_check, sp.n_tiles_y_spin,
                 sp.n_tiles_x_spin, sp.tile_margin_check]
     cpu_only = [sp.correlation_method_combo, sp.deformation_method_combo,
-                sp.interpolation_order_spin, sp.s2n_validate_check,
-                sp.replace_vectors_check, sp.filter_method_combo]
+                sp.interpolation_order_spin, sp.filter_method_combo]
 
     # default backend is CPU -- GPU-only fields start disabled
     assert pp.backend == "cpu"
@@ -370,26 +372,26 @@ def test_mode_and_backend_are_separate_group_boxes(qtbot):
 
 
 def test_validation_group_is_user_editable(qtbot):
-    # ValidationSettings' 10 fields feed the PIV calculation directly (per-
-    # pass sig2noise/replacement/smoothn inside the engine loop) -- they
-    # were briefly hidden as fixed internal defaults, then explicitly
-    # re-added to the GUI. Confirm the controls exist AND that
-    # get_validation_settings() actually reflects widget state, not a
-    # hardcoded ValidationSettings().
+    # ValidationSettings' remaining 5 fields are the internal per-pass
+    # NaN-safety-fill mechanism only (see schema.py's ValidationSettings
+    # docstring) -- sig2noise_*/validation_first_pass/replace_vectors were
+    # removed when real vector validation moved entirely to
+    # PostProcessSettings. Confirm the controls that ARE still user-facing
+    # exist AND that get_validation_settings() actually reflects widget
+    # state, not a hardcoded ValidationSettings().
     window = MainWindow()
     qtbot.addWidget(window)
     sp = window.settings_panel
-    assert hasattr(sp, "s2n_threshold_spin")
     assert hasattr(sp, "filter_method_combo")
     assert hasattr(sp, "smoothn_check")
+    assert not hasattr(sp, "s2n_threshold_spin")
+    assert not hasattr(sp, "s2n_validate_check")
 
-    sp.s2n_threshold_spin.setValue(1.3)
-    sp.s2n_method_combo.setCurrentText("peak2peak")
+    sp.filter_kernel_size_spin.setValue(5)
     sp.smoothn_check.setChecked(True)
     sp.smoothn_p_spin.setValue(0.2)
     settings = sp.get_validation_settings()
-    assert settings.sig2noise_threshold == 1.3
-    assert settings.sig2noise_method == "peak2peak"
+    assert settings.filter_kernel_size == 5
     assert settings.smoothn is True
     assert settings.smoothn_p == 0.2
 
@@ -437,7 +439,6 @@ def test_double_spinboxes_use_two_decimals_except_deliberate_high_precision_fiel
         window.settings_panel.dt_spin,
         window.settings_panel.pixel_pitch_spin,
         window.settings_panel.frame_dt_spin,
-        window.settings_panel.s2n_threshold_spin,
         window.settings_panel.smoothn_p_spin,
     }
     for panel in (window.project_panel, window.settings_panel, window.calibration_panel):

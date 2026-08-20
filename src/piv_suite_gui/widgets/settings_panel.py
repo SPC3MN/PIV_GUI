@@ -1,22 +1,29 @@
 """Settings panel: multi-pass window/overlap schedule, correlation
-controls, per-pass validation, physical-unit calibration, and the
-"remove invalid vectors" post-processing step.
+controls, per-pass internal stability fill, physical-unit calibration,
+and the "remove invalid vectors" post-processing step.
 
-Two DIFFERENT "smoothing" and "remove invalid vector" concepts appear in
-this panel, deliberately kept visually separate:
-- Validation group's "Per-pass smoothn"/"Replace rejected vectors" run
-  INSIDE the multi-pass engine loop, between passes -- they affect what
-  the NEXT (finer) pass sees, not just the final reported field.
-- Post-process group's "Gaussian smooth"/"Interpolate removed vectors"
-  run ONCE, after the engine has already produced its final field.
+Two DIFFERENT groups look superficially similar (both have a "smoothn"/
+"smooth" and a fill/replace concept) but serve entirely different
+purposes -- kept visually separate:
+- "Per-pass stability (internal)" group's "Per-pass smoothn"/fill
+  filter/kernel run INSIDE the multi-pass engine loop, between passes --
+  they affect what the NEXT (finer) pass sees, not just the final
+  reported field, and critically do NOT reject or validate any vector
+  (see the group's own tooltip) -- they only prevent numerically
+  unstable (NaN) cells from poisoning the next pass's deformation.
+- "Remove invalid vectors (post-processing)" group is the SOLE place a
+  vector is ever marked invalid -- its std-dev filter and universal-
+  outlier-detection (residual) filter run ONCE, after the engine has
+  already produced its final field. "Gaussian smooth"/"Interpolate
+  removed vectors" here are a separate, later, purely cosmetic/gap-
+  filling step, not a third detection method.
 
 CPU/GPU-specific fields (correlation_method, deformation_method,
-interpolation_order, s2n_validate, replace_vectors, filter_method are
-CPU-only; batch_size, tiling/n_tiles/tile_margin are GPU-only) stay
-visible regardless of the selected backend -- set_backend() (called by
-main_window whenever project_panel's CPU/GPU radio changes) greys out
-whichever group doesn't apply, on top of the tooltip on each already
-noting this.
+interpolation_order, filter_method are CPU-only; batch_size, tiling/
+n_tiles/tile_margin are GPU-only) stay visible regardless of the
+selected backend -- set_backend() (called by main_window whenever
+project_panel's CPU/GPU radio changes) greys out whichever group doesn't
+apply, on top of the tooltip on each already noting this.
 """
 
 from PySide6.QtWidgets import (
@@ -237,53 +244,21 @@ class SettingsPanel(QWidget):
         cal_grid.addWidget(self.frame_dt_spin, 1, 1)
         layout.addWidget(cal_box)
 
-        # ---- per-pass validation (runs inside the multi-pass loop) ----
-        val_box = QGroupBox("VALIDATION (PER-PASS)")
+        # ---- per-pass internal stability fill (runs inside the multi-
+        # pass loop -- does NOT reject/validate vectors, see tooltip) ----
+        val_box = QGroupBox("PER-PASS STABILITY (INTERNAL)")
         val_box.setToolTip(
             "Runs BETWEEN multi-pass iterations, feeding the next (finer) "
-            "pass -- not the same as 'Remove invalid vectors' below, which "
-            "runs once on the final field.")
+            "pass. This does NOT reject or validate vectors -- it only "
+            "fills numerically-unstable (NaN) cells so a bad correlation "
+            "in one pass can't poison the next pass's deformation grid. "
+            "All actual vector validation happens once, in 'Remove "
+            "invalid vectors (post-processing)' below, after the final "
+            "field is produced.")
         val_grid = QGridLayout(val_box)
         val_grid.setContentsMargins(6, 6, 6, 6)
         val_grid.setSpacing(4)
         val_grid.setColumnStretch(1, 1)
-
-        self.s2n_method_combo = QComboBox()
-        self.s2n_method_combo.addItems(["peak2mean", "peak2peak"])
-        self.s2n_method_combo.setToolTip(
-            "peak2energy is also GPU-only supported but omitted here so the "
-            "same choice stays valid on both backends.")
-        val_grid.addWidget(QLabel("Sig2noise method:"), 0, 0)
-        val_grid.addWidget(self.s2n_method_combo, 0, 1)
-
-        self.s2n_threshold_spin = style_spin(QDoubleSpinBox(), decimals=3)
-        self.s2n_threshold_spin.setRange(0.0, 100.0)
-        self.s2n_threshold_spin.setValue(1.05)
-        self.s2n_threshold_spin.setToolTip(
-            "Minimum acceptable signal-to-noise ratio of a correlation "
-            "peak -- vectors below this are rejected as unreliable. "
-            "Applies on both backends.")
-        val_grid.addWidget(QLabel("Sig2noise threshold:"), 1, 0)
-        val_grid.addWidget(self.s2n_threshold_spin, 1, 1)
-
-        self.s2n_validate_check = QCheckBox("Validate signal-to-noise")
-        self.s2n_validate_check.setChecked(True)
-        self.s2n_validate_check.setToolTip("CPU backend only -- GPU always validates s2n when sig2noise threshold applies.")
-        val_grid.addWidget(self.s2n_validate_check, 2, 0, 1, 2)
-
-        self.validation_first_pass_check = QCheckBox("Validate after first pass")
-        self.validation_first_pass_check.setChecked(True)
-        self.validation_first_pass_check.setToolTip(
-            "Run sig2noise validation after the coarsest pass too, not "
-            "just subsequent passes -- catches bad vectors early so they "
-            "don't propagate into the deformation windows of later "
-            "passes. Applies on both backends.")
-        val_grid.addWidget(self.validation_first_pass_check, 3, 0, 1, 2)
-
-        self.replace_vectors_check = QCheckBox("Replace rejected vectors between passes")
-        self.replace_vectors_check.setChecked(True)
-        self.replace_vectors_check.setToolTip("CPU backend only -- GPU always replaces between passes (the engine loop needs a real field to deform the next pass's windows).")
-        val_grid.addWidget(self.replace_vectors_check, 4, 0, 1, 2)
 
         self.filter_method_combo = QComboBox()
         self.filter_method_combo.addItems(["localmean", "disk", "distance"])
@@ -291,28 +266,27 @@ class SettingsPanel(QWidget):
             "CPU backend only -- GPU always uses its own 'median' "
             "replacement between passes (a different vocabulary; see "
             "config.legacy.to_gpu_settings' docstring).")
-        val_grid.addWidget(QLabel("Replacement filter:"), 5, 0)
-        val_grid.addWidget(self.filter_method_combo, 5, 1)
+        val_grid.addWidget(QLabel("Fill filter:"), 0, 0)
+        val_grid.addWidget(self.filter_method_combo, 0, 1)
 
         self.max_filter_iter_spin = style_spin(QSpinBox())
         self.max_filter_iter_spin.setRange(0, 100)
         self.max_filter_iter_spin.setValue(4)
         self.max_filter_iter_spin.setToolTip(
-            "How many times to re-run the rejected-vector replacement "
-            "filter between passes. Applies on both backends (GPU's "
-            "num_replacing_iters).")
-        val_grid.addWidget(QLabel("Max replacement iterations:"), 6, 0)
-        val_grid.addWidget(self.max_filter_iter_spin, 6, 1)
+            "How many times to re-run the NaN-fill between passes. "
+            "Applies on both backends (GPU's num_replacing_iters).")
+        val_grid.addWidget(QLabel("Max fill iterations:"), 1, 0)
+        val_grid.addWidget(self.max_filter_iter_spin, 1, 1)
 
         self.filter_kernel_size_spin = style_spin(QSpinBox())
         self.filter_kernel_size_spin.setRange(1, 20)
         self.filter_kernel_size_spin.setValue(2)
         self.filter_kernel_size_spin.setToolTip(
-            "Neighborhood radius (in vectors) used to replace a rejected "
-            "vector between passes. Applies on both backends (GPU's "
+            "Neighborhood radius (in vectors) used to fill a NaN cell "
+            "between passes. Applies on both backends (GPU's "
             "replacing_size).")
-        val_grid.addWidget(QLabel("Replacement kernel size:"), 7, 0)
-        val_grid.addWidget(self.filter_kernel_size_spin, 7, 1)
+        val_grid.addWidget(QLabel("Fill kernel size:"), 2, 0)
+        val_grid.addWidget(self.filter_kernel_size_spin, 2, 1)
 
         self.smoothn_check = QCheckBox("Per-pass smoothn")
         self.smoothn_check.setToolTip(
@@ -325,40 +299,47 @@ class SettingsPanel(QWidget):
         self.smoothn_p_spin.setValue(0.05)
         self.smoothn_p_spin.setToolTip("smoothn's own smoothing strength parameter -- higher = smoother.")
         self.smoothn_p_spin.setEnabled(False)
-        val_grid.addWidget(self.smoothn_check, 8, 0)
-        val_grid.addWidget(self.smoothn_p_spin, 8, 1)
+        val_grid.addWidget(self.smoothn_check, 3, 0)
+        val_grid.addWidget(self.smoothn_p_spin, 3, 1)
         layout.addWidget(val_box)
 
-        # ---- remove invalid vectors ----
-        post_box = QGroupBox("REMOVE INVALID VECTORS")
+        # ---- remove invalid vectors (the SOLE validation step) ----
+        post_box = QGroupBox("REMOVE INVALID VECTORS (POST-PROCESSING)")
+        post_box.setToolTip(
+            "The only place vectors are ever marked invalid -- runs once, "
+            "after the final field is produced. Nothing during "
+            "calculation itself rejects a vector (see 'Per-pass stability "
+            "(internal)' above).")
         post_grid = QGridLayout(post_box)
         post_grid.setContentsMargins(6, 6, 6, 6)
         post_grid.setSpacing(4)
 
         self.std_filter_check = QCheckBox("Remove if |value - mean| exceeds:")
+        self.std_filter_check.setChecked(True)
         self.std_filter_check.setToolTip(
             "Reject vectors more than n·σ (n times the standard "
             "deviation) from the field mean.")
         self.std_filter_check.toggled.connect(self._on_std_filter_toggled)
         self.n_std_spin = style_spin(QDoubleSpinBox())
         self.n_std_spin.setRange(0.1, 100.0)
-        self.n_std_spin.setValue(4.0)
+        self.n_std_spin.setValue(3.0)
         self.n_std_spin.setToolTip("Number of standard deviations from the field mean beyond which a vector is rejected.")
-        self.n_std_spin.setEnabled(False)
+        self.n_std_spin.setEnabled(True)
         post_grid.addWidget(self.std_filter_check, 0, 0, 1, 2)
         post_grid.addWidget(self.n_std_spin, 0, 2)
         post_grid.addWidget(QLabel("·σ"), 0, 3)  # ·σ
 
-        self.residual_enabled_check = QCheckBox("Remove if residual exceeds:")
+        self.residual_enabled_check = QCheckBox("Universal outlier detection — remove if residual exceeds:")
+        self.residual_enabled_check.setChecked(True)
         self.residual_enabled_check.setToolTip(
             "Reject vectors whose distance from their local window median "
             "displacement (px/frame) exceeds this value.")
         self.residual_enabled_check.toggled.connect(self._on_residual_filter_toggled)
         self.residual_max_spin = style_spin(QDoubleSpinBox())
         self.residual_max_spin.setRange(0.0, 1e6)
-        self.residual_max_spin.setValue(5.0)
+        self.residual_max_spin.setValue(3.0)
         self.residual_max_spin.setToolTip("Max allowed distance (px/frame) from the local window median before a vector is rejected.")
-        self.residual_max_spin.setEnabled(False)
+        self.residual_max_spin.setEnabled(True)
         post_grid.addWidget(self.residual_enabled_check, 1, 0, 1, 2)
         post_grid.addWidget(self.residual_max_spin, 1, 2)
 
@@ -367,7 +348,7 @@ class SettingsPanel(QWidget):
         self.window_size_spin.setSingleStep(2)
         self.window_size_spin.setValue(3)
         self.window_size_spin.setToolTip("Size (in vectors, odd number) of the local neighborhood window used to compute each vector's local median for the residual check above.")
-        self.window_size_spin.setEnabled(False)
+        self.window_size_spin.setEnabled(True)
         post_grid.addWidget(QLabel("  N (window size):"), 2, 1)
         post_grid.addWidget(self.window_size_spin, 2, 2)
 
@@ -415,8 +396,7 @@ class SettingsPanel(QWidget):
         self.tile_margin_spin.setEnabled(is_gpu and self.tile_margin_check.isChecked())
 
         for w in (self.correlation_method_combo, self.deformation_method_combo,
-                  self.interpolation_order_spin, self.s2n_validate_check,
-                  self.replace_vectors_check, self.filter_method_combo):
+                  self.interpolation_order_spin, self.filter_method_combo):
             w.setEnabled(not is_gpu)
 
     def _on_std_filter_toggled(self, checked):
@@ -443,11 +423,6 @@ class SettingsPanel(QWidget):
 
     def get_validation_settings(self) -> ValidationSettings:
         return ValidationSettings(
-            sig2noise_method=self.s2n_method_combo.currentText(),
-            sig2noise_threshold=self.s2n_threshold_spin.value(),
-            sig2noise_validate=self.s2n_validate_check.isChecked(),
-            validation_first_pass=self.validation_first_pass_check.isChecked(),
-            replace_vectors=self.replace_vectors_check.isChecked(),
             filter_method=self.filter_method_combo.currentText(),
             max_filter_iteration=self.max_filter_iter_spin.value(),
             filter_kernel_size=self.filter_kernel_size_spin.value(),

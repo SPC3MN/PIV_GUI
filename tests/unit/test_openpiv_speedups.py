@@ -32,6 +32,7 @@ from piv_suite.engines._openpiv_speedups import (
     fast_correlation_to_displacement,
     fast_local_median_val,
     fast_replace_nans,
+    loose_typical_validation,
 )
 
 
@@ -314,13 +315,26 @@ def test_apply_speedups_patches_filters_not_just_lib():
     assert openpiv.lib.replace_nans is fast_replace_nans
 
 
-def test_apply_speedups_patches_correlation_to_displacement_and_local_median_val():
+def test_apply_speedups_patches_correlation_to_displacement_and_typical_validation():
     import openpiv.pyprocess
     import openpiv.validation
 
     apply_speedups()
     assert openpiv.pyprocess.correlation_to_displacement is fast_correlation_to_displacement
-    assert openpiv.validation.local_median_val is fast_local_median_val
+    assert openpiv.validation.typical_validation is loose_typical_validation
+
+
+def test_apply_speedups_does_not_patch_local_median_val():
+    # local_median_val was only ever called from inside typical_validation,
+    # which apply_speedups() now replaces wholesale with
+    # loose_typical_validation -- nothing calls local_median_val on the
+    # CPU calculation path any more, so it must stay unpatched. This test
+    # exists so nobody re-adds the patch line without re-reading why it
+    # was removed (see _openpiv_speedups.py's module docstring).
+    import openpiv.validation
+
+    apply_speedups()
+    assert openpiv.validation.local_median_val is orig_local_median_val
 
 
 def test_apply_speedups_does_not_patch_fft_correlate_images():
@@ -344,19 +358,58 @@ def test_apply_speedups_is_idempotent():
 
 
 # ============================================================
-# small end-to-end sanity: CPUPIVProcess with speedups vs without
+# loose_typical_validation -- flags literal NaN only, never a real outlier
+# ============================================================
+
+def test_loose_typical_validation_only_flags_nan():
+    rng = np.random.RandomState(7)
+    u = rng.normal(size=(10, 10))
+    v = rng.normal(size=(10, 10))
+    # a huge, finite outlier -- would trip global_val/global_std/median
+    # under real typical_validation, but must NOT be flagged here.
+    u[3, 3] = 1e6
+    v[3, 3] = -1e6
+    # a literal NaN cell -- the only thing that should be flagged.
+    u[7, 2] = np.nan
+
+    flags = loose_typical_validation(u, v, s2n=None, settings=None)
+
+    expected = np.zeros((10, 10), dtype=bool)
+    expected[7, 2] = True
+    assert np.array_equal(flags, expected)
+    assert not flags[3, 3]  # the finite outlier must NOT be flagged
+
+
+def test_loose_typical_validation_flags_nan_in_either_component():
+    u = np.array([[1.0, np.nan], [3.0, 4.0]])
+    v = np.array([[np.nan, 2.0], [3.0, 4.0]])
+    flags = loose_typical_validation(u, v, s2n=None, settings=None)
+    assert np.array_equal(flags, np.array([[True, True], [False, False]]))
+
+
+# ============================================================
+# small end-to-end sanity: CPUPIVProcess speedups' FAITHFUL patches
+# (replace_nans, correlation_to_displacement) vs unpatched, with
+# validation held constant. typical_validation's replacement is a
+# deliberate BEHAVIOR CHANGE (see loose_typical_validation's docstring)
+# and is intentionally NOT covered by a before/after equality assertion
+# here -- see the dedicated tests above for its own (different) contract.
 # ============================================================
 
 def test_cpu_engine_end_to_end_matches_with_and_without_speedups():
     # A small (fast-to-run-twice) synthetic image pair through the real
-    # multi-pass CPUPIVProcess, comparing patched vs unpatched output
-    # directly -- catches any interaction between the three patches
-    # operating together inside the real pipeline, not just each
-    # function in isolation. Deliberately small (unlike the real
-    # 3008x4096/4-pass/multi-minute validation this was originally
-    # checked against, which isn't reproducible in a normal test budget)
-    # but still multi-pass, so replace_nans/correlation_to_displacement/
-    # local_median_val are all genuinely exercised together.
+    # multi-pass CPUPIVProcess body, comparing patched vs unpatched output
+    # directly -- catches any interaction between the faithful patches
+    # operating together inside the real pipeline, not just each function
+    # in isolation. Deliberately small (unlike the real 3008x4096/4-pass/
+    # multi-minute validation this was originally checked against, which
+    # isn't reproducible in a normal test budget) but still multi-pass, so
+    # replace_nans/correlation_to_displacement are genuinely exercised
+    # together. Validation is held constant (loose_typical_validation,
+    # both before and after) since it's a deliberate behavior change, not
+    # a faithful speedup -- comparing it here would conflate "did the
+    # faithful patches stay faithful" with "did validation change" (it
+    # did, on purpose).
     import dataclasses
 
     from openpiv.settings import PIVSettings
@@ -385,8 +438,8 @@ def test_cpu_engine_end_to_end_matches_with_and_without_speedups():
             grid_mask = np.zeros_like(u, dtype=bool)
             u = np.ma.masked_array(u, mask=grid_mask)
             v = np.ma.masked_array(v, mask=grid_mask)
-            from openpiv import validation, filters
-            flags = validation.typical_validation(u, v, s2n, settings)
+            from openpiv import filters
+            flags = loose_typical_validation(u, v, s2n, settings)
             u, v = filters.replace_outliers(
                 u, v, flags, method=settings.filter_method,
                 max_iter=settings.max_filter_iteration,
@@ -399,9 +452,27 @@ def test_cpu_engine_end_to_end_matches_with_and_without_speedups():
                 v = np.ma.masked_array(v, np.ma.nomask)
             return np.ma.filled(u, 0.0), np.ma.filled(v, 0.0)
 
-    u_before, v_before = run_once()
+    # Hold validation constant (loose_typical_validation via apply_speedups,
+    # which also patches windef's own internal multipass calls) for BOTH
+    # runs -- only the two faithful patches' presence/absence differs.
+    import openpiv.lib
+    import openpiv.filters
+    import openpiv.pyprocess
+
     apply_speedups()
     u_after, v_after = run_once()
+
+    fast_replace_nans_lib, fast_replace_nans_filters = openpiv.lib.replace_nans, openpiv.filters.replace_nans
+    fast_corr_to_disp = openpiv.pyprocess.correlation_to_displacement
+    try:
+        openpiv.lib.replace_nans = orig_replace_nans
+        openpiv.filters.replace_nans = orig_replace_nans
+        openpiv.pyprocess.correlation_to_displacement = orig_correlation_to_displacement
+        u_before, v_before = run_once()
+    finally:
+        openpiv.lib.replace_nans = fast_replace_nans_lib
+        openpiv.filters.replace_nans = fast_replace_nans_filters
+        openpiv.pyprocess.correlation_to_displacement = fast_corr_to_disp
 
     assert np.allclose(u_before, u_after, atol=1e-6, rtol=1e-6)
     assert np.allclose(v_before, v_after, atol=1e-6, rtol=1e-6)

@@ -91,18 +91,30 @@ def test_passes_to_gpu_rejects_non_finest_minimum():
 
 
 def test_to_cpu_settings_maps_validation_fields():
+    # ValidationSettings' sig2noise_*/validation_first_pass/replace_vectors
+    # fields were removed when validation moved entirely to
+    # PostProcessSettings (see schema.py's ValidationSettings docstring) --
+    # what's left (filter_method/max_filter_iteration/filter_kernel_size/
+    # smoothn/smoothn_p) is purely the internal per-pass NaN-safety-fill
+    # mechanism, still mapped through as-is.
     corr, val = CorrelationSettings(), ValidationSettings()
-    val.sig2noise_threshold = 1.3
+    val.max_filter_iteration = 7
     settings = to_cpu_settings(corr, val)
-    assert settings["sig2noise_threshold"] == 1.3
+    assert settings["max_filter_iteration"] == 7
     assert settings["windowsizes"] == [64, 32, 32, 32]
+    assert "sig2noise_threshold" not in settings
+    assert "sig2noise_validate" not in settings
 
 
 def test_to_gpu_settings_maps_validation_fields():
+    # s2n_tol/median_tol/mad_tol/mean_tol/rms_tol are ALWAYS hard-coded to
+    # None regardless of ValidationSettings' content -- validation moved
+    # entirely to PostProcessSettings (see to_gpu_settings' docstring).
     corr, val = CorrelationSettings(), ValidationSettings()
-    val.sig2noise_threshold = 1.3
+    val.filter_kernel_size = 5
     min_search_size, piv_settings = to_gpu_settings(corr, val)
-    assert piv_settings["s2n_tol"] == 1.3
+    assert piv_settings["s2n_tol"] is None
+    assert piv_settings["replacing_size"] == 5
     assert piv_settings["search_size_iters"] == (1, 3)
 
 
@@ -140,6 +152,5 @@ def test_to_gpu_settings_remaining_fields_match_piv_gpu_contract():
     _, piv_settings = to_gpu_settings(corr, val)
 
     assert piv_settings["subpixel_method"] in {"gaussian", "parabolic", "centroid"}
-    assert piv_settings["s2n_method"] in {"peak2peak", "peak2mean", "peak2energy"}
     assert isinstance(piv_settings["revalidate"], bool)
     assert isinstance(piv_settings["smooth"], bool)
