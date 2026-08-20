@@ -64,6 +64,26 @@ if ($LASTEXITCODE -ne 0) { throw "prepare_gpu_assets.ps1 failed (exit $LASTEXITC
 # "No package metadata was found for imageio" the first time the CPU
 # preview path (which imports openpiv -> scikit-image -> imageio) ran
 # in the frozen app, despite working fine unfrozen.
+#
+# --collect-all=lvpyio (was --collect-data): lvpyio's io/ subpackage is
+# almost entirely compiled .pyd extensions (paths, type_mapper, attribute,
+# component, grid, plane, scale, ...), and several of them -- confirmed
+# on real hardware: paths.cp313-win_amd64.pyd is the one that actually
+# bit a user -- are never `import`ed from any visible .py source anywhere
+# in the package (lvpyio/io/__init__.py only imports read_buffer,
+# write_buffer, set, particles). They're pulled in at runtime from INSIDE
+# another compiled extension (e.g. set.pyd internally importing
+# lvpyio.io.paths), which is invisible to PyInstaller's static analysis
+# the same way cupy's graphlib dependency was above -- except there's no
+# single hidden-import name to add here, since it's not known which
+# .pyd needs which sibling until a specific .set-file code path exercises
+# it. --collect-data alone (the previous flag) only copies lvpyio's
+# non-code files, not its own submodules, so it silently missed these;
+# --collect-all additionally treats every submodule PyInstaller can find
+# by WALKING the installed package directory (not by scanning imports) as
+# a hidden import, closing off the whole class of "some .set files trip
+# a code path that needs a .pyd nothing else visibly imports" bug at
+# once rather than adding names to this list one crash report at a time.
 Write-Host "== Stage 2/3: PyInstaller bundle ==" -ForegroundColor Cyan
 & $venvPyInstaller --noconfirm --windowed --name "PIV_Suite" `
     --distpath installer\dist --workpath installer\build --specpath installer `
@@ -73,7 +93,7 @@ Write-Host "== Stage 2/3: PyInstaller bundle ==" -ForegroundColor Cyan
     --copy-metadata=imageio `
     --paths src `
     --collect-submodules openpiv `
-    --collect-data lvpyio `
+    --collect-all lvpyio `
     --collect-submodules piv_suite `
     --collect-submodules piv_suite_gui `
     "src\piv_suite_gui\app.py"

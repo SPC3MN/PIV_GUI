@@ -134,3 +134,42 @@ resurfaces:
 Stress-tested with 5 consecutive silent `/GPUCUDA=13` installs after
 these fixes: all 5 succeeded cleanly with no retries needed and no
 hangs.
+
+**`lvpyio` (the DaVis `.set`-file reader) needs `--collect-all`, not just
+`--collect-data`.** A user hit "No module named 'lvpyio.io.paths'"
+previewing a real `.set` project in the frozen app -- same root-cause
+class as the graphlib/imageio bugs above (something the frozen app needs
+at runtime that PyInstaller's static analysis couldn't see), but with a
+twist: `lvpyio.io`'s own submodules are almost entirely compiled `.pyd`
+extensions (`paths`, `type_mapper`, `attribute`, `component`, `grid`,
+`plane`, `scale`, ...), and several of them are never `import`ed from
+ANY visible `.py` source in the package at all -- `lvpyio/io/__init__.py`
+only imports `read_buffer`, `write_buffer`, `set`, `particles`. The rest
+get pulled in at runtime from *inside* another compiled extension (e.g.
+`set.pyd` internally importing `lvpyio.io.paths`), which PyInstaller
+cannot discover by scanning Python source, and there's no single
+`--hidden-import` name to add the way there was for graphlib -- it isn't
+knowable in advance which `.pyd` a given `.set` file's code path will
+need. Fixed by switching `--collect-data lvpyio` to `--collect-all
+lvpyio` in `build_installer.ps1`, which walks the installed package
+directory instead of scanning imports, so every submodule PyInstaller
+can find on disk is bundled regardless of whether anything visibly
+imports it -- closes off the whole class of "some .set files trip a
+code path needing a .pyd nothing else visibly imports" bug at once,
+rather than adding names to a hidden-import list one crash report at a
+time.
+
+Verified against the real `.set` project that surfaced this, two ways:
+`paths.cp313-win_amd64.pyd` and `type_mapper.cp313-win_amd64.pyd` (the
+two submodules nothing in `lvpyio`'s own source ever visibly imports)
+are now present in `_internal\lvpyio\io\`, where they were missing
+before; and, since PyInstaller happens to keep this particular package
+entirely as loose files rather than splitting it between the PYZ
+archive and disk (confirmed by diffing the file list against the source
+venv's `lvpyio` install -- unlike numpy/cupy, which DO split, and where
+testing via a separate interpreter gave a misleading result earlier in
+this project's life), the frozen build's own `lvpyio` could be pointed
+at directly from a normal interpreter and actually exercised against
+the reporting user's real data: `list_pair_ids_from_set`/
+`get_pair_from_set` (the exact functions the GUI's preview panel calls)
+successfully read all 200 pairs of `Final_Self_Calibration.set`.
