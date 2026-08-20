@@ -54,6 +54,14 @@ class MainWindow(QMainWindow):
         self.project_panel.planar_radio.toggled.connect(
             lambda checked: self.calibration_panel.setVisible(not checked))
 
+        # GPU-only settings (batch size, tiling) are greyed out on CPU and
+        # vice versa (correlation method, deformation method, etc.) --
+        # see settings_panel.set_backend()'s docstring for which fields
+        # are in which group.
+        self.settings_panel.set_backend(self.project_panel.backend)
+        self.project_panel.cpu_radio.toggled.connect(
+            lambda checked: self.settings_panel.set_backend("cpu" if checked else "gpu"))
+
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
         left_scroll.setWidget(left_container)

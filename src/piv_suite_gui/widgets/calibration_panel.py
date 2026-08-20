@@ -51,10 +51,15 @@ class _CameraMappingForm(QWidget):
         top.setSpacing(4)
         top.setColumnStretch(1, 1)
         self.name_edit = QLineEdit(title)
+        self.name_edit.setToolTip("Label for this camera mapping -- cosmetic only, doesn't affect the calculation.")
         self.x0_spin = self._make_spin()
+        self.x0_spin.setToolTip("Origin (in normalized sensor coordinates) that the dx(s,t)/dy(s,t) polynomial below is measured from, along x.")
         self.x_span_spin = self._make_spin(default=1.0)
+        self.x_span_spin.setToolTip("Normalization span along x -- sensor coordinates are divided by this before being fed to the polynomial, so s stays in a well-conditioned range.")
         self.y0_spin = self._make_spin()
+        self.y0_spin.setToolTip("Origin (in normalized sensor coordinates) that the dx(s,t)/dy(s,t) polynomial below is measured from, along y.")
         self.y_span_spin = self._make_spin(default=1.0)
+        self.y_span_spin.setToolTip("Normalization span along y -- sensor coordinates are divided by this before being fed to the polynomial, so t stays in a well-conditioned range.")
         for i, (label, w) in enumerate([
             ("Name:", self.name_edit), ("x₀:", self.x0_spin), ("Δx:", self.x_span_spin),
             ("y₀:", self.y0_spin), ("Δy:", self.y_span_spin),
@@ -75,6 +80,12 @@ class _CameraMappingForm(QWidget):
 
         self.coef_table = QTableWidget(len(COEF_KEYS), 2)
         self.coef_table.setHorizontalHeaderLabels(["dx(s,t)", "dy(s,t)"])
+        self.coef_table.setToolTip(
+            "Polynomial coefficients mapping normalized sensor coordinates "
+            "(s, t) to world-space displacement (dx, dy), read off DaVis's "
+            "own calibration report. Each row is one polynomial term "
+            "(s, s², s³, t, t², t³, st, s²t, t²s); the constant '1' row "
+            "is the offset term.")
         self.coef_table.setVerticalHeaderLabels([COEF_DISPLAY[k] for k in COEF_KEYS])
         self.coef_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         for row in range(len(COEF_KEYS)):
@@ -142,9 +153,13 @@ class CalibrationPanel(QWidget):
         geom_grid.setContentsMargins(6, 6, 6, 6)
         geom_grid.setSpacing(4)
         self.world_h_spin = style_spin(QSpinBox(), width=SPIN_WIDTH); self.world_h_spin.setRange(1, 100000); self.world_h_spin.setValue(1000)
+        self.world_h_spin.setToolTip("Height (pixels) of the shared world grid both cameras' frames are dewarped onto before correlation.")
         self.world_w_spin = style_spin(QSpinBox(), width=SPIN_WIDTH); self.world_w_spin.setRange(1, 100000); self.world_w_spin.setValue(1000)
+        self.world_w_spin.setToolTip("Width (pixels) of the shared world grid both cameras' frames are dewarped onto before correlation.")
         self.world_scale_spin = style_spin(QDoubleSpinBox(), width=SPIN_WIDTH); self.world_scale_spin.setRange(1e-6, 1e6); self.world_scale_spin.setValue(1.0)
+        self.world_scale_spin.setToolTip("World-grid scale in pixels per mm -- used to convert the reconstructed in-plane displacement into physical units before applying Frame Δt.")
         self.dewarp_order_spin = style_spin(QSpinBox(), width=SPIN_WIDTH); self.dewarp_order_spin.setRange(0, 5); self.dewarp_order_spin.setValue(1)
+        self.dewarp_order_spin.setToolTip("Interpolation order used when resampling each camera's raw frame onto the world grid (0 = nearest, 1 = linear, higher = smoother but slower).")
         geom_grid.addWidget(QLabel("World shape (H, W):"), 0, 0)
         geom_grid.addWidget(self.world_h_spin, 0, 1)
         geom_grid.addWidget(self.world_w_spin, 0, 2)
@@ -164,9 +179,13 @@ class CalibrationPanel(QWidget):
         angle_grid.setContentsMargins(6, 6, 6, 6)
         angle_grid.setSpacing(4)
         self.alpha1_spin = self._angle_spin(-45.0)
+        self.alpha1_spin.setToolTip("Camera 0's in-plane viewing angle (deg) relative to the world Z-axis, used by reconstruct_stereo to solve for U/V/W.")
         self.alpha2_spin = self._angle_spin(45.0)
+        self.alpha2_spin.setToolTip("Camera 1's in-plane viewing angle (deg) relative to the world Z-axis, used by reconstruct_stereo to solve for U/V/W.")
         self.beta1_spin = self._angle_spin(0.0)
+        self.beta1_spin.setToolTip("Camera 0's out-of-plane viewing angle (deg), used by reconstruct_stereo to solve for U/V/W.")
         self.beta2_spin = self._angle_spin(0.0)
+        self.beta2_spin.setToolTip("Camera 1's out-of-plane viewing angle (deg), used by reconstruct_stereo to solve for U/V/W.")
         for i, (label, w) in enumerate([
             ("α₁:", self.alpha1_spin), ("α₂:", self.alpha2_spin),
             ("β₁:", self.beta1_spin), ("β₂:", self.beta2_spin),

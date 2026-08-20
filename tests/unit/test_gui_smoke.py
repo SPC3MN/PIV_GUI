@@ -107,6 +107,107 @@ def test_preview_panel_w_range_row_hidden_until_stereo(qtbot):
     assert label.isVisible()
 
 
+def test_loose_suffix_extension_comes_from_glob(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    pp = window.project_panel
+    pp.mode_loose.setChecked(True)
+
+    # defaults: suffix fields show just the marker, no extension
+    assert pp.suffix_a_edit.text() == "_a"
+    assert pp.suffix_b_edit.text() == "_b"
+    assert pp.suffix_cam0_edit.text() == "_cam1"
+    assert pp.suffix_cam1_edit.text() == "_cam2"
+
+    # combined with the default glob's extension at read time
+    settings = pp.get_project_settings()
+    assert settings.suffix_a == "_a.im7"
+    assert settings.suffix_b == "_b.im7"
+    assert settings.suffix_cam0 == "_cam1.im7"
+    assert settings.suffix_cam1 == "_cam2.im7"
+
+    # changing Glob's extension re-derives every suffix without touching
+    # the marker fields themselves
+    pp.loose_glob_edit.setText("*.tif")
+    assert pp.suffix_a_edit.text() == "_a"  # unchanged
+    settings = pp.get_project_settings()
+    assert settings.suffix_a == "_a.tif"
+    assert settings.suffix_b == "_b.tif"
+    assert settings.suffix_cam0 == "_cam1.tif"
+    assert settings.suffix_cam1 == "_cam2.tif"
+
+
+def test_loose_suffix_typed_extension_is_overridden_by_glob(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    pp = window.project_panel
+    pp.mode_loose.setChecked(True)
+    pp.loose_glob_edit.setText("*.tif")
+    pp.suffix_a_edit.setText("_a.im7")  # stale/wrong extension typed by hand
+
+    settings = pp.get_project_settings()
+    assert settings.suffix_a == "_a.tif"  # glob's extension wins, not duplicated
+
+
+def test_loose_suffix_set_from_strips_extension_back_off(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    pp = window.project_panel
+    from piv_suite.config.schema import ProjectSettings
+
+    project = ProjectSettings(
+        input_mode="loose", input_path="x", output_dir="y", backend="cpu", mode="planar",
+        loose_glob="*.tif", suffix_a="_a.tif", suffix_b="_b.tif",
+        suffix_cam0="_cam1.tif", suffix_cam1="_cam2.tif",
+    )
+    pp.set_from(project)
+    assert pp.suffix_a_edit.text() == "_a"
+    assert pp.suffix_b_edit.text() == "_b"
+    assert pp.suffix_cam0_edit.text() == "_cam1"
+    assert pp.suffix_cam1_edit.text() == "_cam2"
+    # round-trips back to the same full suffix
+    assert pp.get_project_settings().suffix_a == "_a.tif"
+
+
+def test_settings_panel_greys_out_inapplicable_backend_fields(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    sp = window.settings_panel
+    pp = window.project_panel
+
+    gpu_only = [sp.batch_size_check, sp.tiling_check, sp.n_tiles_y_spin,
+                sp.n_tiles_x_spin, sp.tile_margin_check]
+    cpu_only = [sp.correlation_method_combo, sp.deformation_method_combo,
+                sp.interpolation_order_spin, sp.s2n_validate_check,
+                sp.replace_vectors_check, sp.filter_method_combo]
+
+    # default backend is CPU -- GPU-only fields start disabled
+    assert pp.backend == "cpu"
+    for w in gpu_only:
+        assert w.isEnabled() is False
+    for w in cpu_only:
+        assert w.isEnabled() is True
+
+    # a checkbox-gated GPU spin stays disabled even if its own checkbox
+    # was checked while GPU was selected, once backend flips back to CPU
+    pp.gpu_radio.setChecked(True)
+    sp.batch_size_check.setChecked(True)
+    assert sp.batch_size_spin.isEnabled() is True
+    pp.cpu_radio.setChecked(True)
+    assert sp.batch_size_spin.isEnabled() is False
+    for w in gpu_only:
+        assert w.isEnabled() is False
+    for w in cpu_only:
+        assert w.isEnabled() is True
+
+    pp.gpu_radio.setChecked(True)
+    for w in gpu_only:
+        assert w.isEnabled() is True
+    for w in cpu_only:
+        assert w.isEnabled() is False
+    assert sp.batch_size_spin.isEnabled() is True  # checkbox was still checked
+
+
 def test_project_panel_default_settings(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)
