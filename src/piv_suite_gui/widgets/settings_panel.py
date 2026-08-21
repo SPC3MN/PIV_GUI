@@ -33,9 +33,10 @@ from PySide6.QtWidgets import (
 )
 
 from piv_suite.config.schema import (
-    CalibrationSettings, CorrelationSettings, PassSettings, PostProcessSettings,
-    RangeFilterSettings, ValidationSettings,
+    CalibrationSettings, CorrelationSettings, PassSettings, PerformanceSettings,
+    PostProcessSettings, RangeFilterSettings, ValidationSettings,
 )
+from piv_suite.perf.autotune import recommended_workers
 
 from ._util import fit_table_to_rows, style_spin
 
@@ -374,6 +375,36 @@ class SettingsPanel(QWidget):
         post_grid.addWidget(self.smooth_sigma_spin, 4, 2)
 
         layout.addWidget(post_box)
+
+        # ---- performance (Tier 3: cross-pair parallelism) ----
+        perf_box = QGroupBox("PERFORMANCE")
+        perf_box.setToolTip(
+            "Planar CPU batch runs process independent frame pairs across "
+            "multiple worker processes (each pair's result is unaffected "
+            "by how many workers ran the batch -- see "
+            "processing.parallel_planar's module docstring). Everything "
+            "else that makes the CPU pipeline faster is automatic and "
+            "unconditional; this is the one knob left to the user, mainly "
+            "useful to leave cores free on a shared machine.")
+        perf_grid = QGridLayout(perf_box)
+        perf_grid.setContentsMargins(6, 6, 6, 6)
+        perf_grid.setSpacing(4)
+
+        self.n_workers_check = QCheckBox("Limit worker processes to:")
+        self.n_workers_check.setToolTip(
+            "Unchecked = auto-detect from CPU count and available RAM "
+            "(perf.autotune.recommended_workers()). Check to cap the "
+            "number of pairs processed concurrently.")
+        self.n_workers_check.toggled.connect(lambda c: self.n_workers_spin.setEnabled(c))
+        self.n_workers_spin = style_spin(QSpinBox())
+        self.n_workers_spin.setRange(1, 1024)
+        self.n_workers_spin.setValue(max(1, recommended_workers()))
+        self.n_workers_spin.setToolTip("Maximum number of frame pairs processed concurrently (planar CPU batches only).")
+        self.n_workers_spin.setEnabled(False)
+        perf_grid.addWidget(self.n_workers_check, 0, 0)
+        perf_grid.addWidget(self.n_workers_spin, 0, 1)
+        layout.addWidget(perf_box)
+
         layout.addStretch(1)
 
     def set_backend(self, backend):
@@ -434,6 +465,11 @@ class SettingsPanel(QWidget):
         return CalibrationSettings(
             pixel_pitch_mm=self.pixel_pitch_spin.value() if self.pixel_pitch_check.isChecked() else None,
             frame_dt_s=self.frame_dt_spin.value() if self.frame_dt_check.isChecked() else None,
+        )
+
+    def get_performance_settings(self) -> PerformanceSettings:
+        return PerformanceSettings(
+            n_workers=self.n_workers_spin.value() if self.n_workers_check.isChecked() else None,
         )
 
     def get_postprocess_settings(self) -> PostProcessSettings:

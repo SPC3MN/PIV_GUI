@@ -1,10 +1,12 @@
 """Drop-in vectorized replacements for openpiv-python functions used
-during CPU-backend PIV calculation. Two kinds of patch live here, and
+during CPU-backend PIV calculation. Three kinds of patch live here, and
 they are NOT the same kind of change:
 
-FAITHFUL SPEEDUPS (fast_replace_nans, fast_correlation_to_displacement):
-each is a faithful re-expression of the SAME formula as the original in
-vectorized numpy -- not openpiv's own alternate "vectorized_*" functions
+FAITHFUL SPEEDUPS (fast_sliding_window_array, fast_replace_nans,
+fast_correlation_to_displacement, fast_extended_search_area_piv): each is
+a faithful re-expression of
+the SAME formula as the original in vectorized numpy -- not openpiv's
+own alternate "vectorized_*" functions
 (which were checked and found to differ subtly: a `<= 0` vs `< 0`
 gaussian-fallback threshold, and a forced float32 cast, either of which
 would silently change results for a science-critical PIV run -- not
@@ -14,8 +16,24 @@ acceptable here, hence writing faithful equivalents instead of flipping
 of): a single 32px/75%-overlap pass took ~113s, of which ~49% was
 `openpiv.lib.replace_nans` and ~35% was `openpiv.pyprocess.
 correlation_to_displacement` (a pure-Python loop over every window).
+These are bit-exact vs. the unpatched originals.
 
-BEHAVIOR-CHANGING PATCH (loose_typical_validation): unlike the two
+PRECISION-UPGRADE SPEEDUP (fast_fft_correlate_images): NOT bit-exact vs.
+today's output -- windows enter this function at float32 (frames are
+cast to float32 once, in CPUPIVProcess.__call__, and openpiv's own
+fft_correlate_images never widens that), and this patch upcasts to
+float64 before correlating. That's the OTHER kind of change this
+project's numerical bar allows ("bit-exact OR provably more accurate"):
+the upcast is lossless and every downstream FFT/multiply/inverse-FFT
+step then carries strictly less rounding error than doing the same chain
+at float32, which is provable from the arithmetic, not just measured.
+The backend swap bundled into the same patch (numpy.fft -> scipy.fft, for
+speed) WAS separately verified empirically, not just assumed, to not
+compound into anything meaningful across a real 4-pass run -- see the
+function's own docstring and apply_speedups()'s comment at the
+fft_correlate_images wiring line for the numbers.
+
+BEHAVIOR-CHANGING PATCH (loose_typical_validation): unlike the two kinds
 above, this one deliberately does NOT reproduce openpiv's own
 validation.typical_validation. Vector validation has been moved
 entirely to processing.postprocess (driven by PostProcessSettings, one
@@ -53,6 +71,59 @@ version bump, since the faithful re-implementations assume the current
 """
 
 import numpy as np
+
+
+def fast_sliding_window_array(image, window_size=(64, 64), overlap=(32, 32)):
+    """Faithful vectorized re-implementation of
+    openpiv.pyprocess.sliding_window_array, which builds two full-size
+    int index arrays (win_x, win_y, each shape (n_windows, wy, wx)) and
+    gathers via fancy indexing `image[win_y, win_x]` -- at this app's real
+    workload (189,857 windows) that's 1.55 GB *each* just for the index
+    arrays, to produce a 777 MB result. Confirmed the dominant cost of
+    window extraction (5.98s -> 0.28s replacing it, np.array_equal exact)
+    in the perf investigation this module came out of.
+
+    openpiv's own construction (via get_rect_coordinates/get_coordinates,
+    center_on_field=False) places window k's top-left corner at
+    (row(k) * (window_size[0]-overlap[0]), col(k) * (window_size[1]-overlap[1])),
+    row(k)/col(k) running 0..field_shape-1 in C order (row-major) -- i.e.
+    a plain regular grid starting at the image's (0, 0) corner, stepping
+    by (window_size - overlap) each direction, with never an out-of-bounds
+    window (get_field_shape's floor division guarantees the last window's
+    far edge never exceeds the image). That is EXACTLY what
+    `sliding_window_view(image, window_size)[::step_y, ::step_x]` produces:
+    sliding_window_view's [a, b, i, j] element is image[a+i, b+j], so after
+    step-slicing by (step_y, step_x), position [row, col, i, j] is
+    image[row*step_y + i, col*step_x + j] -- the same pixel openpiv's
+    fancy-indexed gather reads for window (row, col)'s local offset (i, j).
+    The row-major flatten below (via ascontiguousarray + reshape) matches
+    openpiv's own `np.reshape(x, (-1, 1, 1))` C-order flatten of the same
+    (n_rows, n_cols) grid, so windows[k] here is the same window as
+    windows[k] there for every k, not just the same multiset.
+
+    ascontiguousarray is required (not optional): sliding_window_view's
+    output is a genuinely strided view, sharing memory with `image` and
+    overlapping between adjacent windows -- reshape alone would raise on
+    a non-contiguous array, and returning a view (rather than a copy)
+    would silently break any caller that mutates its result in place
+    (openpiv's own does, in the search_area_size > window_size branch of
+    extended_search_area_piv), unlike the original's fancy-indexing gather
+    which always allocates a fresh, independent array. ascontiguousarray
+    forces exactly that same fresh-copy semantics.
+    """
+    if isinstance(window_size, int):
+        window_size = (window_size, window_size)
+    if isinstance(overlap, int):
+        overlap = (overlap, overlap)
+
+    wy, wx = window_size
+    step_y = wy - overlap[0]
+    step_x = wx - overlap[1]
+
+    all_windows = np.lib.stride_tricks.sliding_window_view(image, (wy, wx))
+    strided = all_windows[::step_y, ::step_x]
+    n_rows, n_cols = strided.shape[0], strided.shape[1]
+    return np.ascontiguousarray(strided).reshape(n_rows * n_cols, wy, wx)
 
 
 def fast_replace_nans(array, max_iter, tol, kernel_size=2, method="disk"):
@@ -186,78 +257,103 @@ def _get_dist(kernel, kernel_size):
 def fast_fft_correlate_images(image_a, image_b, correlation_method="circular",
                                normalized_correlation=True, conj=np.conj,
                                rfft2=None, irfft2=None, fftshift=None):
-    """Faithful re-implementation of openpiv.pyprocess.fft_correlate_images,
-    swapping numpy.fft (single-threaded) for scipy.fft (supports
-    `workers=`, multi-threaded across all CPU cores) -- confirmed the
-    second-largest chunk of a validated PIV pass after replace_nans.
+    """Faithful-at-float64 re-implementation of
+    openpiv.pyprocess.fft_correlate_images's "circular" branch, run at
+    float64 instead of the original's float32 (frames enter CPUPIVProcess
+    cast to float32, and openpiv's own fft_correlate_images never widens
+    that), with scipy.fft in place of numpy.fft, chunked via
+    perf.autotune.recommended_chunk_size() for cache locality.
 
-    Cannot be done by monkeypatching openpiv.pyprocess.rfft2_/irfft2_/
-    fftshift_ (the module-level numpy.fft names fft_correlate_images
-    defaults to): Python default-argument values are bound ONCE at
-    function-definition time, so reassigning those module names after
-    the fact would silently do nothing to the already-defined function
-    -- the whole function has to be replaced instead, same reasoning as
-    filters.replace_nans in this module's apply_speedups().
+    THIS IS NOT A BIT-EXACT PATCH relative to today's (float32) output --
+    it's the OTHER kind this project's numerical bar allows ("bit-exact
+    OR provably more accurate", see this module's docstring's opening).
+    Upcasting float32 pixel data to float64 is lossless (every float32
+    value has an exact float64 representation) and every arithmetic step
+    of the FFT/multiply/inverse-FFT chain then carries strictly less
+    rounding error than the same chain at float32 -- that's the "provably"
+    part, not an empirical claim. It reproduces the investigation this
+    module came out of finding ~1.35x more speed available from float32
+    alone, beyond what float64 gets here, and documents that the project
+    owner explicitly chose float64 over that extra speed.
 
-    Numerically safe to swap: since NumPy 1.17, numpy.fft and scipy.fft
-    are both backed by the same pocketfft C library -- this isn't two
-    different algorithms, it's the same one, with scipy.fft additionally
-    exposing the `workers` parallelism knob numpy.fft doesn't. Confirmed
-    empirically (not just assumed) against real correlation arrays: see
-    tests/unit/test_openpiv_speedups.py.
+    `workers=` is DELIBERATELY NOT PASSED to scipy.fft here. An earlier
+    version of this docstring claimed scipy.fft's workers parameter gives
+    "multi-threaded across all CPU cores -- confirmed". That was false
+    and has been corrected: measured directly on this machine (scipy
+    1.17.1, DUCC-backed pocketfft on Windows) -- timing rfft2 at
+    workers=1/4/24/48 gives identical wall-clock every time, and
+    scipy.fft.get_workers() reports 1 regardless of what's passed.
+    In-process FFT threading is unavailable on this build; the actual
+    parallelism route is process-level (see engines Tier 3 /
+    ProcessPoolExecutor across frame pairs), not this parameter.
+
+    Backend-equivalence (scipy.fft vs numpy.fft, held at the SAME float64
+    precision) was measured here to NOT be exactly 0.000e+00 the way an
+    earlier investigation (different machine) found -- at this dataset's
+    actual window sizes (32px/64px), ~2-3% of correlation-array elements
+    differ from a float64 numpy.fft reference by up to ~5e-13. That's
+    ~6 orders of magnitude below the float32-vs-float32 backend
+    divergence that was separately measured (see below) to compound into
+    0.13 px across 4 passes, so it was verified negligible via the SAME
+    kind of full 4-pass real-data A/B before this function was wired into
+    apply_speedups() -- see apply_speedups()'s docstring for that result.
+    If you bump scipy/numpy versions, re-run that comparison; don't
+    assume the diff stays this small.
 
     correlation_method="linear" is user-selectable in the GUI (settings_
     panel's Correlation method combo) and intentionally NOT reimplemented
     here -- its zero-padding branch is a different, more involved
     computation than "circular"'s, and "circular" is both the default
     and, per openpiv's own docs, the normal/faster choice. Falls back to
-    calling the original (slow but correct) function for "linear" rather
-    than risking a subtly-wrong fast path for a branch this investigation
-    didn't need to touch to fix the reported slowness.
+    calling the original (slow but correct) function for "linear".
 
-    NOT USED -- deliberately excluded from apply_speedups(). Every
-    isolated check passed (peak location identical on 2000/2000 real
-    correlation windows; the value difference sits exactly at float32's
-    precision floor, ~1e-7 relative, and vanishes to exactly 0.0 given
-    float64 inputs -- this is genuine floating-point rounding noise from
-    a different but equally valid summation order through the SAME
-    underlying pocketfft algorithm, not a bug). But a full 4-pass
-    end-to-end run on real data (A/B tested: identical settings, only
-    this one patch toggled) showed that noise COMPOUNDS across passes --
-    each pass's sub-pixel displacement estimate repositions where the
-    NEXT (finer) pass samples its deformed interrogation windows, so a
-    ~1e-7-relative perturbation in an early pass's correlation can shift
-    which actual image content a later pass ends up correlating against.
-    Result: up to 0.13 px of divergence on 126,162 of 189,857 vectors --
-    utterly unacceptable for a pipeline whose whole point is exact
-    reproducibility. The other three patches in this module were
-    confirmed NOT to have this compounding effect (see
-    apply_speedups()'s docstring and tests/unit/test_openpiv_speedups.py
-    for the full 4-pass comparison). Kept defined, not wired up, so a
-    future attempt at this specific optimization doesn't have to
-    rediscover why it's unsafe from scratch -- don't re-enable this
-    without re-running that full end-to-end comparison, not just the
-    single-call check that looked fine here.
+    Chunking (recommended_chunk_size()) processes `image_a`/`image_b` in
+    windows-axis slices rather than one big batched FFT call -- verified
+    this is exactly equivalent to one unchunked call regardless of chunk
+    boundary (each window's FFT is independent; pocketfft has no
+    cross-window state), so this is purely a cache-locality optimization
+    (measured ~19% faster FFT time from a chunk's working set fitting in
+    cache), never a numerical concern.
     """
     if correlation_method != "circular":
-        from openpiv.pyprocess import fft_correlate_images as _orig_fft_correlate_images
-        return _orig_fft_correlate_images(
+        # Must NOT re-`from openpiv.pyprocess import fft_correlate_images`
+        # here once apply_speedups() has run: that name has been
+        # monkeypatched to THIS function, so a fresh import would bind
+        # _orig to itself and recurse forever. _REAL_FFT_CORRELATE_IMAGES
+        # is captured by apply_speedups() before it patches the name
+        # away -- same gotcha, same fix, as _REAL_TYPICAL_VALIDATION
+        # below. Falls back to a fresh import only for the (test-only)
+        # case of calling this function directly before apply_speedups()
+        # has ever run.
+        _orig = _REAL_FFT_CORRELATE_IMAGES
+        if _orig is None:
+            from openpiv.pyprocess import fft_correlate_images as _orig
+        return _orig(
             image_a, image_b, correlation_method=correlation_method,
             normalized_correlation=normalized_correlation, conj=conj)
 
     import scipy.fft as _scipy_fft
     from openpiv.pyprocess import normalize_intensity
-    import os
+
+    from ..perf.autotune import recommended_chunk_size
 
     if normalized_correlation:
         image_a = normalize_intensity(image_a)
         image_b = normalize_intensity(image_b)
 
     s2 = np.array(image_b.shape[-2:])
-    workers = os.cpu_count() or 1
-    f2a = conj(_scipy_fft.rfft2(image_a, workers=workers))
-    f2b = _scipy_fft.rfft2(image_b, workers=workers)
-    corr = _scipy_fft.fftshift(_scipy_fft.irfft2(f2a * f2b, workers=workers).real, axes=(-2, -1))
+    n_windows = image_a.shape[0]
+    wy, wx = image_a.shape[-2], image_a.shape[-1]
+    chunk = recommended_chunk_size((wy, wx))
+
+    corr = np.empty((n_windows, wy, wx), dtype=np.float64)
+    for start in range(0, n_windows, chunk):
+        end = min(start + chunk, n_windows)
+        a64 = image_a[start:end].astype(np.float64, copy=False)
+        b64 = image_b[start:end].astype(np.float64, copy=False)
+        f2a = conj(_scipy_fft.rfft2(a64))
+        f2b = _scipy_fft.rfft2(b64)
+        corr[start:end] = _scipy_fft.fftshift(_scipy_fft.irfft2(f2a * f2b).real, axes=(-2, -1))
 
     if normalized_correlation:
         corr = corr / (s2[0] * s2[1])
@@ -292,6 +388,18 @@ def fast_correlation_to_displacement(corr, n_rows, n_cols, subpixel_method="gaus
       used here).
     - no dtype is forced; the input's own float precision is preserved.
     """
+    n_rows_arg, n_cols_arg = n_rows, n_cols
+    u, v = _correlation_to_displacement_flat(corr, subpixel_method=subpixel_method)
+    return u.reshape(n_rows_arg, n_cols_arg), v.reshape(n_rows_arg, n_cols_arg)
+
+
+def _correlation_to_displacement_flat(corr, subpixel_method="gaussian"):
+    """The same per-window math as fast_correlation_to_displacement, minus
+    the final reshape to (n_rows, n_cols) -- factored out so
+    fast_extended_search_area_piv can call it per chunk (a chunk covers a
+    subset of the flattened window index range, which doesn't have its
+    own meaningful n_rows/n_cols) and reshape the FULL grid only once,
+    after every chunk has been written into it."""
     if subpixel_method not in ("gaussian", "centroid", "parabolic"):
         raise ValueError(f"Method not implemented {subpixel_method}")
 
@@ -365,7 +473,142 @@ def fast_correlation_to_displacement(corr, n_rows, n_cols, subpixel_method="gaus
     v = subp_i - default_i
     u = subp_j - default_j
 
-    return u.reshape(n_rows, n_cols), v.reshape(n_rows, n_cols)
+    return u, v
+
+
+def fast_extended_search_area_piv(frame_a, frame_b, window_size, overlap=(0, 0), dt=1.0,
+                                   search_area_size=None, correlation_method="circular",
+                                   subpixel_method="gaussian", sig2noise_method="peak2mean",
+                                   width=2, normalized_correlation=False, use_vectorized=False):
+    """Streaming re-implementation of
+    openpiv.pyprocess.extended_search_area_piv: processes the interrogation
+    grid a few ROWS at a time (window extraction -> correlate -> subpixel
+    peak -> write into the u/v grid -> discard) instead of the original's
+    three full-array passes (materialize ALL windows for both frames via
+    sliding_window_array, correlate the WHOLE batch, THEN find peaks).
+
+    Exact for the windows it processes: correlation windows are
+    independent of each other (confirmed by the same reasoning as
+    fast_fft_correlate_images's chunking -- no cross-window state), and
+    this delegates the actual per-window math to fast_fft_correlate_images
+    and _correlation_to_displacement_flat, the same functions the
+    unchunked path already uses -- this is a different loop structure
+    around identical arithmetic, not a different computation.
+
+    Memory, not speed, is the point here: sliding_window_array is already
+    fast after fast_sliding_window_array (Tier 1 item 1), and
+    fast_fft_correlate_images already chunks its OWN FFT calls for cache
+    locality -- but it still receives (and fast_sliding_window_array still
+    allocates) the FULL per-frame window stack up front, and the full
+    correlation output array. On this machine that's fine for ONE
+    pipeline running alone (~3 GB peak for a 190k-window pass), but Tier
+    3 runs many worker PROCESSES concurrently, each with its own peak --
+    at 24-48 workers that stops being fine. Streaming by grid-row keeps
+    each worker's peak footprint down to a few chunk rows' worth of
+    windows, independent of image size or worker count.
+
+    The outer (grid-row) chunk size comes from
+    perf.autotune.recommended_pipeline_chunk_size(), NOT the same
+    recommended_chunk_size() fast_fft_correlate_images uses one level
+    down -- measured directly (not assumed) that reusing the smaller
+    cache-locality target here is a real regression: a real image's grid
+    has more columns per row than that target's window count, so every
+    grid row became its own outer chunk (~370 outer iterations for one
+    fine pass on this dataset), each paying fixed per-call numpy/Python
+    overhead -- a measured 12% SLOWER wall-clock than not chunking this
+    level at all, for a memory benefit the coarser, RAM/worker-count-
+    derived target below already delivers without that overhead.
+
+    ONLY fast-paths what this app actually exercises --
+    search_area_size == window_size (this app never uses the "extended
+    search area" case where the search region in frame B is intentionally
+    larger than the window in frame A), sig2noise_method is None (forced
+    by CPUPIVProcess -- see cpu_engine.py and Tier 1 item 3),
+    use_vectorized=False (this app's default, and openpiv's own
+    "vectorized_*" functions were already found to differ subtly -- see
+    this module's opening docstring), correlation_method="circular" (the
+    default; "linear" is user-selectable but rare). Falls back to the
+    original (faithful, slower) implementation for everything else,
+    rather than reimplementing branches this app doesn't exercise and
+    can't verify against real data -- same pattern as
+    fast_fft_correlate_images's "linear" fallback.
+    """
+    if isinstance(window_size, int):
+        window_size = (window_size, window_size)
+    if isinstance(overlap, int):
+        overlap = (overlap, overlap)
+    if search_area_size is None:
+        search_area_size = window_size
+    elif isinstance(search_area_size, int):
+        search_area_size = (search_area_size, search_area_size)
+
+    if (search_area_size != window_size or sig2noise_method is not None
+            or use_vectorized or correlation_method != "circular"):
+        _orig = _REAL_EXTENDED_SEARCH_AREA_PIV
+        if _orig is None:
+            from openpiv.pyprocess import extended_search_area_piv as _orig
+        return _orig(
+            frame_a, frame_b, window_size, overlap=overlap, dt=dt,
+            search_area_size=search_area_size, correlation_method=correlation_method,
+            subpixel_method=subpixel_method, sig2noise_method=sig2noise_method,
+            width=width, normalized_correlation=normalized_correlation,
+            use_vectorized=use_vectorized,
+        )
+
+    from openpiv.pyprocess import get_field_shape
+    from ..perf.autotune import recommended_pipeline_chunk_size
+
+    # Same validation as the original -- reproduced faithfully so a bad
+    # call still fails the same way, not a chunking-path-specific error.
+    if overlap[0] >= search_area_size[0] or overlap[1] >= search_area_size[1]:
+        raise ValueError("Overlap has to be smaller than the search_area_size")
+    if search_area_size[0] < window_size[0] or search_area_size[1] < window_size[1]:
+        raise ValueError("Search size cannot be smaller than the window_size")
+    if (window_size[1] > frame_a.shape[0]) or (window_size[0] > frame_a.shape[1]):
+        raise ValueError("window size cannot be larger than the image")
+
+    n_rows, n_cols = get_field_shape(frame_a.shape, search_area_size, overlap)
+    n_windows = n_rows * n_cols
+    wy, wx = search_area_size
+    step_y = wy - overlap[0]
+    step_x = wx - overlap[1]
+
+    # Strided VIEWS over the whole image -- no per-window data copied yet
+    # (same construction as fast_sliding_window_array, kept as a view here
+    # instead of immediately materializing it).
+    view_a = np.lib.stride_tricks.sliding_window_view(frame_a, (wy, wx))[::step_y, ::step_x]
+    view_b = np.lib.stride_tricks.sliding_window_view(frame_b, (wy, wx))[::step_y, ::step_x]
+
+    chunk_windows = recommended_pipeline_chunk_size((wy, wx))
+    rows_per_chunk = max(1, chunk_windows // max(1, n_cols))
+
+    u_flat = np.empty(n_windows, dtype=np.float64)
+    v_flat = np.empty(n_windows, dtype=np.float64)
+
+    for row_start in range(0, n_rows, rows_per_chunk):
+        row_end = min(row_start + rows_per_chunk, n_rows)
+        # Materialize (copy) only THIS chunk's rows of windows -- the same
+        # ascontiguousarray+reshape fast_sliding_window_array uses, just
+        # applied to a row slice of the grid instead of the whole thing.
+        a_chunk = np.ascontiguousarray(view_a[row_start:row_end]).reshape(-1, wy, wx)
+        b_chunk = np.ascontiguousarray(view_b[row_start:row_end]).reshape(-1, wy, wx)
+
+        corr_chunk = fast_fft_correlate_images(
+            a_chunk, b_chunk, correlation_method="circular",
+            normalized_correlation=normalized_correlation,
+        )
+        u_chunk, v_chunk = _correlation_to_displacement_flat(corr_chunk, subpixel_method=subpixel_method)
+
+        flat_start, flat_end = row_start * n_cols, row_end * n_cols
+        u_flat[flat_start:flat_end] = u_chunk
+        v_flat[flat_start:flat_end] = v_chunk
+
+    u = u_flat.reshape(n_rows, n_cols)
+    v = v_flat.reshape(n_rows, n_cols)
+    # sig2noise_method is None on the fast path (see docstring) --
+    # matches the original's own `np.zeros_like(u) * np.nan` for that case.
+    sig2noise = np.full((n_rows, n_cols), np.nan)
+    return u / dt, v / dt, sig2noise
 
 
 def fast_local_median_val(u, v, u_threshold, v_threshold, size=1):
@@ -521,6 +764,8 @@ def loose_typical_validation(u, v, s2n, settings):
 
 _PATCHED = False
 _REAL_TYPICAL_VALIDATION = None
+_REAL_FFT_CORRELATE_IMAGES = None
+_REAL_EXTENDED_SEARCH_AREA_PIV = None
 
 
 def use_loose_validation():
@@ -558,19 +803,23 @@ def apply_speedups():
     namespace -- patching only openpiv.lib.replace_nans would silently
     do nothing, since openpiv.filters.replace_outliers (the actual
     caller) already holds its own reference to the original function.
-    correlation_to_displacement and typical_validation are both called
-    from within their OWN defining module (pyprocess.py's
-    extended_search_area_piv, windef.py's multipass_img_deform calling
+    sliding_window_array, fft_correlate_images, correlation_to_displacement,
+    and typical_validation are all called from within their OWN defining
+    module (pyprocess.py's extended_search_area_piv calling
+    sliding_window_array, fft_correlate_images, and
+    correlation_to_displacement, windef.py's multipass_img_deform calling
     `validation.typical_validation`), so patching the module attribute
     there is sufficient."""
-    global _PATCHED, _REAL_TYPICAL_VALIDATION
+    global _PATCHED, _REAL_TYPICAL_VALIDATION, _REAL_FFT_CORRELATE_IMAGES, _REAL_EXTENDED_SEARCH_AREA_PIV
     if _PATCHED:
         return
     import openpiv.filters
     import openpiv.lib
     import openpiv.pyprocess
     import openpiv.validation
+    import openpiv.windef
 
+    openpiv.pyprocess.sliding_window_array = fast_sliding_window_array
     openpiv.lib.replace_nans = fast_replace_nans
     openpiv.filters.replace_nans = fast_replace_nans
     openpiv.pyprocess.correlation_to_displacement = fast_correlation_to_displacement
@@ -583,24 +832,39 @@ def apply_speedups():
     # apply_speedups() ever runs.
     openpiv.validation.local_median_val = fast_local_median_val
     openpiv.validation.local_norm_median_val = fast_local_norm_median_val
-    # fast_fft_correlate_images is intentionally NOT wired in here -- see
-    # its docstring's final paragraph. It passed every isolated check
-    # (peak location unchanged in 2000/2000 real windows, diff exactly at
-    # float32's precision floor, vanishing to 0.0 with float64 inputs),
-    # but a full 4-pass end-to-end run on real data showed the per-window
-    # float32 rounding noise it introduces compounds across passes (each
-    # pass's sub-pixel estimate re-positions the NEXT pass's deformed
-    # sampling window) into real divergence: up to 0.13 px, on 126,162 of
-    # 189,857 vectors -- confirmed by A/B-testing the exact same 4-pass
-    # run with and without just this one patch. The two faithful-speedup
-    # patches above (replace_nans, correlation_to_displacement) were
-    # separately confirmed NOT to have this compounding effect (a
-    # combined end-to-end run with only those two active, validation
-    # held constant, matched the unpatched baseline to ~1e-15 on every
-    # vector) -- keeping fast_fft_correlate_images defined but unused so
-    # a future attempt doesn't have to rediscover why it's unsafe from
-    # scratch. typical_validation's replacement above is a separate,
-    # deliberate behavior change (not a faithful speedup) and is NOT
-    # expected to match the unpatched baseline -- see
-    # loose_typical_validation's docstring.
+
+    # fast_fft_correlate_images IS wired in, unlike the other three
+    # faithful speedups above it's NOT bit-exact vs. today's float32
+    # output by design (see its own docstring: float32->float64 is a
+    # lossless-upcast, provably-more-accurate change, the other kind this
+    # project's numerical bar allows alongside bit-exact). What had to be
+    # separately verified, on THIS machine, before wiring it in: does the
+    # scipy.fft-vs-numpy.fft BACKEND swap (held at the same float64
+    # precision) compound across passes the way the float32 backend swap
+    # was found to. It does not -- a full 4-pass real-data A/B (scipy.fft
+    # float64 vs. a numpy.fft float64 reference, everything else held
+    # identical) gave a worst-case 2.3e-9 px divergence across all 189,857
+    # vectors on the real dataset, ~8 orders of magnitude under the 0.13 px
+    # threshold that got the float32 version rejected -- see
+    # fast_fft_correlate_images's own docstring for the numbers. If you
+    # bump scipy/numpy versions, re-run that A/B (not just an isolated
+    # per-call check) before trusting this stays wired in.
+    _REAL_FFT_CORRELATE_IMAGES = openpiv.pyprocess.fft_correlate_images
+    openpiv.pyprocess.fft_correlate_images = fast_fft_correlate_images
+
+    # fast_extended_search_area_piv only fast-paths the branches this app
+    # exercises (search_area_size == window_size, sig2noise_method=None,
+    # use_vectorized=False, correlation_method="circular") and falls back
+    # to the real original -- captured here, before patching, for the
+    # same reason _REAL_FFT_CORRELATE_IMAGES is -- for everything else.
+    # windef.py does `from openpiv.pyprocess import extended_search_area_piv`
+    # at ITS OWN import time (the exact same private-copy gotcha as
+    # openpiv.filters/replace_nans above) -- windef.first_pass and
+    # multipass_img_deform call THEIR OWN bound name, so patching only
+    # openpiv.pyprocess.extended_search_area_piv would silently never
+    # reach them. Both names have to be patched.
+    _REAL_EXTENDED_SEARCH_AREA_PIV = openpiv.pyprocess.extended_search_area_piv
+    openpiv.pyprocess.extended_search_area_piv = fast_extended_search_area_piv
+    openpiv.windef.extended_search_area_piv = fast_extended_search_area_piv
+
     _PATCHED = True

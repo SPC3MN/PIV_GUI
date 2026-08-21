@@ -145,6 +145,16 @@ class CPUPIVProcess:
         # flag before each pass's correlation call).
         settings.sig2noise_validate = False
 
+        # windef.multipass_img_deform already nulls sig2noise_method for
+        # passes 1..N-1 when sig2noise_validate is False (see windef.py),
+        # but windef.first_pass has no equivalent guard -- it always
+        # computes a sig2noise ratio using whatever settings.sig2noise_method
+        # is (PIVSettings' default: "peak2mean"), and that value is
+        # discarded (loose_typical_validation's s2n argument is unused).
+        # Null it here too so first_pass skips that wasted computation --
+        # pure waste removal, zero effect on u/v.
+        settings.sig2noise_method = None
+
         # Global module-level toggle, set once per engine construction --
         # safe because this app runs one CPUPIVProcess per project/batch
         # sequentially (never multiple engines with different validation
@@ -171,6 +181,19 @@ class CPUPIVProcess:
         self.scaling_par = 1.0
         self.coords = get_rect_coordinates(frame_shape, settings.windowsizes[-1], settings.overlap[-1])
         self.val_locations = None
+
+        # Autotune sanity: log what perf.autotune actually chose for this
+        # engine's window sizes -- printed once per engine build (once
+        # per worker process/batch, not per pair or per pass), so a user
+        # can confirm the auto-tuner picked something sensible for their
+        # machine without needing to read perf/autotune.py's source.
+        from ..perf.autotune import recommended_chunk_size, recommended_pipeline_chunk_size
+        chunk_info = ", ".join(
+            f"{w}px->{recommended_chunk_size((w, w))}/chunk (fft), "
+            f"{recommended_pipeline_chunk_size((w, w))}/chunk (pipeline)"
+            for w in sorted(set(settings.windowsizes))
+        )
+        print(f"[info] perf autotune: {chunk_info}")
 
     def __call__(self, frame_a, frame_b):
         from openpiv import windef, validation, filters

@@ -24,6 +24,7 @@ from ..config.legacy import to_cpu_settings, to_gpu_settings
 from ..engines.registry import get_engine_factory
 from ..io.davis_set import iter_pairs_from_set, iter_stereo_from_set, resolve_set_paths, set_label
 from ..io.loose_files import iter_pairs_from_loose_files, iter_stereo_from_loose_files
+from ..perf.autotune import recommended_workers
 from ..plotting.planar import plot_and_save_planar
 from ..plotting.preview import preview_first_snapshot_cli
 from ..plotting.stereo import plot_and_save_stereo
@@ -121,6 +122,47 @@ def handle_pair_planar(pair_id, frame_a, frame_b, cfg, output_dir, engine, x, y)
 
 def process_pairs_planar(pair_source, cfg, output_dir, interactive_preview):
     backend = cfg.project.backend
+
+    # Tier 3: process-level parallelism across independent pairs, planar
+    # CPU only, and only for genuine batch runs -- interactive_preview
+    # needs pair 0's actual u/v/x/y back in THIS process to render a
+    # preview, which doesn't fit a fire-and-forget worker pool, and it's
+    # only True for the small (non-batch) single-set case anyway, not the
+    # throughput-sensitive batch scenario Tier 3 targets. n_workers<=1
+    # always takes the unmodified serial loop below -- see
+    # processing.parallel_planar's module docstring for why that's a
+    # hard requirement, not just an optimization.
+    if backend == "cpu" and not cfg.correlation.use_tiling and not interactive_preview:
+        n_workers = recommended_workers(cfg.performance.n_workers)
+        if cfg.output.verbose:
+            auto_note = "auto" if cfg.performance.n_workers is None else "user override"
+            print(f"[info] planar CPU batch: {n_workers} worker process(es) ({auto_note})")
+        if n_workers > 1:
+            from ..processing.parallel_planar import run_planar_batch_parallel
+
+            def _on_finished(pair_id, result):
+                if cfg.output.verbose:
+                    print(f"[timing] {pair_id}: preprocess={result['t_pre']:.3f}s "
+                          f"correlation={result['elapsed']:.3f}s postprocess={result['t_post']:.3f}s "
+                          f"total={result['t_pre'] + result['elapsed'] + result['t_post']:.3f}s "
+                          f"({result['n_valid']}/{result['n_total']} valid)")
+
+            def _on_error(pair_id, exc):
+                # Matches the serial loop's own behavior (no per-pair
+                # try/except there -- a bad pair crashes the CLI run):
+                # surface which pair failed, then re-raise.
+                print(f"[error] {pair_id} failed: {exc}")
+                raise exc
+
+            results, _cancelled = run_planar_batch_parallel(
+                pair_source, cfg, output_dir, n_workers,
+                on_pair_finished=_on_finished, on_pair_error=_on_error)
+            return [
+                (r["pair_id"], r["elapsed"], r["n_valid"], r["n_total"],
+                 r["n_rejected_range_residual"], r["n_rejected_std_dev"])
+                for r in results
+            ]
+
     engine = x = y = None
     summary_rows = []
 

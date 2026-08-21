@@ -235,6 +235,20 @@ class OutputSettings:
 
 
 @dataclass
+class PerformanceSettings:
+    """Hardware-tuning knobs -- see perf/autotune.py's module docstring
+    for the design principle: everything that makes the CPU planar
+    pipeline faster is an unconditional patch (engines/_openpiv_speedups.py),
+    applied regardless of machine. The ONE thing that legitimately varies
+    by hardware and is left to the user is how many pairs to process
+    concurrently (Tier 3's ProcessPoolExecutor, wired in
+    piv_suite_gui/workers/pipeline_worker.py and cli/main.py's planar
+    batch loops) -- everything else (correlation chunk size) is derived
+    automatically from available RAM, never user-facing."""
+    n_workers: Optional[int] = None   # None = auto (perf.autotune.recommended_workers())
+
+
+@dataclass
 class ProjectConfig:
     """The full, canonical settings tree for one PIV project -- what
     gets saved to/loaded from a `.pivproj` JSON file (config.io)."""
@@ -246,3 +260,4 @@ class ProjectConfig:
     calibration: CalibrationSettings = field(default_factory=CalibrationSettings)
     stereo: StereoSettings = field(default_factory=StereoSettings)
     output: OutputSettings = field(default_factory=OutputSettings)
+    performance: PerformanceSettings = field(default_factory=PerformanceSettings)

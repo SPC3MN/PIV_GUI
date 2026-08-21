@@ -22,6 +22,7 @@ from piv_suite.io.davis_set import (
     iter_pairs_from_set, iter_stereo_from_set, resolve_set_paths, set_label,
 )
 from piv_suite.io.loose_files import iter_pairs_from_loose_files, iter_stereo_from_loose_files
+from piv_suite.perf.autotune import recommended_workers
 from piv_suite.plotting.planar import plot_and_save_planar
 from piv_suite.plotting.stereo import plot_and_save_stereo
 from piv_suite.processing import pipeline
@@ -151,6 +152,19 @@ class PipelineWorker(QObject):
     def _process_set_planar(self, pair_source, cfg, output_dir):
         backend = cfg.project.backend
         correlation, validation = cfg.correlation, cfg.validation
+
+        # Tier 3: process-level parallelism across independent pairs,
+        # planar CPU only -- see processing.parallel_planar's module
+        # docstring. n_workers<=1 always falls through to the unmodified
+        # serial loop below (a hard requirement, not just an
+        # optimization -- see that module's docstring for why).
+        if backend == "cpu" and not correlation.use_tiling:
+            n_workers = recommended_workers(cfg.performance.n_workers)
+            auto_note = "auto" if cfg.performance.n_workers is None else "user override"
+            self.log.emit(f"[info] planar CPU batch: {n_workers} worker process(es) ({auto_note})")
+            if n_workers > 1:
+                return self._process_set_planar_parallel(pair_source, cfg, output_dir, n_workers)
+
         post = cfg.postprocess.for_pipeline()
         engine = x = y = None
         summary_rows = []
@@ -215,6 +229,49 @@ class PipelineWorker(QObject):
             del engine
             free_gpu_pools()
 
+        return summary_rows, cancelled
+
+    def _process_set_planar_parallel(self, pair_source, cfg, output_dir, n_workers):
+        """The n_workers > 1 branch of _process_set_planar -- same Qt
+        signal contract (pair_started/pair_finished/progress/error) as
+        the serial loop, just driven by
+        processing.parallel_planar.run_planar_batch_parallel's callbacks
+        instead of an inline try/except per pair. Progress counts
+        COMPLETED pairs (not submission order, since workers can finish
+        out of order) -- matches the serial loop's `len(summary_rows)`
+        meaning (how many are done so far), just not necessarily counting
+        up in pair_id order along the way."""
+        from piv_suite.processing.parallel_planar import run_planar_batch_parallel
+
+        finished_count = [0]
+
+        def _on_finished(pair_id, result):
+            if cfg.output.verbose:
+                self.log.emit(
+                    f"[timing] {pair_id}: preprocess={result['t_pre']:.3f}s "
+                    f"correlation={result['elapsed']:.3f}s postprocess={result['t_post']:.3f}s "
+                    f"total={result['t_pre'] + result['elapsed'] + result['t_post']:.3f}s")
+            self.pair_finished.emit(pair_id, {
+                "elapsed": result["elapsed"], "n_valid": result["n_valid"], "n_total": result["n_total"],
+                "n_rejected_range_residual": result["n_rejected_range_residual"],
+                "n_rejected_std_dev": result["n_rejected_std_dev"],
+            })
+            finished_count[0] += 1
+            self.progress.emit(finished_count[0], 0)
+
+        def _on_error(pair_id, exc):
+            self.error.emit(pair_id, str(exc))
+
+        results, cancelled = run_planar_batch_parallel(
+            pair_source, cfg, output_dir, n_workers,
+            on_pair_started=self.pair_started.emit, on_pair_finished=_on_finished,
+            on_pair_error=_on_error, cancel_check=self._cancel_event.is_set,
+        )
+        summary_rows = [
+            (r["pair_id"], r["elapsed"], r["n_valid"], r["n_total"],
+             r["n_rejected_range_residual"], r["n_rejected_std_dev"])
+            for r in results
+        ]
         return summary_rows, cancelled
 
     def _run_camera(self, frame_a, frame_b, cfg):

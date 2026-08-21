@@ -76,6 +76,31 @@ def test_save_then_load_is_stable(tmp_path):
     assert reloaded.project.mode == "stereo"
 
 
+def test_performance_settings_default_is_auto():
+    cfg = ProjectConfig()
+    assert cfg.performance.n_workers is None  # None = auto (perf.autotune.recommended_workers())
+
+
+def test_performance_settings_roundtrip(tmp_path):
+    path = tmp_path / "proj.pivproj"
+    cfg = ProjectConfig()
+    cfg.performance.n_workers = 4
+    save_project(str(path), cfg)
+
+    reloaded = load_project(str(path))
+    assert reloaded.performance.n_workers == 4
+
+
+def test_performance_settings_missing_from_older_pivproj_file_falls_back_to_auto(tmp_path):
+    # An older .pivproj saved before PerformanceSettings existed has no
+    # "performance" key at all -- from_dict must not choke on that.
+    path = tmp_path / "proj.pivproj"
+    with open(path, "w") as f:
+        json.dump({"project": {"backend": "cpu"}}, f)
+    cfg = load_project(str(path))
+    assert cfg.performance.n_workers is None
+
+
 # ---- legacy adapter <-> exact original defaults ----
 
 def test_passes_to_cpu_matches_original_default():

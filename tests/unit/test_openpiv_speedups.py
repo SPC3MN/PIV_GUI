@@ -25,6 +25,10 @@ import pytest
 
 from openpiv.lib import replace_nans as orig_replace_nans
 from openpiv.pyprocess import correlation_to_displacement as orig_correlation_to_displacement
+from openpiv.pyprocess import extended_search_area_piv as orig_extended_search_area_piv
+from openpiv.pyprocess import fft_correlate_images as orig_fft_correlate_images
+from openpiv.pyprocess import normalize_intensity as orig_normalize_intensity
+from openpiv.pyprocess import sliding_window_array as orig_sliding_window_array
 from openpiv.validation import local_median_val as orig_local_median_val
 from openpiv.validation import local_norm_median_val as orig_local_norm_median_val
 from openpiv.validation import typical_validation as orig_typical_validation
@@ -32,9 +36,12 @@ from openpiv.validation import typical_validation as orig_typical_validation
 from piv_suite.engines._openpiv_speedups import (
     apply_speedups,
     fast_correlation_to_displacement,
+    fast_extended_search_area_piv,
+    fast_fft_correlate_images,
     fast_local_median_val,
     fast_local_norm_median_val,
     fast_replace_nans,
+    fast_sliding_window_array,
     loose_typical_validation,
     use_loose_validation,
     use_real_validation,
@@ -49,6 +56,56 @@ def _assert_close(fast, orig, atol=1e-9, rtol=1e-9):
     both_real = ~np.isnan(fast)
     if both_real.any():
         assert np.allclose(fast[both_real], orig[both_real], atol=atol, rtol=rtol)
+
+
+# ============================================================
+# fast_sliding_window_array
+# ============================================================
+
+@pytest.mark.parametrize("shape,window_size,overlap", [
+    ((20, 20), (4, 4), (2, 2)),
+    ((21, 23), (4, 6), (2, 3)),      # rectangular windows
+    ((20, 20), (4, 4), (0, 0)),      # no overlap
+    ((10, 10), (10, 10), (0, 0)),    # single window covering the whole image
+    ((37, 51), (8, 8), (4, 4)),      # image size does not evenly divide
+    ((37, 51), (8, 8), (6, 6)),      # non-dividing, odd (non-power-of-2) step
+    ((100, 150), (32, 32), (24, 24)),   # real 75%-overlap-style pass
+    ((100, 150), (64, 64), (32, 32)),   # real 50%-overlap-style pass
+])
+def test_sliding_window_array_matches_original(shape, window_size, overlap):
+    rng = np.random.RandomState(11)
+    image = rng.rand(*shape)
+    orig = orig_sliding_window_array(image.copy(), window_size=window_size, overlap=overlap)
+    fast = fast_sliding_window_array(image.copy(), window_size=window_size, overlap=overlap)
+    assert orig.shape == fast.shape
+    assert np.array_equal(orig, fast)
+
+
+def test_sliding_window_array_accepts_scalar_window_size_and_overlap():
+    rng = np.random.RandomState(12)
+    image = rng.rand(40, 40)
+    orig = orig_sliding_window_array(image.copy(), window_size=(8, 8), overlap=(4, 4))
+    fast = fast_sliding_window_array(image.copy(), window_size=8, overlap=4)
+    assert np.array_equal(orig, fast)
+
+
+def test_sliding_window_array_preserves_dtype():
+    rng = np.random.RandomState(13)
+    for dtype in (np.float32, np.float64):
+        image = (rng.rand(30, 30) * 100).astype(dtype)
+        fast = fast_sliding_window_array(image.copy(), window_size=(6, 6), overlap=(3, 3))
+        assert fast.dtype == dtype
+
+
+def test_sliding_window_array_windows_are_independent_copies():
+    # Matches the original's fancy-indexing gather, which always
+    # allocates a fresh array -- callers (e.g. extended_search_area_piv's
+    # search_area_size > window_size branch) mutate the result in place.
+    rng = np.random.RandomState(14)
+    image = rng.rand(20, 20)
+    fast = fast_sliding_window_array(image, window_size=(4, 4), overlap=(2, 2))
+    fast[0, 0, 0] = 999.0
+    assert image[0, 0] != 999.0
 
 
 # ============================================================
@@ -267,6 +324,242 @@ def test_correlation_to_displacement_unknown_method_raises():
 
 
 # ============================================================
+# fast_fft_correlate_images
+#
+# Unlike the faithful speedups above, this one is NOT bit-exact vs. the
+# original -- it deliberately upcasts float32 windows to float64 before
+# correlating (a lossless, provably-more-accurate change; see the
+# function's own docstring). So these tests check two different things:
+# (a) does it match a float64 numpy.fft REFERENCE (same precision,
+# different FFT backend) to within the tiny, empirically-bounded
+# backend-equivalence tolerance verified on this machine, and (b) does it
+# still find the same correlation peak as the original float32 openpiv
+# function on non-degenerate data (the property that actually matters for
+# PIV -- see the peak-location check below).
+# ============================================================
+
+def _numpy_fft64_reference(image_a, image_b, correlation_method="circular",
+                            normalized_correlation=True, conj=np.conj):
+    """Same algorithm as fast_fft_correlate_images but numpy.fft instead
+    of scipy.fft, unchunked -- an independent float64 reference for the
+    backend-equivalence check, not a copy of the code under test."""
+    if correlation_method != "circular":
+        return orig_fft_correlate_images(
+            image_a, image_b, correlation_method=correlation_method,
+            normalized_correlation=normalized_correlation, conj=conj)
+    if normalized_correlation:
+        image_a = orig_normalize_intensity(image_a)
+        image_b = orig_normalize_intensity(image_b)
+    s2 = np.array(image_b.shape[-2:])
+    a64 = image_a.astype(np.float64)
+    b64 = image_b.astype(np.float64)
+    f2a = conj(np.fft.rfft2(a64))
+    f2b = np.fft.rfft2(b64)
+    corr = np.fft.fftshift(np.fft.irfft2(f2a * f2b).real, axes=(-2, -1))
+    if normalized_correlation:
+        corr = corr / (s2[0] * s2[1])
+        corr = np.clip(corr, 0, 1)
+    return corr
+
+
+@pytest.mark.parametrize("window_size", [(32, 32), (64, 64)])
+@pytest.mark.parametrize("normalized", [True, False])
+def test_fft_correlate_images_matches_float64_numpy_reference(window_size, normalized):
+    # Backend-equivalence gate: scipy.fft vs. numpy.fft, held at the SAME
+    # float64 precision, verified negligible on real data via a full
+    # 4-pass A/B before this was wired into apply_speedups() (see that
+    # function's docstring) -- here, a tight but non-zero tolerance,
+    # since this machine's scipy/numpy pair was measured to differ from
+    # exactly 0.000e+00 (unlike an earlier investigation on a different
+    # machine).
+    rng = np.random.RandomState(21)
+    wy, wx = window_size
+    image_a = (rng.rand(50, wy, wx) * 255).astype(np.float32)
+    image_b = (rng.rand(50, wy, wx) * 255).astype(np.float32)
+    fast = fast_fft_correlate_images(image_a.copy(), image_b.copy(), normalized_correlation=normalized)
+    ref = _numpy_fft64_reference(image_a.copy(), image_b.copy(), normalized_correlation=normalized)
+    assert fast.dtype == np.float64
+    assert fast.shape == ref.shape
+    assert np.allclose(fast, ref, atol=1e-6, rtol=1e-6)
+
+
+def test_fft_correlate_images_linear_method_falls_back_to_original():
+    rng = np.random.RandomState(22)
+    image_a = (rng.rand(5, 16, 16) * 255).astype(np.float32)
+    image_b = (rng.rand(5, 16, 16) * 255).astype(np.float32)
+    fast = fast_fft_correlate_images(image_a.copy(), image_b.copy(), correlation_method="linear")
+    orig = orig_fft_correlate_images(image_a.copy(), image_b.copy(), correlation_method="linear")
+    assert np.array_equal(fast, orig)
+
+
+def test_fft_correlate_images_peak_location_matches_original_on_known_shift():
+    # What actually matters for PIV: does the float64 path find the SAME
+    # correlation peak as the original float32 path. Builds a pair of
+    # windows with an unambiguous single peak (a bright square on a dark
+    # background) shifted by a known, non-trivial amount, and confirms
+    # both the original (float32) and fast (float64) paths' argmax lands
+    # on that exact same pixel -- not just "close somewhere nearby".
+    wy, wx = 32, 32
+    base = np.zeros((1, wy, wx), dtype=np.float32)
+    base[0, 10:14, 10:14] = 200.0
+    shifted = np.zeros((1, wy, wx), dtype=np.float32)
+    shifted[0, 13:17, 8:12] = 200.0  # shifted by (+3 rows, -2 cols)
+
+    orig_corr = orig_fft_correlate_images(base.copy(), shifted.copy(), normalized_correlation=False)
+    fast_corr = fast_fft_correlate_images(base.copy(), shifted.copy(), normalized_correlation=False)
+
+    orig_peak = np.unravel_index(np.argmax(orig_corr[0]), orig_corr[0].shape)
+    fast_peak = np.unravel_index(np.argmax(fast_corr[0]), fast_corr[0].shape)
+    assert orig_peak == fast_peak
+
+
+def test_fft_correlate_images_chunking_does_not_change_result(monkeypatch):
+    # Force a chunk size much smaller than n_windows so the loop in
+    # fast_fft_correlate_images actually runs multiple iterations, and
+    # confirm that's identical to one big (mocked chunk >= n_windows) call
+    # -- each window's FFT is independent, so chunk boundaries must never
+    # matter.
+    rng = np.random.RandomState(23)
+    image_a = (rng.rand(37, 32, 32) * 255).astype(np.float32)
+    image_b = (rng.rand(37, 32, 32) * 255).astype(np.float32)
+
+    monkeypatch.setattr("piv_suite.perf.autotune.recommended_chunk_size", lambda *a, **k: 10000)
+    unchunked = fast_fft_correlate_images(image_a.copy(), image_b.copy())
+
+    monkeypatch.setattr("piv_suite.perf.autotune.recommended_chunk_size", lambda *a, **k: 5)
+    chunked = fast_fft_correlate_images(image_a.copy(), image_b.copy())
+
+    assert np.array_equal(unchunked, chunked)
+
+
+# ============================================================
+# fast_extended_search_area_piv
+#
+# fast_extended_search_area_piv streams window-extraction ->
+# fast_fft_correlate_images -> _correlation_to_displacement_flat by grid
+# row instead of doing all three as separate full-array passes. Since it
+# calls fast_fft_correlate_images internally, its output is NOT bit-exact
+# vs. openpiv's original extended_search_area_piv (same float32->float64
+# precision-upgrade distinction as fast_fft_correlate_images -- see that
+# section). What must actually be exact is the STREAMING itself: compared
+# against the SAME building blocks (fast_sliding_window_array,
+# fast_fft_correlate_images, fast_correlation_to_displacement) run
+# unchunked, via openpiv's own original orchestration function with just
+# those three patched in -- isolating "does chunking by grid-row change
+# anything" from "does the float64 upgrade change something vs. today".
+# ============================================================
+
+def _unchunked_esa_with_fast_building_blocks(monkeypatch):
+    """Patches JUST sliding_window_array/fft_correlate_images/
+    correlation_to_displacement onto openpiv.pyprocess (not
+    extended_search_area_piv itself), and returns openpiv's own
+    (unpatched) orchestration function -- which now runs the exact same
+    per-window math as fast_extended_search_area_piv, just unchunked."""
+    import openpiv.pyprocess as pp
+    monkeypatch.setattr(pp, "sliding_window_array", fast_sliding_window_array)
+    monkeypatch.setattr(pp, "fft_correlate_images", fast_fft_correlate_images)
+    monkeypatch.setattr(pp, "correlation_to_displacement", fast_correlation_to_displacement)
+    return orig_extended_search_area_piv
+
+
+@pytest.mark.parametrize("shape,window_size,overlap", [
+    ((100, 150), 32, 24),
+    ((100, 150), 64, 32),
+    ((37, 51), 8, 4),        # non-dividing image size
+    ((37, 51), 8, 6),
+    ((64, 64), 64, 0),       # single window
+    ((300, 400), 32, 24),    # large enough to force multiple row-chunks
+])
+@pytest.mark.parametrize("normalized_correlation", [True, False])
+def test_extended_search_area_piv_chunking_matches_unchunked_reference(
+        monkeypatch, shape, window_size, overlap, normalized_correlation):
+    unchunked_fn = _unchunked_esa_with_fast_building_blocks(monkeypatch)
+
+    rng = np.random.RandomState(31)
+    image_a = (rng.rand(*shape) * 255).astype(np.float32)
+    shifted = np.roll(image_a, shift=(1, 1), axis=(0, 1))
+    image_b = (shifted + rng.rand(*shape).astype(np.float32) * 2).astype(np.float32)
+
+    kwargs = dict(window_size=window_size, overlap=overlap, sig2noise_method=None,
+                  normalized_correlation=normalized_correlation)
+    u_ref, v_ref, _ = unchunked_fn(image_a.copy(), image_b.copy(), **kwargs)
+    u_fast, v_fast, s2n_fast = fast_extended_search_area_piv(image_a.copy(), image_b.copy(), **kwargs)
+
+    assert np.array_equal(u_ref, u_fast, equal_nan=True)
+    assert np.array_equal(v_ref, v_fast, equal_nan=True)
+    assert np.all(np.isnan(s2n_fast))  # sig2noise_method=None -> all-NaN, matching the original
+
+
+def test_extended_search_area_piv_row_chunking_independent_of_chunk_size(monkeypatch):
+    # Directly forces different chunk sizes (in windows-per-chunk terms,
+    # translated to rows-per-chunk inside the function) and confirms the
+    # result never depends on where the chunk boundaries fall.
+    rng = np.random.RandomState(32)
+    shape = (300, 400)
+    image_a = (rng.rand(*shape) * 255).astype(np.float32)
+    image_b = (np.roll(image_a, shift=(2, 1), axis=(0, 1))).astype(np.float32)
+    kwargs = dict(window_size=32, overlap=24, sig2noise_method=None)
+
+    results = []
+    for chunk_windows in (5, 37, 500, 100_000):
+        monkeypatch.setattr("piv_suite.perf.autotune.recommended_pipeline_chunk_size", lambda *a, **k: chunk_windows)
+        u, v, _ = fast_extended_search_area_piv(image_a.copy(), image_b.copy(), **kwargs)
+        results.append((u, v))
+
+    u0, v0 = results[0]
+    for u, v in results[1:]:
+        assert np.array_equal(u0, u, equal_nan=True)
+        assert np.array_equal(v0, v, equal_nan=True)
+
+
+def test_extended_search_area_piv_falls_back_for_extended_search_area():
+    # search_area_size > window_size (the true "extended search area"
+    # case) isn't exercised by this app -- confirms it correctly falls
+    # back to the real original rather than silently mishandling it.
+    rng = np.random.RandomState(33)
+    shape = (100, 100)
+    image_a = (rng.rand(*shape) * 255).astype(np.float32)
+    image_b = (rng.rand(*shape) * 255).astype(np.float32)
+    u_orig, v_orig, _ = orig_extended_search_area_piv(
+        image_a.copy(), image_b.copy(), window_size=16, overlap=8,
+        search_area_size=32, sig2noise_method=None)
+    u_fast, v_fast, _ = fast_extended_search_area_piv(
+        image_a.copy(), image_b.copy(), window_size=16, overlap=8,
+        search_area_size=32, sig2noise_method=None)
+    assert np.array_equal(u_orig, u_fast, equal_nan=True)
+    assert np.array_equal(v_orig, v_fast, equal_nan=True)
+
+
+def test_extended_search_area_piv_falls_back_for_sig2noise():
+    rng = np.random.RandomState(34)
+    shape = (64, 64)
+    image_a = (rng.rand(*shape) * 255).astype(np.float32)
+    image_b = (rng.rand(*shape) * 255).astype(np.float32)
+    u_orig, v_orig, s2n_orig = orig_extended_search_area_piv(
+        image_a.copy(), image_b.copy(), window_size=16, overlap=8, sig2noise_method="peak2mean")
+    u_fast, v_fast, s2n_fast = fast_extended_search_area_piv(
+        image_a.copy(), image_b.copy(), window_size=16, overlap=8, sig2noise_method="peak2mean")
+    assert np.array_equal(u_orig, u_fast, equal_nan=True)
+    assert np.array_equal(v_orig, v_fast, equal_nan=True)
+    assert np.array_equal(s2n_orig, s2n_fast, equal_nan=True)
+
+
+def test_extended_search_area_piv_falls_back_for_linear_method():
+    rng = np.random.RandomState(35)
+    shape = (64, 64)
+    image_a = (rng.rand(*shape) * 255).astype(np.float32)
+    image_b = (rng.rand(*shape) * 255).astype(np.float32)
+    u_orig, v_orig, _ = orig_extended_search_area_piv(
+        image_a.copy(), image_b.copy(), window_size=16, overlap=8,
+        correlation_method="linear", sig2noise_method=None)
+    u_fast, v_fast, _ = fast_extended_search_area_piv(
+        image_a.copy(), image_b.copy(), window_size=16, overlap=8,
+        correlation_method="linear", sig2noise_method=None)
+    assert np.array_equal(u_orig, u_fast, equal_nan=True)
+    assert np.array_equal(v_orig, v_fast, equal_nan=True)
+
+
+# ============================================================
 # fast_local_median_val
 # ============================================================
 
@@ -378,17 +671,35 @@ def test_apply_speedups_patches_local_median_val_and_local_norm_median_val():
     assert openpiv.validation.local_norm_median_val is fast_local_norm_median_val
 
 
-def test_apply_speedups_does_not_patch_fft_correlate_images():
-    # Deliberately excluded -- see fast_fft_correlate_images's own
-    # docstring for why (isolated checks passed, but the float32 rounding
-    # noise it introduces compounds across multi-pass runs into real
-    # divergence). This test exists so nobody re-adds the patch line to
-    # apply_speedups() without re-reading why it was removed.
+def test_apply_speedups_patches_fft_correlate_images():
+    # fast_fft_correlate_images IS wired in -- unlike the faithful
+    # speedups this is a precision-upgrade change (float32 -> float64,
+    # provably more accurate, not bit-exact), gated on a full 4-pass
+    # real-data A/B confirming the bundled backend swap (numpy.fft ->
+    # scipy.fft) doesn't compound; see apply_speedups()'s docstring at
+    # the fft_correlate_images wiring line for that result. Also checks
+    # sliding_window_array, which IS a faithful (bit-exact) speedup.
     import openpiv.pyprocess
-    from openpiv.pyprocess import fft_correlate_images as original_fft_correlate_images
 
     apply_speedups()
-    assert openpiv.pyprocess.fft_correlate_images is original_fft_correlate_images
+    assert openpiv.pyprocess.fft_correlate_images is fast_fft_correlate_images
+    assert openpiv.pyprocess.sliding_window_array is fast_sliding_window_array
+
+
+def test_apply_speedups_patches_extended_search_area_piv_in_both_modules():
+    # windef.py does `from openpiv.pyprocess import extended_search_area_piv`
+    # at ITS OWN import time -- the same private-copy gotcha as
+    # openpiv.filters/replace_nans (see apply_speedups()'s docstring).
+    # windef.first_pass/multipass_img_deform call THEIR OWN bound name, so
+    # both openpiv.pyprocess.extended_search_area_piv AND
+    # openpiv.windef.extended_search_area_piv must be patched -- this is
+    # the regression test for that exact gotcha.
+    import openpiv.pyprocess
+    import openpiv.windef
+
+    apply_speedups()
+    assert openpiv.pyprocess.extended_search_area_piv is fast_extended_search_area_piv
+    assert openpiv.windef.extended_search_area_piv is fast_extended_search_area_piv
 
 
 def test_apply_speedups_is_idempotent():

@@ -10,9 +10,9 @@ import os
 
 from .schema import (
     CalibrationSettings, CameraMappingSettings, CorrelationSettings,
-    OutputSettings, PassSettings, PostProcessSettings, PreprocessSettings,
-    ProjectConfig, ProjectSettings, RangeFilterSettings, StereoSettings,
-    ValidationSettings,
+    OutputSettings, PassSettings, PerformanceSettings, PostProcessSettings,
+    PreprocessSettings, ProjectConfig, ProjectSettings, RangeFilterSettings,
+    StereoSettings, ValidationSettings,
 )
 
 
@@ -74,10 +74,13 @@ def from_dict(d: dict) -> ProjectConfig:
 
     output = OutputSettings(**_filtered_kwargs(OutputSettings, d.get("output", {})))
 
+    performance = PerformanceSettings(**_filtered_kwargs(PerformanceSettings, d.get("performance", {})))
+
     return ProjectConfig(
         project=project, preprocess=preprocess, correlation=correlation,
         validation=validation, postprocess=postprocess,
         calibration=calibration, stereo=stereo, output=output,
+        performance=performance,
     )
 
 
