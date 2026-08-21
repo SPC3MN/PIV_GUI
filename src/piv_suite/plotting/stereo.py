@@ -15,7 +15,12 @@ def make_stereo_figure(x, y, U, V, W, valid, title, quiver_scale=1000):
     ax.set_title(title)
     ax.set_xlabel("x (world px)")
     ax.set_ylabel("y (world px)")
-    ax.invert_yaxis()
+    # NOT ax.invert_yaxis() -- see plotting/planar.py's make_planar_figure
+    # for the full account. Same root cause here: `y` (and this stereo
+    # pair's dewarped `x, y`) comes from the same engines.cpu_engine/
+    # gpu_engine coordinate transform regardless of whether the frame was
+    # raw or dewarped onto a world grid, so it already renders correctly
+    # under matplotlib's default (non-inverted) orientation.
     fig.tight_layout()
     return fig
 

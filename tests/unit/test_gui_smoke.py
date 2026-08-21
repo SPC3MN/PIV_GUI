@@ -20,12 +20,19 @@ def test_main_window_constructs(qtbot):
 
 
 def test_preview_shows_progress_bar_while_running_and_hides_after(qtbot):
-    # A slow preview (real PIV correlation, up to several seconds) had no
-    # visual feedback beyond the static "Running preview..." text -- the
-    # button stayed enabled with no indication whether it was doing
-    # anything until the field/error appeared. Uses a stub _preview_planar
-    # to check the bar's visibility state DURING the run without needing
-    # a real image pair.
+    # A slow preview (real PIV correlation, up to a minute on a full-
+    # resolution frame) used to run inline on the GUI thread, giving no
+    # feedback beyond a static "Running preview..." label and leaving the
+    # window unresponsive to Windows' own paint/ping messages for the
+    # whole call -- reported from real use as the window showing "(Not
+    # Responding)". The compute now runs on a QThread (see
+    # preview_panel._PreviewWorker); this stubs _compute_planar with an
+    # artificial delay to check the bar/button reflect "running" while
+    # the worker thread is actually still going, and "idle" only once it
+    # has genuinely finished -- not just that _do_preview() returned
+    # (which now happens immediately, before the worker completes).
+    import time
+    import numpy as np
     from piv_suite_gui.widgets.preview_panel import PreviewPanel
 
     panel = PreviewPanel()
@@ -33,13 +40,14 @@ def test_preview_shows_progress_bar_while_running_and_hides_after(qtbot):
     panel.show()
     assert panel.progress_bar.isVisible() is False
 
-    seen_visible_during_run = []
+    def fake_compute_planar(project, preprocess, correlation, validation, post, calibration, index):
+        time.sleep(0.2)  # long enough for the test to observe "running" state
+        grid = np.zeros((3, 3))
+        valid = np.ones((3, 3), dtype=bool)
+        return dict(kind="planar", pair_id="0000", x=grid, y=grid, u=grid, v=grid,
+                    valid=valid, elapsed=0.0, n_valid=9, n_total=9, n_range=0, n_std=0)
 
-    def fake_preview_planar(project, preprocess, correlation, validation, post, calibration, index):
-        seen_visible_during_run.append(panel.progress_bar.isVisible())
-        seen_visible_during_run.append(panel.preview_btn.isEnabled())
-
-    panel._preview_planar = fake_preview_planar
+    panel._compute_planar = fake_compute_planar
     panel.window = lambda: type("W", (), {
         "project_panel": type("P", (), {
             "get_project_settings": lambda self: type("S", (), {"mode": "planar"})(),
@@ -56,8 +64,13 @@ def test_preview_shows_progress_bar_while_running_and_hides_after(qtbot):
 
     panel._do_preview()
 
-    assert seen_visible_during_run == [True, False]
-    assert panel.progress_bar.isVisible() is False
+    # _do_preview() itself returns right after starting the worker thread
+    # -- the bar/button state it set synchronously beforehand must
+    # already show "running" here, DURING the fake compute's sleep.
+    assert panel.progress_bar.isVisible() is True
+    assert panel.preview_btn.isEnabled() is False
+
+    qtbot.waitUntil(lambda: not panel.progress_bar.isVisible(), timeout=2000)
     assert panel.preview_btn.isEnabled() is True
 
 

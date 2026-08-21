@@ -42,6 +42,7 @@ from compare_davis_lavision import (
     read_pair, run_this_app,
 )
 from piv_suite.config.schema import ProjectConfig
+from piv_suite.io.buffers import frames_from_buffer
 
 
 def gui_default_config():
@@ -227,8 +228,17 @@ def plot_comparison(out_path, fields, resids, pair_id, outlier_threshold=3.0):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                       formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--lavision-dir", required=True,
+    parser.add_argument("--lavision-dir",
                         help="DaVis sample dir containing B*.im7 and PIV_MP*/PostProc/B*.vc7")
+    parser.add_argument("--set-file",
+                        help="Alternative input: a DaVis .set (e.g. a StreamSet of .ims "
+                             "recordings) read through the SAME io.davis_set path the GUI "
+                             "uses, rather than loose .im7 files. Requires --vc7-dir.")
+    parser.add_argument("--vc7-dir",
+                        help="With --set-file: directory of DaVis's own result vectors "
+                             "(B00001.vc7, B00002.vc7, ... 1-based, matching set order).")
+    parser.add_argument("--start-index", type=int, default=0,
+                        help="With --set-file: first pair index to process (0-based).")
     parser.add_argument("--out-dir", default="piv_comparison_output")
     parser.add_argument("--outlier-threshold", type=float, default=3.0,
                         help="normalized local residual above which a vector is called an outlier")
@@ -238,18 +248,58 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
-    im7_files = find_im7_files(args.lavision_dir)
-    if args.max_pairs:
-        im7_files = im7_files[:args.max_pairs]
+
+    if bool(args.set_file) == bool(args.lavision_dir):
+        parser.error("give exactly one of --lavision-dir or --set-file")
+    if args.set_file and not args.vc7_dir:
+        parser.error("--set-file requires --vc7-dir")
+
+    if args.lavision_dir:
+        im7_files = find_im7_files(args.lavision_dir)
+        if args.max_pairs:
+            im7_files = im7_files[:args.max_pairs]
+
+        def _iter_loose():
+            for im7_path in im7_files:
+                pid = os.path.splitext(os.path.basename(im7_path))[0]
+                fa, fb = read_pair(im7_path)
+                yield pid, fa, fb, find_vc7_for(args.lavision_dir, im7_path)
+
+        pair_iter = _iter_loose()
+    else:
+        # Read through io.davis_set -- the SAME ingestion path the GUI and
+        # CLI use for a .set project, so this exercises the real code path
+        # rather than a loose-file shortcut that happens to look similar.
+        from piv_suite.io.davis_set import _open_dataset
+
+        def _iter_set():
+            dataset, owns = _open_dataset(args.set_file, 0)
+            try:
+                n = len(dataset)
+                start = args.start_index
+                end = min(n, start + (args.max_pairs or n))
+                print(f"set contains {n} pair(s); processing indices {start}..{end - 1}")
+                for i in range(start, end):
+                    buf = dataset[i]
+                    fa, fb = frames_from_buffer(buf)
+                    # DaVis names its per-pair results B00001.vc7 onward,
+                    # 1-based against set order -- index i maps to i+1.
+                    vc7 = os.path.join(args.vc7_dir, f"B{i + 1:05d}.vc7")
+                    if not os.path.exists(vc7):
+                        raise FileNotFoundError(f"no DaVis result at {vc7} for set index {i}")
+                    yield f"{i:04d}", fa, fb, vc7
+            finally:
+                if owns:
+                    dataset.close()
+
+        pair_iter = _iter_set()
 
     configs = [("this app (DaVis-matched)", build_config())]
     if not args.skip_gui_defaults:
         configs.insert(0, ("this app (GUI defaults)", gui_default_config()))
 
-    for im7_path in im7_files:
-        pair_id = os.path.splitext(os.path.basename(im7_path))[0]
+    for pair_id, frame_a, frame_b, vc7_path in pair_iter:
         print(f"\n=== {pair_id} ===")
-        frame_a, frame_b = read_pair(im7_path)
 
         fields = []
         for label, cfg in configs:
@@ -272,7 +322,6 @@ def main():
                 v = (v / 1000.0) * PX_PER_MM_TO_MM_S
             fields.append((label, u, v))
 
-        vc7_path = find_vc7_for(args.lavision_dir, im7_path)
         _x_dv, _y_dv, u_dv, v_dv = load_vc7_field(vc7_path)
         fields.append(("LaVision DaVis", u_dv, v_dv))
 

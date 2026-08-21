@@ -16,6 +16,43 @@ def _planar_field(nx=5, ny=4):
     return x, y, u, v, valid
 
 
+def test_preview_does_not_double_flip_y_orientation():
+    # Regression test for a real display bug, reported by a user
+    # comparing this program's preview against a real LaVision DaVis
+    # render of the same data: the flow pattern looked structurally
+    # right but vertically mirrored. Root cause: engines.cpu_engine/
+    # gpu_engine already flip y into a convention where the image's
+    # physical TOP row gets the LARGEST y value (specifically so it
+    # renders correctly under matplotlib's default, non-inverted y-axis
+    # orientation) -- _plot_component used to call ax.invert_yaxis() on
+    # top of that, flipping a second time. This builds a field with an
+    # unambiguous marker at the LARGEST y (standing in for the image's
+    # physical top, per that convention) and checks it renders in the
+    # upper half of the axes, not the lower half.
+    ny, nx = 10, 6
+    x, y = np.meshgrid(np.arange(nx, dtype=float), np.arange(ny, dtype=float))
+    u = np.zeros((ny, nx))
+    v = np.zeros((ny, nx))
+    v[-1, :] = 100.0  # marker at the LARGEST y (last grid row)
+    valid = np.ones((ny, nx), dtype=bool)
+
+    fig = make_preview_figure("planar", x, y, u, v, valid, title="t",
+                               show_contour=True, show_vectors=False)
+    # Locate the V axes by its title rather than assuming a fixed index
+    # (colorbar axes are interleaved among the data axes).
+    v_axes = next(ax for ax in fig.axes if ax.get_title() == "V")
+    ylim = v_axes.get_ylim()
+    # NOT inverted: get_ylim()[0] (bottom of the displayed axes) must be
+    # the SMALLER data value, matching matplotlib's default orientation
+    # (larger y plotted higher) -- an inverted axes would report ylim
+    # with the larger value first.
+    assert ylim[0] < ylim[1], (
+        f"y-axis is inverted (ylim={ylim}) -- the marker at the largest "
+        "y (the image's physical top, per engines.cpu_engine's "
+        "convention) would render at the BOTTOM of the plot"
+    )
+
+
 def test_planar_defaults_produce_two_axes_with_contours_no_vectors():
     x, y, u, v, valid = _planar_field()
     fig = make_preview_figure("planar", x, y, u, v, valid, title="t")

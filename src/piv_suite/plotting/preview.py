@@ -65,7 +65,18 @@ def _plot_component(ax, x, y, data, valid, name, show_contour, show_vectors,
         color = "black" if show_contour else "red"
         ax.quiver(x[valid], y[valid], quiver_u[valid], quiver_v[valid], color=color, scale=quiver_scale)
     ax.set_title(_COMPONENT_LABELS.get(name, name))
-    ax.invert_yaxis()
+    # NOT ax.invert_yaxis() -- see plotting/planar.py's make_planar_figure
+    # for the full account (same root cause, same fix, all three plotting
+    # modules shared this bug). `y` already comes flipped out of
+    # engines.cpu_engine/gpu_engine (row 0, the image's physical top,
+    # gets the LARGEST y value) specifically so it renders correctly
+    # under matplotlib's default axis orientation; inverting again here
+    # rendered every preview upside down. Confirmed with a synthetic
+    # marker at the physical top of a real frame, which rendered at the
+    # BOTTOM of the plot before this fix -- and reported independently by
+    # a user comparing this preview against a real DaVis render of the
+    # same data (the flow pattern looked structurally right but
+    # vertically mirrored).
 
 
 def make_preview_figure(mode, x, y, u, v, valid, title, w=None, quiver_scale=1000,

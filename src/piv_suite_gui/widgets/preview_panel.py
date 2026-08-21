@@ -13,11 +13,11 @@ piv_suite.plotting.preview.
 """
 
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout,
+    QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QProgressBar, QPushButton, QSizePolicy,
     QVBoxLayout, QWidget,
 )
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QObject, QThread, Signal
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 import numpy as np
 
@@ -47,6 +47,38 @@ def _build_engine(backend, frame_shape, correlation, validation):
     return factory(frame_shape, settings)
 
 
+class _PreviewWorker(QObject):
+    """Runs one preview's COMPUTE off the GUI thread.
+
+    Correlating a single full-resolution pair is not fast: a real
+    3008x4096 pair through the default 4-pass schedule takes ~45s on a
+    24-core workstation. This used to run inline on the GUI thread (with
+    a comment asserting "a single pair is fast enough that a background
+    thread wasn't worth the complexity"), which meant the window stopped
+    answering Windows' paint/ping messages for that whole time and the OS
+    painted it "(Not Responding)" -- reported from real use, and
+    reproducible on any full-resolution dataset.
+
+    Only the computation moves here. Figure construction stays on the GUI
+    thread (matplotlib's Qt canvas must be built there), so this emits
+    plain arrays and the panel renders them in its own slot."""
+
+    finished = Signal(object)   # dict payload -> PreviewPanel._render
+    failed = Signal(str)
+
+    def __init__(self, compute_fn):
+        super().__init__()
+        self._compute_fn = compute_fn
+
+    def run(self):
+        try:
+            self.finished.emit(self._compute_fn())
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+            import traceback
+            traceback.print_exc()
+            self.failed.emit(str(exc))
+
+
 class PreviewPanel(QWidget):
     previewed = Signal(bool)  # emits True on a successful preview
 
@@ -54,6 +86,8 @@ class PreviewPanel(QWidget):
         super().__init__(parent)
         self.canvas = None
         self._range_rows = {}
+        self._preview_thread = None
+        self._preview_worker = None
         self._build_ui()
 
     def _build_ui(self):
@@ -223,16 +257,9 @@ class PreviewPanel(QWidget):
             return
         index = self.pair_combo.currentIndex()
 
-        # process_frames() runs synchronously on the GUI thread (a single
-        # pair is fast enough that a background thread wasn't worth the
-        # complexity) -- the progress bar wouldn't actually paint before
-        # that blocking call otherwise, since Qt only repaints on its own
-        # event loop. Disabling the button also blocks double-clicks
-        # from queuing up a second preview while one is still running.
-        self.preview_btn.setEnabled(False)
-        self.progress_bar.setVisible(True)
-        self.status_label.setText("Running preview...")
-        QApplication.processEvents()
+        # Settings are read HERE, on the GUI thread -- they touch widgets,
+        # which is not safe from a worker thread. Only the correlation
+        # itself is handed off (see _PreviewWorker for why it has to be).
         try:
             project = main_window.project_panel.get_project_settings()
             preprocess = main_window.project_panel.get_preprocess_settings()
@@ -240,21 +267,82 @@ class PreviewPanel(QWidget):
             validation = main_window.settings_panel.get_validation_settings()
             post = main_window.settings_panel.get_postprocess_settings()
             calibration = main_window.settings_panel.get_calibration_settings()
-
             if project.mode == "stereo":
-                self._preview_stereo(main_window, project, preprocess, correlation, validation, post, calibration, index)
+                stereo_settings = main_window.calibration_panel.get_settings()
+                def compute():
+                    return self._compute_stereo(project, preprocess, correlation, validation,
+                                                 post, calibration, stereo_settings, index)
             else:
-                self._preview_planar(project, preprocess, correlation, validation, post, calibration, index)
-            self.previewed.emit(True)
+                def compute():
+                    return self._compute_planar(project, preprocess, correlation, validation,
+                                                 post, calibration, index)
         except Exception as e:
             self.status_label.setText(f"Preview failed: {e}")
             self.previewed.emit(False)
-            raise
-        finally:
-            self.progress_bar.setVisible(False)
-            self.preview_btn.setEnabled(True)
+            return
 
-    def _preview_planar(self, project, preprocess, correlation, validation, post, calibration, index):
+        # Disabling the button also blocks double-clicks from queuing a
+        # second preview while one is still running.
+        self.preview_btn.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.status_label.setText("Running preview...")
+
+        self._preview_thread = QThread()
+        self._preview_worker = _PreviewWorker(compute)
+        self._preview_worker.moveToThread(self._preview_thread)
+        self._preview_thread.started.connect(self._preview_worker.run)
+        self._preview_worker.finished.connect(self._on_preview_finished)
+        self._preview_worker.failed.connect(self._on_preview_failed)
+        self._preview_thread.start()
+
+    def _teardown_preview_thread(self):
+        self.progress_bar.setVisible(False)
+        self.preview_btn.setEnabled(True)
+        thread = getattr(self, "_preview_thread", None)
+        if thread is not None:
+            thread.quit()
+            thread.wait()
+            self._preview_thread = None
+            self._preview_worker = None
+
+    def _on_preview_failed(self, message):
+        self._teardown_preview_thread()
+        self.status_label.setText(f"Preview failed: {message}")
+        self.previewed.emit(False)
+
+    def _on_preview_finished(self, result):
+        self._teardown_preview_thread()
+        try:
+            self._render(result)
+        except Exception as e:
+            self.status_label.setText(f"Preview failed while rendering: {e}")
+            self.previewed.emit(False)
+            raise
+        self.previewed.emit(True)
+
+    def _render(self, r):
+        """Build the figure and status line from a worker payload. Runs on
+        the GUI thread (matplotlib's Qt canvas requires it)."""
+        self.status_label.setText(
+            f"Pair '{r['pair_id']}': {r['elapsed']:.3f}s, {r['n_valid']}/{r['n_total']} valid "
+            f"(range/residual rejected {r['n_range']}, std-dev rejected {r['n_std']})"
+        )
+        common = dict(
+            show_contour=self.show_contour_check.isChecked(),
+            show_vectors=self.show_vectors_check.isChecked(),
+            cmap=self.cmap_combo.currentText(), ranges=self._get_ranges(),
+        )
+        if r["kind"] == "stereo":
+            fig = make_preview_figure(
+                "stereo", r["x"], r["y"], r["u"], r["v"], r["valid"], w=r["w"],
+                title=f"Stereo preview -- {r['pair_id']}", **common)
+        else:
+            fig = make_preview_figure(
+                "planar", r["x"], r["y"], r["u"], r["v"], r["valid"],
+                title=f"Preview -- {r['pair_id']}", **common)
+        self._set_canvas(fig)
+
+    def _compute_planar(self, project, preprocess, correlation, validation, post, calibration, index):
         pair_id, frame_a, frame_b = self._first_pair_planar(project, index)
         frame_a, frame_b = apply_preprocess_pair(frame_a, frame_b, preprocess)
         engine, x, y = _build_engine(project.backend, frame_a.shape, correlation, validation)
@@ -262,22 +350,12 @@ class PreviewPanel(QWidget):
         u, v, valid, elapsed, rejects = pipeline.process_frames(engine, frame_a, frame_b, post.for_pipeline())
         u, v = apply_calibration(u, v, calibration.pixel_pitch_mm, calibration.frame_dt_s)
 
-        n_valid, n_total = int(valid.sum()), int(valid.size)
-        self.status_label.setText(
-            f"Pair '{pair_id}': {elapsed:.3f}s, {n_valid}/{n_total} valid "
-            f"(range/residual rejected {rejects['range_residual']}, "
-            f"std-dev rejected {rejects['std_dev']})"
-        )
-        fig = make_preview_figure(
-            "planar", x, y, u, v, valid, title=f"Preview -- {pair_id}",
-            show_contour=self.show_contour_check.isChecked(),
-            show_vectors=self.show_vectors_check.isChecked(),
-            cmap=self.cmap_combo.currentText(), ranges=self._get_ranges(),
-        )
-        self._set_canvas(fig)
+        return dict(kind="planar", pair_id=pair_id, x=x, y=y, u=u, v=v, valid=valid,
+                    elapsed=elapsed, n_valid=int(valid.sum()), n_total=int(valid.size),
+                    n_range=rejects["range_residual"], n_std=rejects["std_dev"])
 
-    def _preview_stereo(self, main_window, project, preprocess, correlation, validation, post, calibration, index):
-        stereo_settings = main_window.calibration_panel.get_settings()
+    def _compute_stereo(self, project, preprocess, correlation, validation, post, calibration,
+                         stereo_settings, index):
         cam0 = CameraMapping(
             stereo_settings.cam0_mapping.x0, stereo_settings.cam0_mapping.x_span,
             stereo_settings.cam0_mapping.y0, stereo_settings.cam0_mapping.y_span,
@@ -313,16 +391,7 @@ class PreviewPanel(QWidget):
         V = np.where(valid, V, np.nan)
         W = np.where(valid, W, np.nan)
 
-        n_valid, n_total = int(valid.sum()), int(valid.size)
-        self.status_label.setText(
-            f"Pair '{pair_id}': {elapsed1 + elapsed2:.3f}s, {n_valid}/{n_total} valid "
-            f"(range/residual rejected {r1['range_residual'] + r2['range_residual']}, "
-            f"std-dev rejected {r1['std_dev'] + r2['std_dev']})"
-        )
-        fig = make_preview_figure(
-            "stereo", x, y, U, V, valid, w=W, title=f"Stereo preview -- {pair_id}",
-            show_contour=self.show_contour_check.isChecked(),
-            show_vectors=self.show_vectors_check.isChecked(),
-            cmap=self.cmap_combo.currentText(), ranges=self._get_ranges(),
-        )
-        self._set_canvas(fig)
+        return dict(kind="stereo", pair_id=pair_id, x=x, y=y, u=U, v=V, w=W, valid=valid,
+                    elapsed=elapsed1 + elapsed2, n_valid=int(valid.sum()), n_total=int(valid.size),
+                    n_range=r1["range_residual"] + r2["range_residual"],
+                    n_std=r1["std_dev"] + r2["std_dev"])
