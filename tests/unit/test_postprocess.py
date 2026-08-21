@@ -2,32 +2,100 @@ import numpy as np
 import pytest
 
 from piv_suite.processing.postprocess import (
-    _nan_median_filter, apply_calibration, global_outlier_mask, range_filter,
-    remove_small_groups, replace_invalid_vectors, smooth_vector_field,
+    apply_calibration, global_outlier_mask, normalized_median_residual,
+    range_filter, remove_small_groups, replace_invalid_vectors,
+    smooth_vector_field,
 )
 
 
-def test_nan_median_filter_fast_path_matches_slow_nan_aware_path():
-    # _nan_median_filter's fast path (compiled scipy.ndimage.median_filter,
-    # used when input is NaN-free) must produce IDENTICAL output to the
-    # slow NaN-aware generic_filter(nanmedian) path it replaces -- see
-    # postprocess.py's docstring for why NaN-free is now the common case.
-    from scipy.ndimage import generic_filter
+def _reference_uod(u, v, window_size=3, eps=0.1):
+    """Straightforward per-cell Westerweel & Scarano reference -- explicit
+    Python loops, no strides/chunking. Deliberately the slowest, most
+    obvious expression of the formula, so it can serve as ground truth
+    for the vectorized/chunked implementation under test."""
+    ny, nx = u.shape
+    pad = window_size // 2
+    out = np.full((ny, nx), np.nan)
+    for i in range(ny):
+        for j in range(nx):
+            nb_u, nb_v = [], []
+            for di in range(-pad, pad + 1):
+                for dj in range(-pad, pad + 1):
+                    if di == 0 and dj == 0:
+                        continue  # W&S excludes the vector being judged
+                    ii, jj = i + di, j + dj
+                    if 0 <= ii < ny and 0 <= jj < nx:
+                        nb_u.append(u[ii, jj])
+                        nb_v.append(v[ii, jj])
+            nb_u, nb_v = np.array(nb_u), np.array(nb_v)
+            if np.all(np.isnan(nb_u)):
+                continue
+            med_u, med_v = np.nanmedian(nb_u), np.nanmedian(nb_v)
+            mad_u = np.nanmedian(np.abs(nb_u - med_u))
+            mad_v = np.nanmedian(np.abs(nb_v - med_v))
+            r_u = abs(u[i, j] - med_u) / (mad_u + eps)
+            r_v = abs(v[i, j] - med_v) / (mad_v + eps)
+            out[i, j] = np.sqrt(r_u ** 2 + r_v ** 2)
+    return out
 
-    rng = np.random.default_rng(3)
-    for size in (3, 5):
-        a = rng.normal(size=(15, 17))
-        fast = _nan_median_filter(a, size)
-        slow = generic_filter(a, np.nanmedian, size=size, mode="nearest")
-        assert np.allclose(fast, slow)
+
+@pytest.mark.parametrize("window_size", [3, 5])
+def test_normalized_median_residual_matches_explicit_reference(window_size):
+    rng = np.random.default_rng(11)
+    u = rng.normal(size=(12, 14))
+    v = rng.normal(size=(12, 14))
+    got = normalized_median_residual(u, v, window_size=window_size)
+    want = _reference_uod(u, v, window_size=window_size)
+    both = np.isfinite(got) & np.isfinite(want)
+    assert both.sum() > 100
+    assert np.allclose(got[both], want[both])
 
 
-def test_nan_median_filter_falls_back_when_nan_present():
-    a = np.array([[1.0, 2.0, 3.0], [4.0, np.nan, 6.0], [7.0, 8.0, 9.0]])
-    from scipy.ndimage import generic_filter
-    expected = generic_filter(a, np.nanmedian, size=3, mode="nearest")
-    result = _nan_median_filter(a, 3)
-    assert np.allclose(result, expected, equal_nan=True)
+def test_normalized_median_residual_chunking_is_exact():
+    # Chunk boundaries must never change a result -- each cell's
+    # statistics depend only on its own neighbourhood.
+    rng = np.random.default_rng(12)
+    u, v = rng.normal(size=(40, 23)), rng.normal(size=(40, 23))
+    whole = normalized_median_residual(u, v, _max_bytes=10**9)
+    chunked = normalized_median_residual(u, v, _max_bytes=1)  # forces 1 row per chunk
+    assert np.array_equal(whole, chunked, equal_nan=True)
+
+
+def test_normalized_median_residual_excludes_self_from_own_neighbourhood():
+    # If the centre were included, a lone spike would drag the median it
+    # is judged against toward itself and score far lower.
+    u = np.ones((7, 7))
+    v = np.zeros((7, 7))
+    u[3, 3] = 50.0
+    r = normalized_median_residual(u, v)
+    assert r[3, 3] > 100  # judged against neighbours only -> enormous
+    assert np.nanmax(np.delete(r.ravel(), 3 * 7 + 3)) < r[3, 3]
+
+
+def test_normalized_median_residual_ignores_nan_neighbours():
+    rng = np.random.default_rng(13)
+    u, v = rng.normal(size=(9, 9)), rng.normal(size=(9, 9))
+    u_holed, v_holed = u.copy(), v.copy()
+    u_holed[2, 2] = np.nan
+    v_holed[2, 2] = np.nan
+    r = normalized_median_residual(u_holed, v_holed)
+    # the hole itself has no score, but its neighbours still do (they are
+    # not penalized for sitting next to a hole)
+    assert np.isnan(r[2, 2])
+    assert np.isfinite(r[2, 3]) and np.isfinite(r[3, 2])
+
+
+def test_normalized_median_residual_is_scale_free_apart_from_eps():
+    # The normalization is what lets ONE threshold work across regions of
+    # different local dynamics -- the property the old absolute-distance
+    # implementation lacked. With eps driven to ~0 the statistic is
+    # invariant to a global rescaling of the field.
+    rng = np.random.default_rng(14)
+    u, v = rng.normal(size=(10, 10)), rng.normal(size=(10, 10))
+    r1 = normalized_median_residual(u, v, eps=1e-12)
+    r2 = normalized_median_residual(u * 1000.0, v * 1000.0, eps=1e-12)
+    both = np.isfinite(r1) & np.isfinite(r2)
+    assert np.allclose(r1[both], r2[both], rtol=1e-6)
 
 
 def test_global_outlier_mask_none_disables():

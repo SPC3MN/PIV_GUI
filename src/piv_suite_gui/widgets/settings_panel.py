@@ -333,13 +333,23 @@ class SettingsPanel(QWidget):
         self.residual_enabled_check = QCheckBox("Universal outlier detection — remove if residual exceeds:")
         self.residual_enabled_check.setChecked(True)
         self.residual_enabled_check.setToolTip(
-            "Reject vectors whose distance from their local window median "
-            "displacement (px/frame) exceeds this value.")
+            "Reject vectors whose deviation from their local window "
+            "median, divided by that neighbourhood's median absolute "
+            "deviation, exceeds this value (Westerweel & Scarano "
+            "universal outlier detection). The threshold is a "
+            "DIMENSIONLESS RATIO, not a pixel distance -- LaVision "
+            "DaVis's equivalent 'removal factor' default is 2.")
         self.residual_enabled_check.toggled.connect(self._on_residual_filter_toggled)
         self.residual_max_spin = style_spin(QDoubleSpinBox())
         self.residual_max_spin.setRange(0.0, 1e6)
-        self.residual_max_spin.setValue(3.0)
-        self.residual_max_spin.setToolTip("Max allowed distance (px/frame) from the local window median before a vector is rejected.")
+        self.residual_max_spin.setValue(2.0)
+        self.residual_max_spin.setToolTip(
+            "Normalized-residual threshold (a ratio, not pixels): how many "
+            "times the local median absolute deviation a vector may differ "
+            "from its neighbours' median before being rejected. 2 matches "
+            "DaVis's own removal factor. NOTE: this used to be an absolute "
+            "px/frame distance -- a value carried over from an older "
+            "project file means something different now.")
         self.residual_max_spin.setEnabled(True)
         post_grid.addWidget(self.residual_enabled_check, 1, 0, 1, 2)
         post_grid.addWidget(self.residual_max_spin, 1, 2)
@@ -354,10 +364,16 @@ class SettingsPanel(QWidget):
         post_grid.addWidget(self.window_size_spin, 2, 2)
 
         self.replace_invalid_check = QCheckBox("Interpolate removed vectors")
+        self.replace_invalid_check.setChecked(True)
         self.replace_invalid_check.setToolTip(
             "Fill in gaps left by rejected vectors via interpolation from "
             "their neighbors, so the final field has no missing values. "
-            "Runs once, after all rejection filters above.")
+            "Runs once, after all rejection filters above. ON by default "
+            "to keep vector density comparable to DaVis's (~98% on the "
+            "reference dataset). A filled vector is INTERPOLATED, not "
+            "measured -- switch this off if your analysis needs strictly "
+            "measured vectors (the saved `valid` mask marks which is "
+            "which either way).")
         post_grid.addWidget(self.replace_invalid_check, 3, 0, 1, 3)
 
         self.smooth_check = QCheckBox("Gaussian smooth")

@@ -115,13 +115,28 @@ class ValidationSettings:
 
 @dataclass
 class RangeFilterSettings:
-    """Config surface for processing.postprocess.range_filter -- rejects a
-    vector whose distance from its local window median displacement
-    exceeds residual_max. This is the sole "remove if residual..."
-    detection method (no magnitude/component range option -- see
-    PostProcessSettings' docstring for why)."""
+    """Config surface for processing.postprocess.range_filter -- universal
+    outlier detection (Westerweel & Scarano): rejects a vector whose
+    deviation from its local neighbourhood median, NORMALIZED by that
+    neighbourhood's median absolute deviation, exceeds residual_max. This
+    is the sole "remove if residual..." detection method (no
+    magnitude/component range option -- see PostProcessSettings'
+    docstring for why).
+
+    residual_max IS A DIMENSIONLESS RATIO, NOT A PIXEL DISTANCE, and that
+    changed: range_filter used to threshold the raw px/frame deviation
+    while being documented and labelled as universal outlier detection.
+    See processing.postprocess.range_filter's docstring for the full
+    account and the real-data measurements (the absolute form missed
+    11.26% of genuine outliers on a real DaVis-compared pair). The
+    default below is 2.0 to match LaVision DaVis's own
+    medianUniversalOutlierRemovalFactor for the reference dataset, and it
+    is NOT interchangeable with the old default of 3.0: a residual_max
+    loaded from a `.pivproj` written before this change means "3 px from
+    the local median", not "3x the local MAD". Re-tune against your own
+    data rather than assuming the number carries over."""
     enabled: bool = True
-    residual_max: Optional[float] = 3.0
+    residual_max: Optional[float] = 2.0
     window_size: int = 3
 
     def to_kwargs(self):
@@ -147,7 +162,21 @@ class PostProcessSettings:
     method."""
     global_outlier_std: Optional[float] = 3.0   # std-dev spurious-vector filter; None disables
     range_filter: RangeFilterSettings = field(default_factory=RangeFilterSettings)
-    replace_invalid: bool = False
+    # ON by default, alongside range_filter's corrected (normalized) UOD
+    # statistic: that correction rejects substantially MORE vectors than
+    # the old absolute-distance form did (measured on a real pair: 12.0%
+    # vs 1.0%), because it now catches outliers the old form waved
+    # through. Left unfilled, those rejections would show up as holes in
+    # the field -- LaVision DaVis holds ~98% vector density on the same
+    # data while being essentially outlier-free, and it does that by
+    # substituting a replacement rather than leaving a gap. Interpolating
+    # here is the closest equivalent this pipeline has. Note what that
+    # means for downstream use: a filled vector is INTERPOLATED FROM ITS
+    # NEIGHBOURS, not measured, so it carries no independent information
+    # -- turn this off if an analysis needs strictly measured vectors
+    # only (the `valid` mask returned alongside u/v still marks exactly
+    # which vectors were filled, either way).
+    replace_invalid: bool = True
     smooth_field: bool = False
     smooth_sigma: float = 1.0
     # Drop connected groups of valid vectors smaller than this many vectors

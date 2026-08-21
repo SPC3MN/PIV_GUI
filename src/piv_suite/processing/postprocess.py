@@ -24,27 +24,69 @@ def global_outlier_mask(u, v, n_std):
     return (np.abs(u - u_mean) > n_std * u_std) | (np.abs(v - v_mean) > n_std * v_std)
 
 
-def range_filter(u, v, residual_max=None, window_size=3):
-    """Reject vectors whose residual from their LOCAL window median
-    exceeds a threshold ("remove if residual...").
+UOD_EPS_PX = 0.1
 
-    This is complementary to global_outlier_mask: that one rejects vectors
-    far from the FIELD-WIDE mean (a single global threshold); this one
-    rejects vectors far from their immediate spatial neighbors, catching
+
+def range_filter(u, v, residual_max=None, window_size=3, eps=UOD_EPS_PX):
+    """Universal outlier detection (Westerweel & Scarano 2005): reject a
+    vector whose deviation from its local neighbourhood median, NORMALIZED
+    by that neighbourhood's median absolute deviation, exceeds
+    residual_max.
+
+    Complementary to global_outlier_mask: that one rejects vectors far
+    from the FIELD-WIDE mean (a single global threshold); this one rejects
+    vectors far from their immediate spatial neighbours, catching
     spatially-localized spurious vectors -- a spike surrounded by
-    consistent neighbors -- that a global mean/std check can miss in a
+    consistent neighbours -- that a global mean/std check can miss in a
     large field.
+
+    THE NORMALIZATION IS THE WHOLE POINT, and this function did not always
+    have it. It previously thresholded the RAW deviation
+    `hypot(u - med_u, v - med_v) > residual_max`, i.e. an absolute
+    distance in px/frame, while being labelled "Universal outlier
+    detection" in the GUI, documented as universal outlier detection in
+    config.schema.PostProcessSettings, and configured against DaVis's
+    `medianUniversalOutlierRemovalFactor` (a dimensionless ratio) by
+    scripts/compare_davis_lavision.py. Those are different quantities and
+    the mismatch was measurable on real data: against a real DaVis export
+    of the same frame pair, the absolute form flagged 1.05% of vectors
+    while true UOD at the same threshold flagged 12.04% -- it MISSED
+    11.26% of genuine outliers and rejected 0.27% of good vectors. The
+    reason is that an absolute threshold cannot be right everywhere at
+    once in a field with varying local dynamics: in a calm region (small
+    MAD) a 1.5 px spike is a blatant outlier that an absolute 2.0 px
+    threshold waves through, while in a high-shear region (large MAD) a
+    perfectly legitimate 2.5 px difference from neighbours gets cut. The
+    normalized statistic is scale-free precisely so one threshold can
+    apply across the whole field.
+
+    THRESHOLD SEMANTICS CHANGED WITH THAT FIX. residual_max is now a
+    dimensionless ratio (DaVis's own removal factor is 2.0, which is this
+    schema's new default), NOT a pixel distance. A residual_max carried
+    over from an older `.pivproj` file means something different than it
+    used to -- 3.0 formerly meant "3 px from the local median", now it
+    means "3x the local MAD". Re-tune it against your own data rather
+    than assuming the old number transfers.
+
+    `eps` is an absolute floor added to the MAD, in PIXELS (the
+    conventional W&S value is 0.1 px, representing expected measurement
+    noise). It stops a locally-uniform neighbourhood, whose MAD is
+    near zero, from turning a negligible deviation into an enormous
+    ratio. Because eps is absolute, u/v must be in px/frame here --
+    which they are: pipeline.process_frames runs this filter BEFORE
+    apply_calibration converts to physical units.
 
     Parameters
     ----------
     u, v : ndarray, same shape, a regular (ny, nx) grid (not applicable to
-        flat/tiled output).
-    residual_max : float or None -- if set, rejects vectors whose distance
-        from the local window median (magnitude of (u - median_u,
-        v - median_v)) exceeds this value. None disables the filter
-        (returns an all-False mask).
-    window_size : odd int, the local median filter's window size (in
-        vectors, not pixels).
+        flat/tiled output), in px/frame.
+    residual_max : float or None -- normalized-residual threshold above
+        which a vector is rejected. None disables the filter (returns an
+        all-False mask).
+    window_size : odd int, the local neighbourhood's size (in vectors, not
+        pixels). The vector being tested is EXCLUDED from its own
+        neighbourhood statistics (per W&S) so a strong outlier cannot drag
+        the median it is being judged against toward itself.
 
     Returns a bool array (same shape as u), True = rejected.
     """
@@ -55,28 +97,81 @@ def range_filter(u, v, residual_max=None, window_size=3):
             "range_filter requires u, v to be a regular 2-D (ny, nx) "
             "grid -- not applicable to flat/tiled output"
         )
-    med_u = _nan_median_filter(u, window_size)
-    med_v = _nan_median_filter(v, window_size)
-    residual = np.hypot(u - med_u, v - med_v)
+    residual = normalized_median_residual(u, v, window_size=window_size, eps=eps)
     return residual > residual_max
 
 
-def _nan_median_filter(a, size):
-    """Local median filter, NaN-aware only when needed. In the current
-    architecture u/v reaching range_filter are always NaN-free (the
-    engine fills residual NaN before returning -- see cpu_engine.py's
-    module docstring), so the compiled scipy.ndimage.median_filter (not
-    NaN-aware, but exact and orders of magnitude faster than a per-pixel
-    Python callback -- measured ~6.7s vs well under 1s on a ~185k-cell
-    finest-pass grid) is used whenever there's nothing for it to trip on.
-    Falls back to the slower NaN-aware generic_filter(nanmedian) path if
-    NaN is actually present, so this stays correct even if a future
-    caller doesn't guarantee NaN-free input."""
-    if not np.isnan(a).any():
-        from scipy.ndimage import median_filter
-        return median_filter(a, size=size, mode="nearest")
-    from scipy.ndimage import generic_filter
-    return generic_filter(a, np.nanmedian, size=size, mode="nearest")
+def normalized_median_residual(u, v, window_size=3, eps=UOD_EPS_PX, _max_bytes=256 * 1024**2):
+    """The Westerweel & Scarano universal-outlier-detection statistic per
+    vector: sqrt(r_u^2 + r_v^2), where r = |value - neighbourhood median| /
+    (neighbourhood MAD + eps), with the vector itself excluded from its own
+    neighbourhood. Exposed separately from range_filter so the same
+    quantity can be reported/plotted (see
+    scripts/compare_velocity_fields.py) without duplicating the formula.
+
+    Neighbourhoods are built with a NaN-padded sliding-window view rather
+    than scipy.ndimage.median_filter, because the MAD term needs, for each
+    cell, the median of |neighbour - THAT CELL's median| -- each neighbour
+    measured against the centre cell's median, not against its own. A
+    plain median_filter over a precomputed |a - median| array would
+    silently compute the latter. NaN neighbours (already-rejected or
+    absent vectors) drop out of both medians instead of counting as
+    zeros, so a vector beside a hole is not penalized for the hole.
+
+    Processed in row chunks bounded by _max_bytes: the window array is
+    (n_cells, window_size**2) floats, which at the maximum window size the
+    GUI offers (21 -> 441 per cell) would be ~650MB on a full finest-pass
+    grid if built in one piece. Chunking keeps peak memory flat regardless
+    of grid size and window size, at no numerical cost -- each cell's
+    statistics depend only on its own neighbourhood, so chunk boundaries
+    cannot change any result.
+    """
+    from numpy.lib.stride_tricks import sliding_window_view
+    import warnings
+
+    k = int(window_size)
+    if k % 2 == 0:
+        raise ValueError(f"window_size must be odd, got {window_size}")
+    pad = k // 2
+    centre = k * k // 2
+
+    u = np.asarray(u, dtype=np.float64)
+    v = np.asarray(v, dtype=np.float64)
+    ny, nx = u.shape
+
+    bytes_per_row = nx * k * k * 8
+    rows_per_chunk = max(1, int(_max_bytes // max(1, bytes_per_row)))
+
+    u_pad = np.pad(u, pad, mode="constant", constant_values=np.nan)
+    v_pad = np.pad(v, pad, mode="constant", constant_values=np.nan)
+    out = np.empty((ny, nx), dtype=np.float64)
+
+    with warnings.catch_warnings():
+        # A cell whose entire neighbourhood is NaN legitimately has no
+        # median -- it comes out NaN (never > threshold, so never
+        # rejected on no evidence). Same warning the equivalent
+        # generic_filter(nanmedian) path already emits.
+        warnings.filterwarnings("ignore", message="All-NaN slice encountered")
+        warnings.filterwarnings("ignore", message="Mean of empty slice")
+
+        for start in range(0, ny, rows_per_chunk):
+            end = min(start + rows_per_chunk, ny)
+            wu = sliding_window_view(u_pad[start:end + 2 * pad], (k, k)).reshape(end - start, nx, k * k).copy()
+            wv = sliding_window_view(v_pad[start:end + 2 * pad], (k, k)).reshape(end - start, nx, k * k).copy()
+            wu[..., centre] = np.nan   # exclude each vector from judging itself
+            wv[..., centre] = np.nan
+
+            med_u = np.nanmedian(wu, axis=-1)
+            med_v = np.nanmedian(wv, axis=-1)
+            mad_u = np.nanmedian(np.abs(wu - med_u[..., None]), axis=-1)
+            mad_v = np.nanmedian(np.abs(wv - med_v[..., None]), axis=-1)
+
+            with np.errstate(invalid="ignore", divide="ignore"):
+                r_u = np.abs(u[start:end] - med_u) / (mad_u + eps)
+                r_v = np.abs(v[start:end] - med_v) / (mad_v + eps)
+                out[start:end] = np.sqrt(r_u ** 2 + r_v ** 2)
+
+    return out
 
 
 def remove_small_groups(valid_mask, min_group_size):
