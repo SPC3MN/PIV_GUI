@@ -10,3 +10,4 @@ stereo_piv_output*/
 .pytest_cache/
 installer/Output/
 installer/assets/
+piv_comparison_output/
