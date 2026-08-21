@@ -140,6 +140,17 @@ class CalibrationPanel(QWidget):
         cam_box = QGroupBox("CAMERA CALIBRATION")
         cam_layout = QVBoxLayout(cam_box)
         cam_layout.setContentsMargins(4, 4, 4, 4)
+
+        load_from_set_btn = QPushButton("Load stereo calibration from .set...")
+        load_from_set_btn.setEnabled(False)
+        load_from_set_btn.setToolTip(
+            "Not implemented yet -- no real stereo/dewarp DaVis dataset "
+            "has been available to reverse-engineer the format. Enter "
+            "values manually below."
+        )
+        load_from_set_btn.clicked.connect(self._load_stereo_from_set)
+        cam_layout.addWidget(load_from_set_btn)
+
         cam_tabs = QTabWidget()
         self.cam0_form = _CameraMappingForm("cam0")
         self.cam1_form = _CameraMappingForm("cam1")
@@ -194,6 +205,13 @@ class CalibrationPanel(QWidget):
             angle_grid.addWidget(w, i, 1)
         layout.addWidget(angle_box)
         layout.addStretch(1)
+
+    def _load_stereo_from_set(self):
+        from piv_suite.io.davis_set import read_stereo_calibration_from_set
+        try:
+            read_stereo_calibration_from_set("")
+        except NotImplementedError as e:
+            QMessageBox.information(self, "Not implemented", str(e))
 
     @staticmethod
     def _angle_spin(default):

@@ -10,6 +10,7 @@ Layout notes:
   stereo-only suffix fields depending on the Mode selection.
 """
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QFileDialog, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QRadioButton, QSizePolicy,
@@ -49,6 +50,13 @@ def _apply_glob_extension(marker, glob_text):
 
 
 class ProjectPanel(QWidget):
+    # Emitted whenever input_path_edit's value is finalized (Browse... or
+    # manual editingFinished) or the multiset sub-dataset index changes --
+    # main_window uses this to re-trigger .set calibration auto-extraction.
+    # Fires regardless of mode_set/mode_loose; main_window decides whether
+    # the new path is worth reacting to.
+    input_path_changed = Signal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._gpu_available = is_gpu_available()
@@ -94,6 +102,8 @@ class ProjectPanel(QWidget):
         path_grid.addWidget(QLabel("Path:"), 0, 0)
         path_grid.addWidget(self.input_path_edit, 0, 1)
         path_grid.addWidget(browse_btn, 0, 2)
+        self.input_path_edit.editingFinished.connect(
+            lambda: self.input_path_changed.emit(self.input_path_edit.text()))
 
         # .set-mode-only: which sub-dataset inside a multi-set .set file to
         # read -- without this control it's silently always sub-dataset 0.
@@ -105,6 +115,10 @@ class ProjectPanel(QWidget):
             "0 is the first. Only applies to .set input.")
         path_grid.addWidget(self.multiset_index_label, 1, 0)
         path_grid.addWidget(self.multiset_index_spin, 1, 1)
+        # a different sub-dataset is effectively a different recording --
+        # re-emit so calibration auto-extraction re-runs for it too.
+        self.multiset_index_spin.valueChanged.connect(
+            lambda _: self.input_path_changed.emit(self.input_path_edit.text()))
         input_layout.addLayout(path_grid)
 
         # loose-mode-only fields -- hidden entirely in .set mode
@@ -289,6 +303,7 @@ class ProjectPanel(QWidget):
             path = QFileDialog.getExistingDirectory(self, "Select a folder of labeled image pairs")
         if path:
             self.input_path_edit.setText(path)
+            self.input_path_changed.emit(path)  # setText() alone doesn't fire editingFinished
 
     def _browse_output(self):
         path = QFileDialog.getExistingDirectory(self, "Select output directory")

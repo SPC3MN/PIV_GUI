@@ -483,6 +483,21 @@ class SettingsPanel(QWidget):
             frame_dt_s=self.frame_dt_spin.value() if self.frame_dt_check.isChecked() else None,
         )
 
+    def set_calibration_settings(self, settings: CalibrationSettings):
+        """Push auto-extracted calibration into the form -- called by
+        main_window after a .set path is (re)selected and
+        davis_set.read_calibration_from_set runs. A field the .set
+        couldn't supply is cleared/unchecked (not left at a stale prior
+        value): "couldn't extract" is authoritative for the newly
+        selected project, same as a field it did supply overwriting
+        whatever was there before."""
+        self.pixel_pitch_check.setChecked(settings.pixel_pitch_mm is not None)
+        if settings.pixel_pitch_mm is not None:
+            self.pixel_pitch_spin.setValue(settings.pixel_pitch_mm)
+        self.frame_dt_check.setChecked(settings.frame_dt_s is not None)
+        if settings.frame_dt_s is not None:
+            self.frame_dt_spin.setValue(settings.frame_dt_s)
+
     def get_performance_settings(self) -> PerformanceSettings:
         return PerformanceSettings(
             n_workers=self.n_workers_spin.value() if self.n_workers_check.isChecked() else None,

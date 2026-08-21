@@ -582,6 +582,146 @@ def test_spin_boxes_have_no_counter_buttons(qtbot):
             assert spin.buttonSymbols() == QAbstractSpinBox.NoButtons
 
 
+def test_input_path_changed_emits_on_editing_finished(qtbot):
+    from piv_suite_gui.widgets.project_panel import ProjectPanel
+
+    panel = ProjectPanel()
+    qtbot.addWidget(panel)
+    received = []
+    panel.input_path_changed.connect(received.append)
+    panel.input_path_edit.setText("some/path.set")
+    panel.input_path_edit.editingFinished.emit()
+    assert received == ["some/path.set"]
+
+
+def test_input_path_changed_emits_on_browse(qtbot, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+    from piv_suite_gui.widgets.project_panel import ProjectPanel
+
+    panel = ProjectPanel()
+    qtbot.addWidget(panel)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: ("chosen.set", ""))
+    received = []
+    panel.input_path_changed.connect(received.append)
+    panel._browse_input()
+    assert panel.input_path_edit.text() == "chosen.set"
+    assert received == ["chosen.set"]
+
+
+def test_main_window_extracts_calibration_when_set_path_selected(qtbot, monkeypatch, tmp_path):
+    import piv_suite_gui.main_window as mw
+    from piv_suite.config.schema import CalibrationSettings
+
+    set_path = tmp_path / "recording.set"
+    set_path.write_text("")
+    monkeypatch.setattr(mw, "read_calibration_from_set",
+                         lambda path, idx: CalibrationSettings(pixel_pitch_mm=0.05, frame_dt_s=0.0007))
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    assert window.project_panel.mode_set.isChecked()
+
+    window.project_panel.input_path_edit.setText(str(set_path))
+    window.project_panel.input_path_edit.editingFinished.emit()
+
+    sp = window.settings_panel
+    assert sp.pixel_pitch_check.isChecked()
+    assert sp.pixel_pitch_spin.value() == pytest.approx(0.05)
+    assert sp.frame_dt_check.isChecked()
+    assert sp.frame_dt_spin.value() == pytest.approx(0.0007)
+
+
+def test_calibration_extraction_overwrites_prior_manual_edit(qtbot, monkeypatch, tmp_path):
+    import piv_suite_gui.main_window as mw
+    from piv_suite.config.schema import CalibrationSettings
+
+    set_path = tmp_path / "recording.set"
+    set_path.write_text("")
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    sp = window.settings_panel
+    sp.pixel_pitch_check.setChecked(True)
+    sp.pixel_pitch_spin.setValue(1.0)  # stale manual value
+
+    monkeypatch.setattr(mw, "read_calibration_from_set",
+                         lambda path, idx: CalibrationSettings(pixel_pitch_mm=0.0514883, frame_dt_s=0.0007))
+    window.project_panel.input_path_edit.setText(str(set_path))
+    window.project_panel.input_path_edit.editingFinished.emit()
+
+    # pixel_pitch_spin only has 6-decimal precision (style_spin decimals=6)
+    assert sp.pixel_pitch_spin.value() == pytest.approx(0.0514883, abs=1e-6)
+
+
+def test_calibration_extraction_clears_field_that_could_not_be_extracted(qtbot, monkeypatch, tmp_path):
+    import piv_suite_gui.main_window as mw
+    from piv_suite.config.schema import CalibrationSettings
+
+    set_path = tmp_path / "recording.set"
+    set_path.write_text("")
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    sp = window.settings_panel
+    sp.frame_dt_check.setChecked(True)
+    sp.frame_dt_spin.setValue(0.002)  # stale manual value
+
+    monkeypatch.setattr(mw, "read_calibration_from_set",
+                         lambda path, idx: CalibrationSettings(pixel_pitch_mm=0.05, frame_dt_s=None))
+    window.project_panel.input_path_edit.setText(str(set_path))
+    window.project_panel.input_path_edit.editingFinished.emit()
+
+    assert sp.pixel_pitch_check.isChecked()
+    assert not sp.frame_dt_check.isChecked()  # couldn't extract -> authoritative, cleared
+
+
+def test_calibration_extraction_failure_shows_status_and_does_not_crash(qtbot, monkeypatch, tmp_path):
+    import piv_suite_gui.main_window as mw
+
+    set_path = tmp_path / "recording.set"
+    set_path.write_text("")
+    monkeypatch.setattr(mw, "read_calibration_from_set",
+                         lambda path, idx: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.project_panel.input_path_edit.setText(str(set_path))
+    window.project_panel.input_path_edit.editingFinished.emit()  # must not raise
+
+    assert window.statusBar().currentMessage()
+
+
+def test_calibration_extraction_skipped_in_loose_mode(qtbot, monkeypatch, tmp_path):
+    import piv_suite_gui.main_window as mw
+
+    called = []
+    monkeypatch.setattr(mw, "read_calibration_from_set", lambda path, idx: called.append(True))
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.project_panel.mode_loose.setChecked(True)
+    window.project_panel.input_path_edit.setText(str(tmp_path))
+    window.project_panel.input_path_edit.editingFinished.emit()
+
+    assert called == []
+
+
+def test_settings_panel_set_calibration_clears_unsupplied_fields(qtbot):
+    from piv_suite.config.schema import CalibrationSettings
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    sp = window.settings_panel
+    sp.frame_dt_check.setChecked(True)
+    sp.frame_dt_spin.setValue(0.002)
+
+    sp.set_calibration_settings(CalibrationSettings(pixel_pitch_mm=0.02, frame_dt_s=None))
+
+    assert sp.pixel_pitch_check.isChecked()
+    assert sp.pixel_pitch_spin.value() == pytest.approx(0.02)
+    assert not sp.frame_dt_check.isChecked()
+
+
 def test_calibration_labels_use_math_notation(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)
