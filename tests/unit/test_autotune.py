@@ -4,7 +4,16 @@ module docstring for why everything else is an unconditional patch).
 Not testing exact numbers (those are machine-dependent by design) --
 testing the INVARIANTS: sensible types/ranges, monotonic response to
 RAM/worker-count, and that an explicit override always wins.
+
+The whole point of this module (see its own docstring) is that the
+installer's frozen app has to run correctly on whatever machine it's
+installed on -- not just the machine it happened to be built on. That's
+tested explicitly below (test_low_spec_target_machines_get_safe_values)
+by simulating a range of target-machine hardware profiles against the
+real recommend_* functions together, not just each in isolation.
 """
+
+import pytest
 
 import piv_suite.perf.autotune as autotune
 
@@ -69,3 +78,47 @@ def test_recommended_workers_auto_does_not_exceed_cpu_count(monkeypatch):
 def test_recommended_workers_auto_is_at_least_one_even_on_low_ram(monkeypatch):
     monkeypatch.setattr(autotune, "available_ram_bytes", lambda: 0)
     assert autotune.recommended_workers() >= 1
+
+
+GB = 1024**3
+
+
+@pytest.mark.parametrize("name,cpu_count,ram_bytes,max_expected_workers", [
+    ("tiny VM (1 core, 2GB)", 1, 2 * GB, 1),
+    ("old dual-core laptop (2 cores, 4GB)", 2, 4 * GB, 2),
+    ("budget laptop (4 cores, 8GB)", 4, 8 * GB, 4),
+    ("mid workstation (8 cores, 16GB)", 8, 16 * GB, 8),
+    ("this dev box (48 threads, 186GB)", 48, 186 * GB, 48),
+])
+def test_low_spec_target_machines_get_safe_values(monkeypatch, name, cpu_count, ram_bytes, max_expected_workers):
+    """The installer's frozen app runs on whatever hardware a user
+    installs it on, not the machine that built it -- this simulates a
+    range of target-machine profiles (including much smaller than this
+    dev box) against recommended_workers() and
+    recommended_pipeline_chunk_size() TOGETHER (the pipeline chunk size
+    depends on the chosen worker count), and checks every profile lands
+    on safe, sane values: never zero/negative workers, never a worker
+    count exceeding the machine's own core count, and a pipeline chunk
+    size that's neither degenerately tiny nor unboundedly huge."""
+    monkeypatch.setattr("os.cpu_count", lambda: cpu_count)
+    monkeypatch.setattr(autotune, "available_ram_bytes", lambda: ram_bytes)
+
+    workers = autotune.recommended_workers()
+    assert 1 <= workers <= max_expected_workers
+
+    for window_shape in ((32, 32), (64, 64)):
+        pipeline_chunk = autotune.recommended_pipeline_chunk_size(window_shape)
+        assert autotune._MIN_PIPELINE_CHUNK_WINDOWS <= pipeline_chunk <= autotune._MAX_PIPELINE_CHUNK_WINDOWS
+        fft_chunk = autotune.recommended_chunk_size(window_shape)
+        assert autotune._MIN_CHUNK_WINDOWS <= fft_chunk <= autotune._MAX_CHUNK_WINDOWS
+
+
+def test_very_low_ram_forces_serial_fallback(monkeypatch):
+    # Below this module's _MIN_FREE_RAM_RESERVE_BYTES reserve, workers
+    # must clamp to 1 (the CLI/GUI's n_workers<=1 check then routes
+    # through the original, unmodified serial loop instead of a worker
+    # pool -- see processing.parallel_planar's module docstring) rather
+    # than dividing by zero or going negative.
+    monkeypatch.setattr("os.cpu_count", lambda: 16)
+    monkeypatch.setattr(autotune, "available_ram_bytes", lambda: 1 * GB)  # well under the 4GB reserve
+    assert autotune.recommended_workers() == 1

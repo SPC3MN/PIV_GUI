@@ -54,8 +54,11 @@ file itself:**
   NVIDIA CUDA Toolkit on the machine at runtime (confirmed: the
   installed `cupy_backends` directory contains no DLLs of its own). Pre-
   baking all 3 CUDA variants into the installer file would still balloon
-  it for no real benefit, since the wheel must exactly match
-  `cp313-win_amd64` regardless, which pip resolves reliably -- a
+  it for no real benefit, since the wheel must exactly match the frozen
+  app's own `cpXY-win_amd64` ABI regardless (see
+  `prepare_gpu_assets.ps1`'s `$pythonVersion`, which must track whatever
+  Python builds the frozen app -- `cp311` as of v0.2.9, was `cp313` on
+  an earlier dev machine's venv), which pip resolves reliably -- a
   hand-rolled PyPI-API parser in Inno Setup's Pascal Script would not
   (this is also why a bundled Python runs the actual fetch, rather than
   Inno Setup's own scripting).

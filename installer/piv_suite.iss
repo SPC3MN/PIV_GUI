@@ -21,7 +21,8 @@
 ; CUDA runtime inside it -- it locates an EXISTING NVIDIA CUDA Toolkit on
 ; the machine via the cuda-pathfinder package) but pre-baking all three
 ; CUDA variants into the installer file would still balloon it, and the
-; wheel must match cp313-win_amd64 exactly, which pip resolves reliably
+; wheel must match the frozen app's own cpXY-win_amd64 ABI exactly (see
+; prepare_gpu_assets.ps1's $pythonVersion), which pip resolves reliably
 ; and a hand-rolled Pascal-Script PyPI-API parser would not. This means
 ; GPU setup needs internet access at INSTALL time (not just build time),
 ; and the target machine still needs the actual NVIDIA CUDA Toolkit
