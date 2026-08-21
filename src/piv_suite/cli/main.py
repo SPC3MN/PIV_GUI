@@ -405,4 +405,12 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    # No-op unless frozen (see piv_suite_gui/app.py's own call for why
+    # this matters for a frozen build) -- harmless here for the normal
+    # `pip install` console-script case, but this module's own
+    # process_pairs_planar can also hit Tier 3's ProcessPoolExecutor, so
+    # the same defensive call belongs at every multiprocessing-capable
+    # entry point.
+    import multiprocessing
+    multiprocessing.freeze_support()
     main()
