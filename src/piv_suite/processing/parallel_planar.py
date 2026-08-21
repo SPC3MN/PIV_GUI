@@ -33,8 +33,9 @@ boundary/pickling differences worth worrying about.
 """
 
 import os
+import threading
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, wait
 
 import numpy as np
 
@@ -183,38 +184,81 @@ def run_planar_batch_parallel(pair_source, cfg, output_dir, n_workers,
     matching the serial loop's own per-pair try/except (one bad pair
     doesn't abort the whole batch).
 
-    on_pair_started(pair_id) fires at submission time; on_pair_finished
-    (pair_id, result_dict) fires as each future completes (not
+    Submission is a SLIDING WINDOW of at most n_workers pairs in flight at
+    once -- NOT "submit the entire batch immediately". Confirmed by real
+    GUI testing on a 100+-pair batch: submitting everything up front made
+    every pair's on_pair_started fire in one immediate burst (since
+    ProcessPoolExecutor.submit() only QUEUES a task, it doesn't wait for a
+    worker), so the job table showed "100+ pairs running" when at most
+    n_workers could actually be executing -- misleading, and the flood of
+    near-simultaneous Qt model-insert signals (each one a real
+    beginInsertRows/endInsertRows layout change) was enough to make the
+    GUI thread show "Not Responding". It also meant every pair's full-
+    resolution frame_a/frame_b sat in memory at once rather than only the
+    ones actually about to run. Keeping the window sized to n_workers
+    fixes both: on_pair_started fires only for pairs that actually have a
+    worker slot, and memory stays bounded to roughly n_workers pairs'
+    worth of image data regardless of batch size.
+
+    on_pair_started(pair_id) fires at submission time (now meaning
+    "about to run", not "queued somewhere behind 99 others"); on_pair_
+    finished(pair_id, result_dict) fires as each future completes (not
     necessarily in submission order) -- callers that need strict order
     for anything beyond the final summary_rows list should not assume
     on_pair_finished fires in pair order.
+
+    Implementation note: throttling is a threading.Semaphore (acquired
+    before each submission, released by that future's own done-callback)
+    plus ONE final wait() call on the complete future list -- NOT a loop
+    that calls wait(..., FIRST_COMPLETED) repeatedly and resubmits after
+    each. An earlier version did that and was measured to be dramatically
+    slower across a test suite making many sequential
+    run_planar_batch_parallel() calls in one process (121s vs. 16s for
+    the same 5 tests) -- concurrent.futures.wait() sets up fresh OS-level
+    wait registrations on every call, and calling it once per completion
+    (rather than once per batch) compounds that cost. add_done_callback()
+    registers a future's callback exactly once, at submission time, so
+    this way pays that setup cost only once per pair, not once per
+    wait() round-trip.
     """
     results = {}
+    results_lock = threading.Lock()
+    semaphore = threading.Semaphore(n_workers)
+    all_futures = []
     cancelled = False
 
+    def _on_done(future, idx, pair_id):
+        semaphore.release()
+        try:
+            result = future.result()
+        except Exception as exc:
+            if on_pair_error is not None:
+                on_pair_error(pair_id, exc)
+            return
+        with results_lock:
+            results[idx] = result
+        if on_pair_finished is not None:
+            on_pair_finished(pair_id, result)
+
     with ProcessPoolExecutor(max_workers=n_workers, initializer=_worker_init) as executor:
-        futures = {}
         for idx, (pair_id, frame_a, frame_b) in enumerate(pair_source):
+            semaphore.acquire()  # blocks here until a slot frees up -- this IS the throttle
             if cancel_check is not None and cancel_check():
                 cancelled = True
+                semaphore.release()
                 break
             if on_pair_started is not None:
                 on_pair_started(pair_id)
             future = executor.submit(
                 process_one_pair_planar_worker, idx, pair_id, frame_a, frame_b, cfg, output_dir)
-            futures[future] = (idx, pair_id)
+            all_futures.append(future)
+            future.add_done_callback(lambda f, idx=idx, pair_id=pair_id: _on_done(f, idx, pair_id))
 
-        for future in as_completed(futures):
-            idx, pair_id = futures[future]
-            try:
-                result = future.result()
-            except Exception as exc:
-                if on_pair_error is not None:
-                    on_pair_error(pair_id, exc)
-                continue
-            results[idx] = result
-            if on_pair_finished is not None:
-                on_pair_finished(pair_id, result)
+        # Every future's own callback already ran (or will run) as it
+        # completes -- this just blocks the calling thread until they all
+        # have, before returning. A single wait() call on the whole
+        # (already-submitted) list, not a per-completion loop.
+        wait(all_futures)
 
     ordered = [results[idx] for idx in sorted(results)]
     return ordered, cancelled

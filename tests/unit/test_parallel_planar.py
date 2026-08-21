@@ -131,6 +131,53 @@ def test_run_planar_batch_parallel_output_independent_of_worker_count(tmp_path):
             assert np.array_equal(ref["valid"], other["valid"])
 
 
+def test_run_planar_batch_parallel_never_exceeds_n_workers_in_flight(tmp_path):
+    # Regression test for a real bug found via manual GUI testing on a
+    # 100+-pair batch: on_pair_started used to fire for EVERY pair as
+    # soon as it was submitted to the executor, not as it actually got a
+    # worker -- ProcessPoolExecutor.submit() only queues a task, it
+    # doesn't wait for a free slot, so the job table showed 100+ pairs
+    # "running" at once (when at most n_workers ever could be), and the
+    # resulting flood of near-simultaneous Qt model-insert signals was
+    # enough to freeze the GUI thread ("Not Responding"). This directly
+    # measures the actual in-flight count (started but not yet finished)
+    # via on_pair_started/on_pair_finished, using a lock since they fire
+    # from different threads -- not just inferring it from timing.
+    import threading
+
+    cfg = _fast_cfg()
+    n_workers = 3
+    n_pairs = 12  # well more than n_workers, so the bug (if reintroduced) would be obvious
+    rng = np.random.RandomState(6)
+    pairs = [(f"pair{i}", *_make_pair(rng, shift=(i % 3 + 1, i % 2 + 1))) for i in range(n_pairs)]
+
+    lock = threading.Lock()
+    concurrent_count = [0]
+    max_concurrent = [0]
+
+    def on_started(pair_id):
+        with lock:
+            concurrent_count[0] += 1
+            max_concurrent[0] = max(max_concurrent[0], concurrent_count[0])
+
+    def on_finished(pair_id, result):
+        with lock:
+            concurrent_count[0] -= 1
+
+    out_dir = tmp_path / "bounded"
+    out_dir.mkdir()
+    results, cancelled = run_planar_batch_parallel(
+        ((pid, a.copy(), b.copy()) for pid, a, b in pairs), cfg, str(out_dir), n_workers=n_workers,
+        on_pair_started=on_started, on_pair_finished=on_finished)
+
+    assert not cancelled
+    assert len(results) == n_pairs
+    assert max_concurrent[0] <= n_workers, (
+        f"{max_concurrent[0]} pairs were in flight at once with n_workers={n_workers} -- "
+        "submission is not being throttled to the worker count"
+    )
+
+
 def test_run_planar_batch_parallel_stops_submitting_after_cancel(tmp_path):
     cfg = _fast_cfg()
     rng = np.random.RandomState(4)
