@@ -1,6 +1,10 @@
 import numpy as np
+import pytest
 
-from piv_suite.calibration.camera_mapping import CameraMapping
+from piv_suite.calibration.camera_mapping import (
+    CameraMapping, build_camera_mapping, interpolate_camera_mapping,
+)
+from piv_suite.config.schema import CameraMappingSettings
 
 
 def _zero_coefs():
@@ -95,3 +99,53 @@ def test_dewarp_image_matches_analytic_result_with_real_distortion():
 
     actual = cm.dewarp_image(raw_image, world_shape, order=1)
     np.testing.assert_allclose(actual, expected, atol=1e-3)
+
+
+def _plane(z_mm, x0=0.0, x_span=100.0, y0=0.0, y_span=100.0, coef_scale=1.0):
+    coefs_a = {k: coef_scale * v for k, v in
+               zip(("1", "s", "s2", "s3", "t", "t2", "t3", "st", "s2t", "t2s"),
+                   (1.0, 2.0, 0.5, 0.1, -0.5, 0.2, 0.05, 0.3, 0.02, -0.02))}
+    coefs_b = {k: v * 0.5 for k, v in coefs_a.items()}
+    return CameraMappingSettings(x0=x0, x_span=x_span, y0=y0, y_span=y_span,
+                                  dx_coefs=coefs_a, dy_coefs=coefs_b, z_mm=z_mm)
+
+
+def test_build_camera_mapping_single_plane_matches_direct_construction():
+    plane = _plane(z_mm=None, x0=10.0, x_span=50.0, y0=5.0, y_span=40.0)
+    cm = build_camera_mapping(plane)
+    assert cm.x0 == plane.x0 and cm.x_span == plane.x_span
+    assert cm.dx_coefs == plane.dx_coefs
+
+
+def test_build_camera_mapping_two_planes_requires_sheet_z_mm():
+    p1, p2 = _plane(z_mm=1.0), _plane(z_mm=-2.0, coef_scale=2.0)
+    with pytest.raises(ValueError):
+        build_camera_mapping(p1, p2, sheet_z_mm=None)
+
+
+def test_interpolate_camera_mapping_reduces_exactly_at_each_planes_own_z():
+    p1, p2 = _plane(z_mm=1.0), _plane(z_mm=-2.0, coef_scale=2.0)
+    cm_at_p1 = interpolate_camera_mapping(p1, p2, sheet_z_mm=1.0)
+    assert cm_at_p1.x0 == p1.x0
+    assert cm_at_p1.dx_coefs == p1.dx_coefs
+    cm_at_p2 = interpolate_camera_mapping(p1, p2, sheet_z_mm=-2.0)
+    assert cm_at_p2.dx_coefs == p2.dx_coefs
+
+
+def test_interpolate_camera_mapping_midpoint_is_arithmetic_mean():
+    p1, p2 = _plane(z_mm=0.0), _plane(z_mm=10.0, coef_scale=3.0)
+    cm_mid = interpolate_camera_mapping(p1, p2, sheet_z_mm=5.0)
+    for k in p1.dx_coefs:
+        assert cm_mid.dx_coefs[k] == pytest.approx((p1.dx_coefs[k] + p2.dx_coefs[k]) / 2)
+        assert cm_mid.dy_coefs[k] == pytest.approx((p1.dy_coefs[k] + p2.dy_coefs[k]) / 2)
+
+
+def test_build_camera_mapping_interpolated_dewarp_is_sane():
+    p1, p2 = _plane(z_mm=1.0, x0=50.0, x_span=100.0, y0=50.0, y_span=100.0), \
+        _plane(z_mm=-2.0, x0=50.0, x_span=100.0, y0=50.0, y_span=100.0, coef_scale=1.5)
+    cm = build_camera_mapping(p1, p2, sheet_z_mm=-0.5)
+    raw = np.random.RandomState(0).rand(150, 150).astype(np.float32)
+    dewarped = cm.dewarp_image(raw, (100, 100), order=1)
+    assert dewarped.shape == (100, 100)
+    assert not np.isnan(dewarped).any()
+    assert np.any(dewarped > 0)

@@ -3,12 +3,25 @@
 The core design choice this file locks in: rather than parsing DaVis's own
 Calibration.xml CoefficientsA/CoefficientsB (confirmed, empirically, not to
 match CameraMapping's convention under any forward/backward/factor-of-2
-variant tried), extraction fits CameraMapping's OWN, UNCHANGED polynomial
+variant tried -- a flexible affine-transform search DID get an
+excellent-looking fit, but failed a hold-out test against the SAME
+camera's own second Z-plane, proving it was overfitting, not a real
+decode), extraction fits CameraMapping's OWN, UNCHANGED polynomial
 directly from MarkPositionTable.xml's real raw-pixel<->world-mm ground
 truth. The synthetic tests below construct marks the same way -- by
 generating raw positions FROM known CameraMapping parameters -- so the fit
 can be checked against exact, known-correct coefficients without needing
 real DaVis data.
+
+A second real-data finding, caught during manual GUI testing (not by any
+test below at the time): DaVis writes BYTE-IDENTICAL MarkPositionTable.xml
+files into both camera1/ and camera2/ folders for every calibration
+snapshot in the real project this was built against -- confirmed with a
+plain diff, and even the file's own internal <Camera CameraNumber="1">
+tag stays "1" inside camera2's copy. Fitting from it would silently
+produce IDENTICAL dewarp coefficients for both cameras. Extraction now
+detects this (_files_are_identical) and refuses rather than doing that --
+see test_read_stereo_calibration_from_real_swirl_set_refuses_duplicate_marks.
 """
 
 import os
@@ -20,9 +33,9 @@ import pytest
 
 from piv_suite.calibration.camera_mapping import COEF_KEYS, CameraMapping
 from piv_suite.io.davis_set import (
-    _derive_world_shape, _find_calibration_project_root, _fit_camera_mapping_planes,
-    _read_pixel_per_mm, _read_set_time, _select_calibration_snapshot,
-    read_stereo_calibration_from_set,
+    _derive_world_shape, _files_are_identical, _find_calibration_project_root,
+    _fit_camera_mapping_planes, _read_pixel_per_mm, _read_set_time,
+    _select_calibration_snapshot, read_stereo_calibration_from_set,
 )
 
 REAL_PROJECT_ROOT = r"J:\Final_Stereo"
@@ -155,6 +168,28 @@ def test_read_pixel_per_mm_missing_camera_raises(tmp_path):
         _read_pixel_per_mm(str(xml_path), "2")
 
 
+# ---- duplicate-marks detection ----
+
+def test_files_are_identical_true_for_same_content(tmp_path):
+    a, b = tmp_path / "a.xml", tmp_path / "b.xml"
+    a.write_text("same content")
+    b.write_text("same content")
+    assert _files_are_identical(str(a), str(b))
+
+
+def test_files_are_identical_false_for_different_content(tmp_path):
+    a, b = tmp_path / "a.xml", tmp_path / "b.xml"
+    a.write_text("camera one's marks")
+    b.write_text("camera two's marks")
+    assert not _files_are_identical(str(a), str(b))
+
+
+def test_files_are_identical_false_when_one_missing(tmp_path):
+    a, b = tmp_path / "a.xml", tmp_path / "missing.xml"
+    a.write_text("content")
+    assert not _files_are_identical(str(a), str(b))
+
+
 # ---- mark-fitting: synthetic ground truth (portable, no real data needed) ----
 
 def _write_mark_table(path, marks_by_plane):
@@ -253,47 +288,84 @@ def test_derive_world_shape_uses_largest_extent():
     assert shape == (60, 100)
 
 
+# ---- full pipeline, synthetic (real data can no longer exercise the happy
+# path -- every real calibration snapshot found has duplicated marks) ----
+
+def _build_synthetic_project(tmp_path, cam0_coefs, cam1_coefs, recording_time=None):
+    """A minimal but structurally complete DaVis project: Properties/
+    Calibration/Calibration.xml (both cameras' PixelPerMmFactor) plus
+    camera1/camera2 MarkPositionTable.xml with GENUINELY DIFFERENT marks
+    -- exercises the real read_stereo_calibration_from_set happy path
+    end-to-end without depending on real (duplicated-marks) DaVis data."""
+    px_per_mm = 18.0
+    root = tmp_path / "Project"
+    cal_dir = root / "Properties" / "Calibration"
+    cal_dir.mkdir(parents=True)
+    (cal_dir / "Calibration.xml").write_text(f"""<?xml version="1.0"?>
+<Calibration Version="2">
+ <CoordinateSystemsForEachView>
+  <CoordinateSystem FieldOfView="SideBySideStereoVolume">
+   <CoordinateMapper CameraIdentifier="1" Type="Polynomial3rdOrder" GroupId="1">
+    <PolynomialParameters><CommonParameters><PixelPerMmFactor Value="{px_per_mm}" /></CommonParameters></PolynomialParameters>
+   </CoordinateMapper>
+   <CoordinateMapper CameraIdentifier="2" Type="Polynomial3rdOrder" GroupId="1">
+    <PolynomialParameters><CommonParameters><PixelPerMmFactor Value="{px_per_mm}" /></CommonParameters></PolynomialParameters>
+   </CoordinateMapper>
+  </CoordinateSystem>
+ </CoordinateSystemsForEachView>
+</Calibration>
+""")
+    rows0 = _synthetic_plane_marks(100.0, 200.0, 50.0, 150.0, *cam0_coefs, px_per_mm)
+    rows1 = _synthetic_plane_marks(100.0, 200.0, 50.0, 150.0, *cam1_coefs, px_per_mm)
+    (cal_dir / "camera1").mkdir()
+    (cal_dir / "camera2").mkdir()
+    _write_mark_table(str(cal_dir / "camera1" / "MarkPositionTable.xml"), {"0": (1.0, rows0)})
+    _write_mark_table(str(cal_dir / "camera2" / "MarkPositionTable.xml"), {"0": (1.0, rows1)})
+
+    recording = root / "Swirl" / "recording.set"
+    recording.parent.mkdir(parents=True)
+    text = "#GROUP Sets\n"
+    if recording_time:
+        text += f'SetTime = "{recording_time}";\n'
+    recording.write_text(text)
+    return str(recording)
+
+
+def test_read_stereo_calibration_from_set_synthetic_happy_path(tmp_path):
+    zero = {k: 0.0 for k in COEF_KEYS}
+    cam0_coefs = ({k: 1.0 for k in COEF_KEYS}, zero)
+    cam1_coefs = ({k: 2.0 for k in COEF_KEYS}, zero)  # genuinely different from cam0
+    recording = _build_synthetic_project(tmp_path, cam0_coefs, cam1_coefs)
+
+    result = read_stereo_calibration_from_set(recording)
+
+    assert result.world_scale_px_per_mm == pytest.approx(18.0)
+    assert result.cam0_mapping.dx_coefs != result.cam1_mapping.dx_coefs
+    assert result.cam0_mapping_plane2 is None  # only one plane in this fixture
+    assert result.world_shape[0] > 0 and result.world_shape[1] > 0
+
+
 # ---- real-data-gated: the actual project this feature was built against ----
 
 @pytest.mark.skipif(not os.path.exists(REAL_SWIRL_SET), reason="real stereo project not available on this machine")
-def test_read_stereo_calibration_from_real_swirl_set():
-    # The flagship real recording -- its applicable calibration snapshot
-    # (Calibration_260715_171237, confirmed by direct inspection) is a
-    # PinholeOpenCV-type calibration, but extraction succeeds anyway since
-    # it fits from MarkPositionTable.xml ground truth, not DaVis's own
-    # Type-specific coefficient representation.
-    result = read_stereo_calibration_from_set(REAL_SWIRL_SET)
-
-    assert result.world_scale_px_per_mm == pytest.approx(17.920975188143096)
-    assert "Calibration_260715_171237" in result.cam0_mapping.name
-    assert result.cam0_mapping.z_mm == pytest.approx(1.0, abs=1e-6)
-    assert result.cam0_mapping_plane2 is not None
-    assert result.cam0_mapping_plane2.z_mm == pytest.approx(-2.0, abs=1e-6)
-    assert result.cam1_mapping.z_mm == pytest.approx(1.0, abs=1e-6)
-    assert result.cam1_mapping_plane2 is not None
-    assert result.world_shape[0] > 0 and result.world_shape[1] > 0
-    assert result.sheet_z_mm is None
+def test_read_stereo_calibration_from_real_swirl_set_refuses_duplicate_marks():
+    # The flagship real recording's applicable calibration snapshot
+    # (Calibration_260715_171237, confirmed by direct inspection) has
+    # byte-identical camera1/camera2 MarkPositionTable.xml files -- a real
+    # DaVis data characteristic confirmed across every snapshot in this
+    # project (DaVis writes the same mark-detection data into both camera
+    # folders). Fitting from it would silently produce IDENTICAL dewarp
+    # coefficients for both cameras, which was caught during manual GUI
+    # testing -- extraction must refuse rather than do that.
+    with pytest.raises(ValueError, match="identical"):
+        read_stereo_calibration_from_set(REAL_SWIRL_SET)
 
 
 @pytest.mark.skipif(not os.path.exists(REAL_SWIRL_SET), reason="real stereo project not available on this machine")
-def test_real_stereo_calibration_dewarp_round_trips_and_interpolates():
-    from piv_suite.calibration.camera_mapping import build_camera_mapping
-
-    result = read_stereo_calibration_from_set(REAL_SWIRL_SET)
-
-    # boundary sheet_z_mm must reduce exactly to that plane's own mapping
-    cam0_at_plane1 = build_camera_mapping(result.cam0_mapping, result.cam0_mapping_plane2, sheet_z_mm=1.0)
-    assert cam0_at_plane1.x0 == result.cam0_mapping.x0
-    assert cam0_at_plane1.dx_coefs["s"] == result.cam0_mapping.dx_coefs["s"]
-
-    # interpolated dewarp of a real-shaped raw frame produces a sane,
-    # non-degenerate (partially nonzero, not all-zero/all-NaN) result
-    cam0_mid = build_camera_mapping(result.cam0_mapping, result.cam0_mapping_plane2, sheet_z_mm=-0.5)
-    raw = np.random.rand(3008, 4096).astype(np.float32)
-    dewarped = cam0_mid.dewarp_image(raw, result.world_shape, order=1)
-    assert dewarped.shape == result.world_shape
-    assert not np.isnan(dewarped).any()
-    assert 0.05 < np.mean(dewarped > 0) < 0.95
+def test_files_are_identical_matches_real_duplicated_mark_tables():
+    snapshot = r"J:\Final_Stereo\Properties\Calibration History\Calibration_260715_171237"
+    assert _files_are_identical(
+        snapshot + r"\camera1\MarkPositionTable.xml", snapshot + r"\camera2\MarkPositionTable.xml")
 
 
 @pytest.mark.skipif(not os.path.exists(REAL_PROJECT_ROOT), reason="real stereo project not available on this machine")

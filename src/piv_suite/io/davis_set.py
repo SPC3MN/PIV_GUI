@@ -415,6 +415,23 @@ def _fit_camera_mapping_planes(mark_table_path, px_per_mm, name_prefix=""):
     return planes
 
 
+def _files_are_identical(path_a, path_b):
+    """Byte-for-byte comparison, used to catch DaVis writing the SAME
+    MarkPositionTable.xml into both camera1/ and camera2/ folders --
+    confirmed to happen on real project data (every calibration snapshot
+    in one real project had this), which would otherwise silently make
+    read_stereo_calibration_from_set fit IDENTICAL coefficients for both
+    cameras. Cheap and exact -- no need to parse first."""
+    try:
+        with open(path_a, "rb") as f:
+            a = f.read()
+        with open(path_b, "rb") as f:
+            b = f.read()
+    except OSError:
+        return False
+    return a == b
+
+
 def _derive_world_shape(cam0_planes, cam1_planes):
     """world_shape must be ONE fixed grid shared by every dewarp call
     regardless of which (possibly interpolated) Z is in use -- size it to
@@ -476,6 +493,17 @@ def read_stereo_calibration_from_set(set_path, multiset_index=0):
             f"Calibration snapshot '{snapshot_label}' ({snapshot_dir}) has no "
             f"camera1/camera2 MarkPositionTable.xml -- can't fit a dewarp mapping "
             f"from it. Enter calibration manually on the Calibration panel.")
+    if _files_are_identical(cam0_marks, cam1_marks):
+        raise ValueError(
+            f"Calibration snapshot '{snapshot_label}' ({snapshot_dir}) has "
+            f"byte-identical camera1/camera2 MarkPositionTable.xml files -- "
+            f"confirmed on real DaVis project data that this happens (DaVis "
+            f"writing the same mark-detection data into both camera folders "
+            f"rather than each camera's own). Fitting from it would silently "
+            f"produce IDENTICAL dewarp coefficients for both cameras instead "
+            f"of each camera's own real distortion, which is worse than no "
+            f"calibration at all. Enter calibration manually on the "
+            f"Calibration panel.")
 
     cam0_planes = _fit_camera_mapping_planes(cam0_marks, px_per_mm_0, name_prefix=f"cam0 (DaVis {snapshot_label})")
     cam1_planes = _fit_camera_mapping_planes(cam1_marks, px_per_mm_1, name_prefix=f"cam1 (DaVis {snapshot_label})")
