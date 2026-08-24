@@ -16,7 +16,7 @@ import pytest
 
 from piv_suite.io.davis_set import (
     _find_timing_xml, _frame_dt_from_timing_xml, _read_pixel_pitch_mm,
-    read_calibration_from_set, read_stereo_calibration_from_set,
+    read_calibration_from_set,
 )
 
 REAL_STREAMSET = (
@@ -193,10 +193,3 @@ def test_read_calibration_from_bundled_sample_partial_extraction():
     result = read_calibration_from_set(REAL_LAVISION_SAMPLE_SET)
     assert result.pixel_pitch_mm == pytest.approx(0.0514883, rel=1e-4)
     assert result.frame_dt_s is None
-
-
-# ---- stereo stub ----
-
-def test_read_stereo_calibration_from_set_raises_not_implemented():
-    with pytest.raises(NotImplementedError):
-        read_stereo_calibration_from_set("dummy.set")

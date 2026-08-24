@@ -17,7 +17,9 @@ from PySide6.QtWidgets import (
 )
 
 from piv_suite import __version__
-from piv_suite.io.davis_set import read_calibration_from_set, resolve_set_paths
+from piv_suite.io.davis_set import (
+    read_calibration_from_set, read_stereo_calibration_from_set, resolve_set_paths,
+)
 from piv_suite_gui.widgets.calibration_panel import CalibrationPanel
 from piv_suite_gui.widgets.header_bar import HeaderBar
 from piv_suite_gui.widgets.preview_panel import PreviewPanel
@@ -83,10 +85,24 @@ class MainWindow(QMainWindow):
         self.project_panel.cpu_radio.toggled.connect(
             lambda checked: self.settings_panel.set_backend("cpu" if checked else "gpu"))
 
-        # .set input: auto-extract pixel pitch / frame Δt straight off the
-        # DaVis project the moment it's selected, instead of requiring
-        # manual entry (see _on_input_path_changed).
+        # .set input: auto-extract pixel pitch / frame Δt (and, in stereo
+        # mode, the dewarp calibration) straight off the DaVis project the
+        # moment it's selected, instead of requiring manual entry (see
+        # _on_input_path_changed).
         self.project_panel.input_path_changed.connect(self._on_input_path_changed)
+        # Switching Mode to Stereo AFTER a path is already selected (the
+        # common real order -- planar is the default mode, so a user
+        # typically picks the .set first) must ALSO re-trigger extraction:
+        # input_path_changed only fires on a path change, so without this,
+        # stereo calibration silently never gets extracted at all if the
+        # path was chosen before switching to Stereo mode.
+        self.project_panel.planar_radio.toggled.connect(
+            lambda: self._on_input_path_changed(self.project_panel.input_path_edit.text()))
+        # the Calibration panel's own "Load stereo calibration from .set..."
+        # button re-runs the same extraction against whatever path is
+        # currently selected -- it has no reference to project_panel itself.
+        self.calibration_panel.load_from_set_requested.connect(
+            lambda: self._on_input_path_changed(self.project_panel.input_path_edit.text()))
 
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
@@ -125,11 +141,11 @@ class MainWindow(QMainWindow):
 
     def _on_input_path_changed(self, path):
         """.set-mode-only. Re-extracts and overwrites the Calibration
-        panel's fields every time the input path (or multiset sub-index)
-        changes -- always trust the newly selected project's real
-        calibration over any prior manual edit. Never crashes the GUI:
-        any failure (missing file, bad path, corrupt .set, lvpyio error)
-        is caught and surfaced via the status bar."""
+        fields every time the input path (or multiset sub-index) changes
+        -- always trust the newly selected project's real calibration
+        over any prior manual edit. In stereo mode, also re-extracts the
+        dewarp calibration. Never crashes the GUI: any failure is caught
+        and surfaced via the status bar, one message per extractor."""
         if not self.project_panel.mode_set.isChecked():
             return
         if not path or not os.path.exists(path):
@@ -137,24 +153,35 @@ class MainWindow(QMainWindow):
         set_paths, _ = resolve_set_paths(path)
         if not set_paths:
             return
+        idx = self.project_panel.multiset_index_spin.value()
+        base = os.path.basename(path)
+        messages = []
+
         try:
-            calibration = read_calibration_from_set(
-                set_paths[0], self.project_panel.multiset_index_spin.value())
+            calibration = read_calibration_from_set(set_paths[0], idx)
         except Exception as e:
-            self.statusBar().showMessage(
-                f"Couldn't auto-extract calibration from '{os.path.basename(path)}': {e}", 8000)
-            return
-        self.settings_panel.set_calibration_settings(calibration)
-        parts = []
-        if calibration.pixel_pitch_mm is not None:
-            parts.append(f"pixel pitch {calibration.pixel_pitch_mm:.6g} mm/px")
-        if calibration.frame_dt_s is not None:
-            parts.append(f"Δt {calibration.frame_dt_s:.6g} s")
-        if parts:
-            self.statusBar().showMessage("Auto-extracted from DaVis .set: " + ", ".join(parts), 8000)
+            messages.append(f"Couldn't auto-extract calibration from '{base}': {e}")
         else:
-            self.statusBar().showMessage(
-                "Couldn't auto-extract calibration from this .set -- fill in manually.", 8000)
+            self.settings_panel.set_calibration_settings(calibration)
+            parts = []
+            if calibration.pixel_pitch_mm is not None:
+                parts.append(f"pixel pitch {calibration.pixel_pitch_mm:.6g} mm/px")
+            if calibration.frame_dt_s is not None:
+                parts.append(f"Δt {calibration.frame_dt_s:.6g} s")
+            messages.append("Auto-extracted from DaVis .set: " + ", ".join(parts) if parts
+                             else "Couldn't auto-extract calibration from this .set -- fill in manually.")
+
+        if self.project_panel.is_stereo:
+            try:
+                stereo = read_stereo_calibration_from_set(set_paths[0], idx)
+            except Exception as e:
+                messages.append(f"Couldn't auto-extract stereo calibration: {e}")
+            else:
+                self.calibration_panel.set_settings(stereo)
+                messages.append(f"Stereo calibration auto-extracted from DaVis .set "
+                                 f"({stereo.cam0_mapping.name}).")
+
+        self.statusBar().showMessage("  |  ".join(messages), 8000)
 
     def _build_status_bar(self):
         bar = self.statusBar()

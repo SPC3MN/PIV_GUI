@@ -21,7 +21,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 import numpy as np
 
-from piv_suite.calibration.camera_mapping import CameraMapping
+from piv_suite.calibration.camera_mapping import build_camera_mapping
 from piv_suite.config.legacy import to_cpu_settings, to_gpu_settings
 from piv_suite.engines.registry import get_engine_factory
 from piv_suite.io.davis_set import get_pair_from_set, get_stereo_from_set, list_pair_ids_from_set, resolve_set_paths
@@ -356,18 +356,10 @@ class PreviewPanel(QWidget):
 
     def _compute_stereo(self, project, preprocess, correlation, validation, post, calibration,
                          stereo_settings, index):
-        cam0 = CameraMapping(
-            stereo_settings.cam0_mapping.x0, stereo_settings.cam0_mapping.x_span,
-            stereo_settings.cam0_mapping.y0, stereo_settings.cam0_mapping.y_span,
-            stereo_settings.cam0_mapping.dx_coefs, stereo_settings.cam0_mapping.dy_coefs,
-            stereo_settings.cam0_mapping.name,
-        )
-        cam1 = CameraMapping(
-            stereo_settings.cam1_mapping.x0, stereo_settings.cam1_mapping.x_span,
-            stereo_settings.cam1_mapping.y0, stereo_settings.cam1_mapping.y_span,
-            stereo_settings.cam1_mapping.dx_coefs, stereo_settings.cam1_mapping.dy_coefs,
-            stereo_settings.cam1_mapping.name,
-        )
+        cam0 = build_camera_mapping(stereo_settings.cam0_mapping, stereo_settings.cam0_mapping_plane2,
+                                    stereo_settings.sheet_z_mm)
+        cam1 = build_camera_mapping(stereo_settings.cam1_mapping, stereo_settings.cam1_mapping_plane2,
+                                    stereo_settings.sheet_z_mm)
 
         pair_id, fa0, fb0, fa1, fb1 = self._first_pair_stereo(project, index)
         fa0, fb0 = apply_preprocess_pair(fa0, fb0, preprocess)

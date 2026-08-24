@@ -237,12 +237,24 @@ class CameraMappingSettings:
         k: 0.0 for k in ("1", "s", "s2", "s3", "t", "t2", "t3", "st", "s2t", "t2s")
     })
     name: str = ""
+    # Which real-world Z (mm) this mapping was fit at -- None for a manually-
+    # entered single-plane mapping. Set (alongside StereoSettings' matching
+    # `cam*_mapping_plane2`) when a camera has two DaVis-calibrated Z-planes;
+    # see calibration.camera_mapping.interpolate_camera_mapping.
+    z_mm: Optional[float] = None
 
 
 @dataclass
 class StereoSettings:
     cam0_mapping: CameraMappingSettings = field(default_factory=CameraMappingSettings)
     cam1_mapping: CameraMappingSettings = field(default_factory=CameraMappingSettings)
+    # Second calibrated Z-plane per camera -- None (the default) means a
+    # single-plane mapping, unchanged from before this field existed.
+    # Populated together with sheet_z_mm when DaVis auto-extraction finds two
+    # calibrated planes; calibration.camera_mapping.build_camera_mapping
+    # interpolates cam*_mapping/cam*_mapping_plane2 at sheet_z_mm.
+    cam0_mapping_plane2: Optional[CameraMappingSettings] = None
+    cam1_mapping_plane2: Optional[CameraMappingSettings] = None
     world_shape: Tuple[int, int] = (0, 0)
     world_scale_px_per_mm: float = 1.0
     dewarp_order: int = 1
@@ -250,6 +262,10 @@ class StereoSettings:
     alpha2_deg: float = 0.0
     beta1_deg: float = 0.0
     beta2_deg: float = 0.0
+    # Real Z (mm) of the laser sheet for the CURRENT recording -- an
+    # acquisition-time quantity, never derivable from a calibration file.
+    # Only meaningful/required when a camera has a second calibrated plane.
+    sheet_z_mm: Optional[float] = None
 
 
 @dataclass

@@ -65,7 +65,7 @@ def from_dict(d: dict) -> ProjectConfig:
     calibration = CalibrationSettings(**_filtered_kwargs(CalibrationSettings, d.get("calibration", {})))
 
     stereo_d = dict(d.get("stereo", {}))
-    for key in ("cam0_mapping", "cam1_mapping"):
+    for key in ("cam0_mapping", "cam1_mapping", "cam0_mapping_plane2", "cam1_mapping_plane2"):
         if key in stereo_d and stereo_d[key] is not None:
             stereo_d[key] = CameraMappingSettings(**_filtered_kwargs(CameraMappingSettings, stereo_d[key]))
     if "world_shape" in stereo_d and stereo_d["world_shape"] is not None:

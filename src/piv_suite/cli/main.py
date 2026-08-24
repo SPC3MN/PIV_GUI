@@ -18,7 +18,7 @@ import time
 
 import numpy as np
 
-from ..calibration.camera_mapping import CameraMapping
+from ..calibration.camera_mapping import build_camera_mapping
 from ..config.io import ProjectConfig, load_project, save_project
 from ..config.legacy import to_cpu_settings, to_gpu_settings
 from ..engines.registry import get_engine_factory
@@ -350,18 +350,10 @@ def main(argv=None):
 
     stereo = cfg.project.mode == "stereo"
     if stereo:
-        cfg.stereo._cam0 = CameraMapping(
-            cfg.stereo.cam0_mapping.x0, cfg.stereo.cam0_mapping.x_span,
-            cfg.stereo.cam0_mapping.y0, cfg.stereo.cam0_mapping.y_span,
-            cfg.stereo.cam0_mapping.dx_coefs, cfg.stereo.cam0_mapping.dy_coefs,
-            cfg.stereo.cam0_mapping.name,
-        )
-        cfg.stereo._cam1 = CameraMapping(
-            cfg.stereo.cam1_mapping.x0, cfg.stereo.cam1_mapping.x_span,
-            cfg.stereo.cam1_mapping.y0, cfg.stereo.cam1_mapping.y_span,
-            cfg.stereo.cam1_mapping.dx_coefs, cfg.stereo.cam1_mapping.dy_coefs,
-            cfg.stereo.cam1_mapping.name,
-        )
+        cfg.stereo._cam0 = build_camera_mapping(cfg.stereo.cam0_mapping, cfg.stereo.cam0_mapping_plane2,
+                                                 cfg.stereo.sheet_z_mm)
+        cfg.stereo._cam1 = build_camera_mapping(cfg.stereo.cam1_mapping, cfg.stereo.cam1_mapping_plane2,
+                                                 cfg.stereo.sheet_z_mm)
         angles = (np.deg2rad(cfg.stereo.alpha1_deg), np.deg2rad(cfg.stereo.alpha2_deg),
                   np.deg2rad(cfg.stereo.beta1_deg), np.deg2rad(cfg.stereo.beta2_deg))
 

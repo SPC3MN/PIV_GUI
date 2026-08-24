@@ -329,6 +329,12 @@ def test_calibration_panel_default_settings(qtbot):
     assert settings.world_scale_px_per_mm == 1.0
     assert set(settings.cam0_mapping.dx_coefs.keys()) == {
         "1", "s", "s2", "s3", "t", "t2", "t3", "st", "s2t", "t2s"}
+    # DaVis auto-load fields all off by default -- unchanged single-plane
+    # manual-entry behavior for anyone who never loads from a .set
+    assert settings.cam0_mapping.z_mm is None
+    assert settings.cam0_mapping_plane2 is None
+    assert settings.cam1_mapping_plane2 is None
+    assert settings.sheet_z_mm is None
 
 
 def test_main_window_is_resizable(qtbot):
@@ -722,11 +728,169 @@ def test_settings_panel_set_calibration_clears_unsupplied_fields(qtbot):
     assert not sp.frame_dt_check.isChecked()
 
 
+def _fake_stereo_settings(z0=1.0, z1=-2.0):
+    from piv_suite.config.schema import CameraMappingSettings, StereoSettings
+
+    def mapping(z_mm, name):
+        return CameraMappingSettings(x0=1.0, x_span=2.0, y0=3.0, y_span=4.0, name=name, z_mm=z_mm)
+
+    return StereoSettings(
+        cam0_mapping=mapping(z0, "cam0 plane1"), cam0_mapping_plane2=mapping(z1, "cam0 plane2"),
+        cam1_mapping=mapping(z0, "cam1 plane1"), cam1_mapping_plane2=mapping(z1, "cam1 plane2"),
+        world_shape=(500, 600), world_scale_px_per_mm=17.9,
+    )
+
+
+def test_camera_mapping_form_set_settings_shows_davis_autoload_summary(qtbot):
+    from piv_suite_gui.widgets.calibration_panel import _CameraMappingForm
+
+    form = _CameraMappingForm("cam0")
+    qtbot.addWidget(form)
+    form.show()
+    assert not form.davis_plane_label.isVisible()
+
+    stereo = _fake_stereo_settings()
+    form.set_settings(stereo.cam0_mapping, stereo.cam0_mapping_plane2)
+    assert form.davis_plane_label.isVisible()
+    assert form.plane2 is stereo.cam0_mapping_plane2
+    assert form.get_settings().z_mm == pytest.approx(1.0)
+
+    form._clear_davis_autoload()
+    assert not form.davis_plane_label.isVisible()
+    assert form.plane2 is None
+    assert form.get_settings().z_mm is None
+    # clearing doesn't wipe the numbers -- x0 etc. stay as they were
+    assert form.x0_spin.value() == pytest.approx(1.0)
+
+
+def test_calibration_panel_set_settings_round_trips_two_planes_and_world_grid(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    cp = window.calibration_panel
+    stereo = _fake_stereo_settings()
+
+    cp.set_settings(stereo)
+    result = cp.get_settings()
+    assert result.cam0_mapping.z_mm == pytest.approx(1.0)
+    assert result.cam0_mapping_plane2.z_mm == pytest.approx(-2.0)
+    assert result.cam1_mapping_plane2.z_mm == pytest.approx(-2.0)
+    assert result.world_shape == (500, 600)
+    assert result.world_scale_px_per_mm == pytest.approx(17.9)
+    assert result.sheet_z_mm is None  # not auto-filled by set_settings alone
+
+    cp.sheet_z_mm_check.setChecked(True)
+    cp.sheet_z_mm_spin.setValue(-0.5)
+    assert cp.get_settings().sheet_z_mm == pytest.approx(-0.5)
+
+
+def test_stereo_calibration_extraction_triggers_on_switching_to_stereo_after_path_selected(
+        qtbot, monkeypatch, tmp_path):
+    # Regression test: real usage picks the input path FIRST (planar is the
+    # default mode) and only switches to Stereo mode afterward.
+    # input_path_changed only fires on a path change, so without also
+    # reacting to the mode switch, stereo calibration silently never got
+    # extracted at all -- reported from real GUI use ("Load from..." looked
+    # greyed out and the dewarp polynomial never auto-populated).
+    import piv_suite_gui.main_window as mw
+
+    set_path = tmp_path / "recording.set"
+    set_path.write_text("")
+    stereo_settings = _fake_stereo_settings()
+    monkeypatch.setattr(mw, "read_stereo_calibration_from_set", lambda path, idx: stereo_settings)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    assert window.project_panel.planar_radio.isChecked()  # default mode
+    window.project_panel.input_path_edit.setText(str(set_path))
+    window.project_panel.input_path_edit.editingFinished.emit()
+    assert window.calibration_panel.cam0_form.plane2 is None  # not extracted yet -- still planar
+
+    window.project_panel.stereo_radio.setChecked(True)  # switch mode AFTER path is already set
+
+    assert window.calibration_panel.cam0_form.plane2 is stereo_settings.cam0_mapping_plane2
+
+
+def test_stereo_calibration_extraction_wiring_when_stereo_mode(qtbot, monkeypatch, tmp_path):
+    import piv_suite_gui.main_window as mw
+
+    set_path = tmp_path / "recording.set"
+    set_path.write_text("")
+    stereo_settings = _fake_stereo_settings()
+    monkeypatch.setattr(mw, "read_stereo_calibration_from_set", lambda path, idx: stereo_settings)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.project_panel.stereo_radio.setChecked(True)
+    window.project_panel.input_path_edit.setText(str(set_path))
+    window.project_panel.input_path_edit.editingFinished.emit()
+
+    assert window.calibration_panel.cam0_form.plane2 is stereo_settings.cam0_mapping_plane2
+    assert window.calibration_panel.get_settings().world_scale_px_per_mm == pytest.approx(17.9)
+    assert "stereo" in window.statusBar().currentMessage().lower()
+
+
+def test_stereo_calibration_extraction_skipped_in_planar_mode(qtbot, monkeypatch, tmp_path):
+    import piv_suite_gui.main_window as mw
+
+    set_path = tmp_path / "recording.set"
+    set_path.write_text("")
+    called = []
+    monkeypatch.setattr(mw, "read_stereo_calibration_from_set", lambda path, idx: called.append(True))
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    assert window.project_panel.planar_radio.isChecked()
+    window.project_panel.input_path_edit.setText(str(set_path))
+    window.project_panel.input_path_edit.editingFinished.emit()
+
+    assert called == []
+
+
+def test_stereo_calibration_extraction_failure_shows_status_and_does_not_crash(qtbot, monkeypatch, tmp_path):
+    import piv_suite_gui.main_window as mw
+    from piv_suite.config.schema import CalibrationSettings
+
+    set_path = tmp_path / "recording.set"
+    set_path.write_text("")
+    monkeypatch.setattr(mw, "read_calibration_from_set",
+                         lambda path, idx: CalibrationSettings())
+    monkeypatch.setattr(mw, "read_stereo_calibration_from_set",
+                         lambda path, idx: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.project_panel.stereo_radio.setChecked(True)
+    window.project_panel.input_path_edit.setText(str(set_path))
+    window.project_panel.input_path_edit.editingFinished.emit()  # must not raise
+
+    assert "boom" in window.statusBar().currentMessage()
+
+
+def test_calibration_panel_load_from_set_button_triggers_main_window_extraction(qtbot, monkeypatch, tmp_path):
+    import piv_suite_gui.main_window as mw
+
+    set_path = tmp_path / "recording.set"
+    set_path.write_text("")
+    stereo_settings = _fake_stereo_settings()
+    monkeypatch.setattr(mw, "read_stereo_calibration_from_set", lambda path, idx: stereo_settings)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.project_panel.stereo_radio.setChecked(True)
+    window.project_panel.input_path_edit.setText(str(set_path))  # no editingFinished yet
+
+    window.calibration_panel.load_from_set_requested.emit()
+
+    assert window.calibration_panel.cam0_form.plane2 is stereo_settings.cam0_mapping_plane2
+
+
 def test_calibration_labels_use_math_notation(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)
     cam0 = window.calibration_panel.cam0_form
-    labels = [cam0.layout().itemAt(0).layout().itemAt(i).widget().text()
+    # itemAt(0) is the DaVis-auto-load summary row added later; the
+    # x0/x_span/y0/y_span label grid is itemAt(1).
+    labels = [cam0.layout().itemAt(1).layout().itemAt(i).widget().text()
               for i in range(0, 10, 2)]
     assert "x₀:" in labels
     assert "y₀:" in labels
