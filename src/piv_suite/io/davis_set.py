@@ -18,7 +18,10 @@ from datetime import datetime
 import numpy as np
 
 from piv_suite.calibration.camera_mapping import COEF_KEYS
-from piv_suite.config.schema import CalibrationSettings, CameraMappingSettings, StereoSettings
+from piv_suite.config.schema import (
+    CalibrationSettings, CameraMappingSettings, DualPlanarCameraSettings,
+    DualPlanarSettings, StereoSettings,
+)
 
 from .buffers import frames_from_buffer, frames_from_stereo_buffer
 
@@ -97,6 +100,37 @@ def iter_stereo_from_set(set_path, multiset_index=0, stereo_frame_order="camera_
     finally:
         if owns_dataset:
             dataset.close()
+
+
+def iter_dual_planar_from_set(set_path, multiset_index=0):
+    """Yield (pair_id, fa0, fb0, fa1, fb1) from a DaVis "SideBySide2D"
+    dual-camera planar .set -- i.e. two COPLANAR cameras each imaging a
+    different (overlapping) region of one larger flat plane, stitched
+    into a wider planar field (see config.schema.DualPlanarSettings),
+    NOT stereo (no triangulation).
+
+    This is a thin wrapper around iter_stereo_from_set, not a
+    reimplementation: confirmed directly against a real SideBySide2D
+    project (D:\\Truck_PIV_Round4\\Loaded_CFD_Truck) that lvpyio reports
+    `is_multiset() == False` for it (unlike the stereo case) and each
+    Buffer already holds the same 4-frame layout frames_from_stereo_buffer
+    expects (2 cameras x 2 exposures) -- verified via that project's own
+    StreamSet.xml, whose FrameReader ContentPurpose entries pin frames
+    0-1 to FilePrefix="Camera1" and frames 2-3 to FilePrefix="Camera2",
+    i.e. exactly stereo_frame_order="camera_major"'s
+    [cam0_A, cam0_B, cam1_A, cam1_B] layout -- not a free per-project
+    choice the way stereo's own (ambiguous, user-facing) frame_order
+    setting is, so it's hard-coded here rather than exposed as a GUI
+    option."""
+    return iter_stereo_from_set(set_path, multiset_index, stereo_frame_order="camera_major")
+
+
+def get_dual_planar_from_set(set_path, index, multiset_index=0):
+    """Load a single (pair_id, fa0, fb0, fa1, fb1) at `index` directly --
+    see iter_dual_planar_from_set's docstring for why this is a thin
+    camera_major-pinned wrapper around get_stereo_from_set rather than a
+    separate implementation."""
+    return get_stereo_from_set(set_path, index, multiset_index, stereo_frame_order="camera_major")
 
 
 def list_pair_ids_from_set(set_path, multiset_index=0):
@@ -517,4 +551,159 @@ def read_stereo_calibration_from_set(set_path, multiset_index=0):
         world_shape=world_shape,
         world_scale_px_per_mm=px_per_mm_0,
         sheet_z_mm=None,
+    )
+
+
+def _read_field_of_view(calibration_xml_path):
+    """Calibration.xml's own tag for which acquisition geometry a
+    calibration snapshot describes -- "SideBySide2D" for the dual-camera
+    planar case this module's DualPlanar* functions target, something
+    else (typically absent/different for a plain single-camera planar
+    project) otherwise. Returns None if the file has no CoordinateSystem
+    element at all."""
+    root = ET.parse(calibration_xml_path).getroot()
+    cs = root.find(".//CoordinateSystem")
+    return cs.attrib.get("FieldOfView") if cs is not None else None
+
+
+def detect_dual_planar_from_set(set_path, multiset_index=0):
+    """Best-effort: does this DaVis .set project's calibration say
+    FieldOfView="SideBySide2D" (two coplanar cameras stitched into one
+    wider field, config.schema.DualPlanarSettings) rather than a plain
+    single-camera planar project? Returns False (never raises) if
+    there's no calibration to check, or the check itself fails for any
+    reason -- this is used purely to auto-select the GUI's "Dual camera"
+    checkbox, matching read_calibration_from_set's "best-effort, no
+    field is ever required" contract, not a required calibration gate
+    the way read_stereo_calibration_from_set's raise-on-failure is (a
+    stereo dewarp mapping is useless if wrong; a wrong initial guess
+    about SideBySide2D here just means the user unchecks/checks the box
+    themselves)."""
+    project_root = _find_calibration_project_root(set_path)
+    if project_root is None:
+        return False
+    recording_dt = _read_set_time(set_path)
+    snapshot_dir, _ = _select_calibration_snapshot(project_root, recording_dt)
+    calibration_xml = os.path.join(snapshot_dir, "Calibration.xml")
+    if not os.path.isfile(calibration_xml):
+        return False
+    try:
+        return _read_field_of_view(calibration_xml) == "SideBySide2D"
+    except ET.ParseError:
+        return False
+
+
+def _read_dual_planar_camera(calibration_xml_path, camera_identifier):
+    """One camera's RegionWithinCorrectedImage (its raw frame's placement
+    within the shared canvas) + OriginalImageSize (its own raw sensor
+    size) -- see config.schema.DualPlanarCameraSettings' docstring for
+    what these mean and why region_width/height differs slightly from
+    raw_width/height (the "corrected" canvas footprint isn't identical
+    to the raw sensor size -- lens distortion this feature's flat-scale
+    approach approximates rather than removes)."""
+    root = ET.parse(calibration_xml_path).getroot()
+    cm = root.find(f".//CoordinateMapper[@CameraIdentifier='{camera_identifier}']")
+    if cm is None:
+        raise ValueError(f"'{calibration_xml_path}' has no CoordinateMapper for camera {camera_identifier}")
+    region = cm.find(".//RegionWithinCorrectedImage")
+    original = cm.find(".//OriginalImageSize")
+    if region is None or original is None:
+        raise ValueError(
+            f"'{calibration_xml_path}' camera {camera_identifier} is missing "
+            f"RegionWithinCorrectedImage/OriginalImageSize -- not a SideBySide2D "
+            f"calibration snapshot?")
+    return DualPlanarCameraSettings(
+        region_x=float(region.attrib["x"]), region_y=float(region.attrib["y"]),
+        region_width=float(region.attrib["Width"]), region_height=float(region.attrib["Height"]),
+        raw_width=int(original.attrib["Width"]), raw_height=int(original.attrib["Height"]),
+    )
+
+
+def _read_corrected_image_size(calibration_xml_path, camera_identifier):
+    root = ET.parse(calibration_xml_path).getroot()
+    cm = root.find(f".//CoordinateMapper[@CameraIdentifier='{camera_identifier}']")
+    el = cm.find(".//CorrectedImageSize") if cm is not None else None
+    if el is None:
+        raise ValueError(f"'{calibration_xml_path}' camera {camera_identifier} has no CorrectedImageSize")
+    return int(el.attrib["Width"]), int(el.attrib["Height"])
+
+
+def _read_linear_scale(calibration_xml_path, camera_identifier, axis):
+    """LinearScaleX/LinearScaleY's FactorMmPerPixel (signed) + OffsetMm,
+    converting a shared-canvas pixel coordinate straight to real-world
+    mm. axis is 'X' or 'Y'."""
+    root = ET.parse(calibration_xml_path).getroot()
+    cm = root.find(f".//CoordinateMapper[@CameraIdentifier='{camera_identifier}']")
+    el = cm.find(f".//LinearScale{axis}") if cm is not None else None
+    if el is None:
+        raise ValueError(f"'{calibration_xml_path}' camera {camera_identifier} has no LinearScale{axis}")
+    return float(el.attrib["FactorMmPerPixel"]), float(el.attrib["OffsetMm"])
+
+
+def read_dual_planar_calibration_from_set(set_path, multiset_index=0):
+    """Extract DaVis "SideBySide2D" dual-camera planar calibration (each
+    camera's placement within a shared combined canvas, plus that
+    canvas's real-world mm scale) directly from a DaVis .set project,
+    instead of hand-transcribing it -- the planar counterpart to
+    read_stereo_calibration_from_set, sharing its project-root/snapshot-
+    selection logic (_find_calibration_project_root,
+    _select_calibration_snapshot) since both read the same
+    Properties/Calibration/Calibration.xml layout, just different
+    CoordinateSystem geometries.
+
+    Unlike read_stereo_calibration_from_set, there's no fitting involved
+    here at all -- RegionWithinCorrectedImage/OriginalImageSize/
+    LinearScaleX/LinearScaleY are used exactly as DaVis wrote them (see
+    config.schema.DualPlanarSettings/DualPlanarCameraSettings). Raises
+    (never silently wrong) if the project structure or the selected
+    snapshot isn't there, or if its CoordinateSystem isn't
+    FieldOfView="SideBySide2D" -- there's nothing sensible to fall back
+    to for cam0/cam1 placement specifically, matching
+    read_stereo_calibration_from_set's raise-on-failure contract rather
+    than read_calibration_from_set's best-effort one."""
+    project_root = _find_calibration_project_root(set_path)
+    if project_root is None:
+        raise FileNotFoundError(
+            f"Couldn't find 'Properties/Calibration/Calibration.xml' walking up from "
+            f"'{set_path}' -- this doesn't look like a DaVis project with dual-camera "
+            f"planar calibration.")
+    recording_dt = _read_set_time(set_path)
+    snapshot_dir, snapshot_label = _select_calibration_snapshot(project_root, recording_dt)
+    calibration_xml = os.path.join(snapshot_dir, "Calibration.xml")
+    if not os.path.isfile(calibration_xml):
+        raise FileNotFoundError(
+            f"Selected calibration snapshot '{snapshot_label}' ({snapshot_dir}) has no "
+            f"Calibration.xml.")
+
+    field_of_view = _read_field_of_view(calibration_xml)
+    if field_of_view != "SideBySide2D":
+        raise ValueError(
+            f"'{calibration_xml}' CoordinateSystem FieldOfView is {field_of_view!r}, "
+            f"not 'SideBySide2D' -- this doesn't look like a dual-camera planar "
+            f"project (use detect_dual_planar_from_set to check before calling this).")
+
+    cam0 = _read_dual_planar_camera(calibration_xml, "1")
+    cam1 = _read_dual_planar_camera(calibration_xml, "2")
+    canvas_w0, canvas_h0 = _read_corrected_image_size(calibration_xml, "1")
+    canvas_w1, canvas_h1 = _read_corrected_image_size(calibration_xml, "2")
+    if (canvas_w0, canvas_h0) != (canvas_w1, canvas_h1):
+        print(f"[warn] davis_set: cam0/cam1 CorrectedImageSize disagree "
+              f"({canvas_w0}x{canvas_h0} vs {canvas_w1}x{canvas_h1}) -- using cam0's")
+
+    scale_x_mm_per_px, scale_x_offset_mm = _read_linear_scale(calibration_xml, "1", "X")
+    scale_y_mm_per_px, scale_y_offset_mm = _read_linear_scale(calibration_xml, "1", "Y")
+    scale_x1, offset_x1 = _read_linear_scale(calibration_xml, "2", "X")
+    scale_y1, offset_y1 = _read_linear_scale(calibration_xml, "2", "Y")
+    if (abs(scale_x1 - scale_x_mm_per_px) > 1e-9 * abs(scale_x_mm_per_px)
+            or abs(offset_x1 - scale_x_offset_mm) > 1e-6 * max(1.0, abs(scale_x_offset_mm))):
+        print(f"[warn] davis_set: cam0/cam1 LinearScaleX disagree -- using cam0's")
+    if (abs(scale_y1 - scale_y_mm_per_px) > 1e-9 * abs(scale_y_mm_per_px)
+            or abs(offset_y1 - scale_y_offset_mm) > 1e-6 * max(1.0, abs(scale_y_offset_mm))):
+        print(f"[warn] davis_set: cam0/cam1 LinearScaleY disagree -- using cam0's")
+
+    return DualPlanarSettings(
+        enabled=True, cam0=cam0, cam1=cam1,
+        canvas_width=canvas_w0, canvas_height=canvas_h0,
+        scale_x_mm_per_px=scale_x_mm_per_px, scale_x_offset_mm=scale_x_offset_mm,
+        scale_y_mm_per_px=scale_y_mm_per_px, scale_y_offset_mm=scale_y_offset_mm,
     )

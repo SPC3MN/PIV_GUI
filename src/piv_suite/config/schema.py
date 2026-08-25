@@ -17,6 +17,18 @@ class ProjectSettings:
     backend: str = "cpu"             # "cpu" or "gpu"
     mode: str = "planar"             # "planar" or "stereo"
 
+    # planar-only: DaVis "SideBySide2D" acquisition -- two COPLANAR
+    # cameras imaging different (overlapping) regions of one larger flat
+    # plane, stitched into one wider field, as opposed to stereo's two
+    # cameras at an angle on the SAME region for triangulated 3-component
+    # velocity. Deliberately a flag alongside mode="planar" rather than a
+    # 3rd mode string: the correlation itself is ordinary single-camera
+    # planar PIV run twice (see pipeline.combine_dual_planar_pair), not a
+    # different processing model the way stereo's triangulation is. See
+    # config.schema.DualPlanarSettings and
+    # davis_set.read_dual_planar_calibration_from_set.
+    dual_camera: bool = False
+
     # "set" mode only
     multiset_index: int = 0
 
@@ -269,6 +281,68 @@ class StereoSettings:
 
 
 @dataclass
+class DualPlanarCameraSettings:
+    """One camera's placement within a DaVis "SideBySide2D" project's
+    shared combined canvas -- read straight off Calibration.xml's
+    RegionWithinCorrectedImage/OriginalImageSize for this camera's own
+    CoordinateMapper, NOT fit or computed. region_x/region_y are this
+    camera's raw (undewarped) frame's placement origin within the shared
+    canvas, in CANVAS pixels (row-down/column-right, matching DaVis's own
+    RegionWithinCorrectedImage convention); region_width/region_height is
+    the SIZE that raw frame occupies there -- DaVis's own lens-corrected
+    footprint, close to but not identical to raw_width/raw_height (e.g. a
+    real project: 4144x3041 vs a 4096x3008 raw sensor -- the ~1% gap is
+    exactly the lens distortion this feature's flat-scale approach
+    approximates rather than fully removing). raw_width/raw_height is
+    this camera's own OriginalImageSize, i.e. the actual raw sensor pixel
+    grid iter_dual_planar_from_set's frames come in as. The ratio
+    region_width/raw_width (and the y equivalent) is the flat per-axis
+    scale pipeline.combine_dual_planar_pair uses to place a RAW
+    (undewarped) frame's PIV grid onto the shared canvas -- see that
+    function's docstring for why a flat scale, not a full per-camera
+    polynomial lens dewarp (the same CoordinateMapper data could in
+    principle feed calibration.camera_mapping like the stereo path does),
+    is this feature's deliberate starting point."""
+    region_x: float = 0.0
+    region_y: float = 0.0
+    region_width: float = 1.0
+    region_height: float = 1.0
+    raw_width: int = 1
+    raw_height: int = 1
+
+
+@dataclass
+class DualPlanarSettings:
+    """Calibration for a DaVis "SideBySide2D" dual-camera planar project
+    (see ProjectSettings.dual_camera) -- auto-extracted by
+    davis_set.read_dual_planar_calibration_from_set, never hand-entered
+    (unlike StereoSettings, there's no manual-entry GUI form for this:
+    every field here is a direct read off Calibration.xml, nothing fit or
+    chosen).
+
+    canvas_width/canvas_height and scale_x_*/scale_y_* describe the
+    shared "corrected" canvas both cameras' RegionWithinCorrectedImage
+    placements (cam0/cam1 above) are defined against, and the shared
+    LinearScaleX/LinearScaleY converting a canvas pixel coordinate
+    straight to real-world mm -- both confirmed IDENTICAL across cam0/
+    cam1 on real project data (same physical plane, same canvas), so
+    read once (off cam0's CoordinateMapper) rather than duplicated
+    per-camera. scale_y_mm_per_px is signed (negative on real data,
+    DaVis's own "world Y increases upward, canvas row increases
+    downward" convention) -- pipeline.combine_dual_planar_pair relies on
+    that sign, don't abs() it."""
+    enabled: bool = False
+    cam0: DualPlanarCameraSettings = field(default_factory=DualPlanarCameraSettings)
+    cam1: DualPlanarCameraSettings = field(default_factory=DualPlanarCameraSettings)
+    canvas_width: int = 0
+    canvas_height: int = 0
+    scale_x_mm_per_px: float = 1.0
+    scale_x_offset_mm: float = 0.0
+    scale_y_mm_per_px: float = 1.0
+    scale_y_offset_mm: float = 0.0
+
+
+@dataclass
 class OutputSettings:
     save_npz: bool = True
     save_plot: bool = False
@@ -304,5 +378,6 @@ class ProjectConfig:
     postprocess: PostProcessSettings = field(default_factory=PostProcessSettings)
     calibration: CalibrationSettings = field(default_factory=CalibrationSettings)
     stereo: StereoSettings = field(default_factory=StereoSettings)
+    dual_planar: DualPlanarSettings = field(default_factory=DualPlanarSettings)
     output: OutputSettings = field(default_factory=OutputSettings)
     performance: PerformanceSettings = field(default_factory=PerformanceSettings)

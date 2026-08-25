@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QVBoxLayout, QWidget,
 )
 
-from piv_suite.config.schema import PreprocessSettings, ProjectSettings
+from piv_suite.config.schema import DualPlanarSettings, PreprocessSettings, ProjectSettings
 from piv_suite.engines.registry import is_gpu_available
 
 from ._util import style_spin
@@ -60,6 +60,12 @@ class ProjectPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._gpu_available = is_gpu_available()
+        # Auto-extracted (never hand-edited) DaVis SideBySide2D placement/
+        # scale data -- see main_window._on_input_path_changed, which
+        # overwrites this via set_dual_planar_settings() the moment a
+        # matching .set is selected. Empty/disabled default means "not a
+        # dual-camera project" until extraction succeeds.
+        self._dual_planar = DualPlanarSettings()
         self._build_ui()
 
     def _build_ui(self):
@@ -230,6 +236,25 @@ class ProjectPanel(QWidget):
         mode_layout.addWidget(self.stereo_radio)
         mode_backend_row.addWidget(mode_box)
 
+        # planar-only: DaVis "SideBySide2D" dual-camera stitching (see
+        # config.schema.DualPlanarSettings) -- auto-checked/auto-extracted
+        # when the selected .set's own calibration says SideBySide2D
+        # (main_window._on_input_path_changed), but always user-toggleable
+        # like every other auto-extracted field in this app.
+        self.dual_camera_check = QCheckBox("Dual camera (SideBySide)")
+        self.dual_camera_check.setToolTip(
+            "DaVis 'SideBySide2D' acquisition: two coplanar cameras, each imaging a "
+            "different (overlapping) region of one larger flat plane, stitched into a "
+            "wider planar field -- NOT stereo (no triangulation, no 3rd velocity "
+            "component). Auto-detected/extracted from the selected .set's own "
+            "calibration; both cameras run through the ordinary planar PIV path and "
+            "are combined afterward.")
+        mode_layout.addWidget(self.dual_camera_check)
+        self.dual_camera_status_label = QLabel()
+        self.dual_camera_status_label.setWordWrap(True)
+        self.dual_camera_status_label.setVisible(False)
+        mode_layout.addWidget(self.dual_camera_status_label)
+
         backend_box = QGroupBox("BACKEND")
         backend_layout = QHBoxLayout(backend_box)
         self.cpu_radio = QRadioButton("CPU")
@@ -280,7 +305,9 @@ class ProjectPanel(QWidget):
     def _update_input_field_visibility(self):
         """.set mode needs none of the loose-folder fields at all; loose
         mode needs either the planar suffix pair or the stereo suffix/
-        frame-order fields, depending on Mode, never both."""
+        frame-order fields, depending on Mode, never both. Dual camera is
+        planar-only (stereo already uses both cameras, for triangulation
+        instead of stitching)."""
         is_loose = self.mode_loose.isChecked()
         is_stereo = self.stereo_radio.isChecked()
 
@@ -293,6 +320,12 @@ class ProjectPanel(QWidget):
         for w in (self.stereo_suffix_label, self.suffix_cam0_edit, self.suffix_cam1_edit,
                   self.stereo_frame_order_label, self.stereo_frame_order_combo):
             w.setVisible(is_loose and is_stereo)
+
+        self.dual_camera_check.setVisible(not is_stereo)
+        if is_stereo:
+            self.dual_camera_check.setChecked(False)
+        self.dual_camera_status_label.setVisible(
+            not is_stereo and self.dual_camera_status_label.text() != "")
 
     def _browse_input(self):
         if self.mode_set.isChecked():
@@ -326,6 +359,7 @@ class ProjectPanel(QWidget):
             output_dir=self.output_dir_edit.text(),
             backend=self.backend,
             mode="stereo" if self.is_stereo else "planar",
+            dual_camera=self.dual_camera_check.isChecked() and not self.is_stereo,
             multiset_index=self.multiset_index_spin.value(),
             loose_glob=glob_text,
             suffix_a=_apply_glob_extension(self.suffix_a_edit.text(), glob_text),
@@ -341,6 +375,23 @@ class ProjectPanel(QWidget):
             min_max_filter_length=self.min_max_length_spin.value(),
         )
 
+    def get_dual_planar_settings(self) -> DualPlanarSettings:
+        """The last auto-extracted DaVis SideBySide2D calibration (see
+        set_dual_planar_settings, pushed by main_window's .set-selection
+        auto-extraction) -- never hand-edited in the GUI, unlike
+        StereoSettings' manual-entry form."""
+        return self._dual_planar
+
+    def set_dual_planar_settings(self, settings: DualPlanarSettings, status_text=""):
+        """Called by main_window after a successful (or failed) dual-
+        camera calibration extraction -- always overwrites, matching this
+        app's other auto-extraction fields' "always trust the newly
+        selected project" convention (see main_window._on_input_path_
+        changed's own docstring)."""
+        self._dual_planar = settings
+        self.dual_camera_status_label.setText(status_text)
+        self.dual_camera_status_label.setVisible(bool(status_text) and not self.is_stereo)
+
     def set_from(self, project: ProjectSettings):
         self.mode_set.setChecked(project.input_mode == "set")
         self.mode_loose.setChecked(project.input_mode == "loose")
@@ -351,6 +402,7 @@ class ProjectPanel(QWidget):
             self.gpu_radio.setChecked(True)
         self.planar_radio.setChecked(project.mode == "planar")
         self.stereo_radio.setChecked(project.mode == "stereo")
+        self.dual_camera_check.setChecked(project.dual_camera)
         self.multiset_index_spin.setValue(project.multiset_index)
         self.loose_glob_edit.setText(project.loose_glob)
         # strip the extension back off -- these fields only ever display

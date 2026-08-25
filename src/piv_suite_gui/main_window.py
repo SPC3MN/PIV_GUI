@@ -17,8 +17,11 @@ from PySide6.QtWidgets import (
 )
 
 from piv_suite import __version__
+from piv_suite.config.schema import DualPlanarSettings
 from piv_suite.io.davis_set import (
-    read_calibration_from_set, read_stereo_calibration_from_set, resolve_set_paths,
+    detect_dual_planar_from_set, read_calibration_from_set,
+    read_dual_planar_calibration_from_set, read_stereo_calibration_from_set,
+    resolve_set_paths,
 )
 from piv_suite_gui.widgets.calibration_panel import CalibrationPanel
 from piv_suite_gui.widgets.header_bar import HeaderBar
@@ -144,8 +147,13 @@ class MainWindow(QMainWindow):
         fields every time the input path (or multiset sub-index) changes
         -- always trust the newly selected project's real calibration
         over any prior manual edit. In stereo mode, also re-extracts the
-        dewarp calibration. Never crashes the GUI: any failure is caught
-        and surfaced via the status bar, one message per extractor."""
+        dewarp calibration; in planar mode, also detects/extracts DaVis
+        "SideBySide2D" dual-camera calibration (config.schema.
+        DualPlanarSettings) and auto-checks/unchecks the Dual camera
+        checkbox to match what was actually found -- same "always trust
+        the newly selected project" convention as everything else here.
+        Never crashes the GUI: any failure is caught and surfaced via the
+        status bar, one message per extractor."""
         if not self.project_panel.mode_set.isChecked():
             return
         if not path or not os.path.exists(path):
@@ -180,6 +188,34 @@ class MainWindow(QMainWindow):
                 self.calibration_panel.set_settings(stereo)
                 messages.append(f"Stereo calibration auto-extracted from DaVis .set "
                                  f"({stereo.cam0_mapping.name}).")
+        else:
+            is_dual = False
+            try:
+                is_dual = detect_dual_planar_from_set(set_paths[0], idx)
+            except Exception:
+                pass  # best-effort, matching detect_dual_planar_from_set's own contract
+            if is_dual:
+                try:
+                    dual = read_dual_planar_calibration_from_set(set_paths[0], idx)
+                except Exception as e:
+                    self.project_panel.dual_camera_check.setChecked(False)
+                    self.project_panel.set_dual_planar_settings(
+                        DualPlanarSettings(),
+                        f"Detected SideBySide2D but couldn't extract calibration: {e}")
+                    messages.append(f"Couldn't auto-extract dual-camera calibration: {e}")
+                else:
+                    self.project_panel.dual_camera_check.setChecked(True)
+                    # assumes cam1 sits to the left of cam0 (true on every
+                    # real project seen so far) -- just a display string,
+                    # doesn't affect combine_dual_planar_pair's own math
+                    overlap_width_px = dual.cam1.region_x + dual.cam1.region_width - dual.cam0.region_x
+                    status = (f"SideBySide2D: canvas {dual.canvas_width}x{dual.canvas_height}px, "
+                               f"overlap ~{overlap_width_px:.0f}px")
+                    self.project_panel.set_dual_planar_settings(dual, status)
+                    messages.append("Dual-camera (SideBySide2D) calibration auto-extracted from DaVis .set.")
+            else:
+                self.project_panel.dual_camera_check.setChecked(False)
+                self.project_panel.set_dual_planar_settings(DualPlanarSettings(), "")
 
         self.statusBar().showMessage("  |  ".join(messages), 8000)
 

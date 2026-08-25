@@ -79,6 +79,8 @@ class RunPanel(QWidget):
                                 performance=performance)
         if project.mode == "stereo":
             config.stereo = main_window.calibration_panel.get_settings()
+        elif project.dual_camera:
+            config.dual_planar = main_window.project_panel.get_dual_planar_settings()
         config.output.save_npz = True
         config.output.save_summary_csv = True
 
