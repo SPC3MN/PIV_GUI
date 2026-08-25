@@ -79,38 +79,41 @@ class PipelineWorker(QObject):
         self._cancel_event.set()
 
     def force_stop(self):
-        """Strongest cancellation currently available -- a deliberate SEAM
-        for a sibling change (process-pool cancellation in
-        processing.parallel_planar / a new processing.parallel_stereo,
-        wired through _process_set_planar_parallel / an eventual
-        _process_set_stereo_parallel) to extend, not a finished hard-kill
-        of everything this worker might be doing.
+        """Strongest cancellation available -- the single seam run_panel.
+        py's Cancel button and main_window.py's closeEvent both call
+        (never cancel() directly), so every strengthening below applies
+        to both automatically.
 
-        Right now this just calls cancel(): for the SERIAL loop (both
-        planar and stereo, and the tiled-GPU path), that IS the strongest
-        safe option available -- self._cancel_event is polled between
-        PAIRS (the outer loops below) same as before, but is now ALSO
-        forwarded as `cancel_check` into pipeline.process_frames /
-        process_frames_tiled, which poll it between multi-pass iterations
-        (engines.cpu_engine.CPUPIVProcess) or between tiles
-        (engines.gpu_engine.run_tiled) -- see EngineCancelled's docstring
-        (engines/base.py). That bounds worst-case cancellation latency to
-        one pass or one tile instead of one whole pair, without resorting
-        to killing a thread mid-BLAS/FFT call (unsafe -- deliberately not
-        attempted, see this module's docstring history / the task that
-        added this method).
+        Still just calls cancel() -- self._cancel_event -- but that one
+        flag now reaches every cancellation mechanism this app has, at
+        every granularity:
 
-        For the PARALLEL executor path (n_workers > 1), setting the event
-        only stops NEW submissions -- pairs already dispatched to a
-        worker process finish naturally (see
-        processing.parallel_planar.run_planar_batch_parallel's own
-        docstring). A sibling change is expected to extend THIS method
-        (not add a second, competing one) to also reach into a live
-        ProcessPoolExecutor and terminate its in-flight worker processes
-        once that lands. Callers (run_panel.py's Cancel button,
-        main_window.py's closeEvent) call force_stop(), not cancel()
-        directly, so they pick up that strengthening automatically the
-        moment it exists here -- no caller-side change needed."""
+        - SERIAL loop (planar/stereo/tiled-GPU): self._cancel_event is
+          polled between PAIRS (the outer loops below) as before, AND
+          forwarded as `cancel_check` into pipeline.process_frames /
+          process_frames_tiled, which poll it between multi-pass
+          iterations (engines.cpu_engine.CPUPIVProcess) or between tiles
+          (engines.gpu_engine.run_tiled) -- see EngineCancelled's
+          docstring (engines/base.py). Bounds worst-case latency to one
+          pass or one tile instead of one whole pair, without killing a
+          thread mid-BLAS/FFT call (unsafe, deliberately not attempted).
+
+        - PARALLEL executor path (n_workers > 1, both planar and stereo):
+          _process_set_planar_parallel / _process_set_stereo_parallel
+          pass self._cancel_event.is_set as `cancel_check` into
+          processing.parallel_planar.run_planar_batch_parallel /
+          processing.parallel_stereo.run_stereo_batch_parallel, both of
+          which run a background poller
+          (processing._parallel_cancel.start_cancel_poller) that watches
+          cancel_check() independently of whatever the submission loop is
+          doing and, the instant it fires, HARD-TERMINATES every live
+          worker process (not "let in-flight pairs finish" -- that used
+          to be the behavior and was a real reported bug, see
+          _parallel_cancel.py's module docstring). Confirmed via real
+          full-resolution data: this drops parallel-path force_stop
+          latency from ~59s (waiting out every in-flight worker
+          naturally) to the same sub-second range as the serial path's
+          own per-pass cancellation."""
         self.cancel()
 
     def run(self):
