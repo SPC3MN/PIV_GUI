@@ -17,6 +17,7 @@ from PySide6.QtCore import QObject, Signal
 
 from piv_suite.calibration.camera_mapping import build_camera_mapping
 from piv_suite.config.legacy import to_cpu_settings, to_gpu_settings
+from piv_suite.engines.base import EngineCancelled
 from piv_suite.engines.registry import get_engine_factory
 from piv_suite.io.davis_set import (
     iter_dual_planar_from_set, iter_pairs_from_set, iter_stereo_from_set,
@@ -76,6 +77,44 @@ class PipelineWorker(QObject):
 
     def cancel(self):
         self._cancel_event.set()
+
+    def force_stop(self):
+        """Strongest cancellation available -- the single seam run_panel.
+        py's Cancel button and main_window.py's closeEvent both call
+        (never cancel() directly), so every strengthening below applies
+        to both automatically.
+
+        Still just calls cancel() -- self._cancel_event -- but that one
+        flag now reaches every cancellation mechanism this app has, at
+        every granularity:
+
+        - SERIAL loop (planar/stereo/tiled-GPU): self._cancel_event is
+          polled between PAIRS (the outer loops below) as before, AND
+          forwarded as `cancel_check` into pipeline.process_frames /
+          process_frames_tiled, which poll it between multi-pass
+          iterations (engines.cpu_engine.CPUPIVProcess) or between tiles
+          (engines.gpu_engine.run_tiled) -- see EngineCancelled's
+          docstring (engines/base.py). Bounds worst-case latency to one
+          pass or one tile instead of one whole pair, without killing a
+          thread mid-BLAS/FFT call (unsafe, deliberately not attempted).
+
+        - PARALLEL executor path (n_workers > 1, both planar and stereo):
+          _process_set_planar_parallel / _process_set_stereo_parallel
+          pass self._cancel_event.is_set as `cancel_check` into
+          processing.parallel_planar.run_planar_batch_parallel /
+          processing.parallel_stereo.run_stereo_batch_parallel, both of
+          which run a background poller
+          (processing._parallel_cancel.start_cancel_poller) that watches
+          cancel_check() independently of whatever the submission loop is
+          doing and, the instant it fires, HARD-TERMINATES every live
+          worker process (not "let in-flight pairs finish" -- that used
+          to be the behavior and was a real reported bug, see
+          _parallel_cancel.py's module docstring). Confirmed via real
+          full-resolution data: this drops parallel-path force_stop
+          latency from ~59s (waiting out every in-flight worker
+          naturally) to the same sub-second range as the serial path's
+          own per-pass cancellation."""
+        self.cancel()
 
     def run(self):
         cfg = self.config
@@ -190,13 +229,15 @@ class PipelineWorker(QObject):
                     x, y, u, v, valid, elapsed, rejects = pipeline.process_frames_tiled(
                         frame_a, frame_b, post, init_fn, correlation.n_tiles_y, correlation.n_tiles_x,
                         margin, free_pools_fn=lambda: _free_gpu(backend),
+                        cancel_check=self._cancel_event.is_set,
                     )
                     t_post = time.time() - t_post0 - elapsed
                 else:
                     if engine is None:
                         engine, x, y = _build_engine(backend, frame_a.shape, correlation, validation)
                     t_post0 = time.time()
-                    u, v, valid, elapsed, rejects = pipeline.process_frames(engine, frame_a, frame_b, post)
+                    u, v, valid, elapsed, rejects = pipeline.process_frames(
+                        engine, frame_a, frame_b, post, cancel_check=self._cancel_event.is_set)
                     t_post = time.time() - t_post0 - elapsed
 
                 if cfg.output.verbose:
@@ -224,6 +265,16 @@ class PipelineWorker(QObject):
                     "n_rejected_std_dev": rejects["std_dev"],
                 })
                 self.progress.emit(len(summary_rows), 0)
+            except EngineCancelled:
+                # Fired mid-pair (between passes/tiles, see cpu_engine.py/
+                # gpu_engine.py) rather than at this loop's own top-of-
+                # iteration check -- this pair's partial result is
+                # discarded (no summary row, no pair_finished signal,
+                # matching the outer per-pair check's behavior when it
+                # fires BEFORE a pair even starts), and the batch stops
+                # the same way an between-pairs cancel does.
+                cancelled = True
+                break
             except Exception as e:
                 self.error.emit(pair_id, str(e))
 
@@ -280,7 +331,9 @@ class PipelineWorker(QObject):
     def _run_camera(self, frame_a, frame_b, cfg):
         backend = cfg.project.backend
         engine, x, y = _build_engine(backend, frame_a.shape, cfg.correlation, cfg.validation)
-        u, v, valid, elapsed, rejects = pipeline.process_frames(engine, frame_a, frame_b, cfg.postprocess.for_pipeline())
+        u, v, valid, elapsed, rejects = pipeline.process_frames(
+            engine, frame_a, frame_b, cfg.postprocess.for_pipeline(),
+            cancel_check=self._cancel_event.is_set)
         del engine
         if backend == "gpu":
             from piv_suite.engines.gpu_engine import free_gpu_pools
@@ -288,6 +341,22 @@ class PipelineWorker(QObject):
         return u, v, valid, elapsed, x, y, rejects
 
     def _process_set_stereo(self, pair_source, cfg, output_dir, cam0, cam1, angles):
+        backend = cfg.project.backend
+
+        # Tier 3: process-level parallelism across independent pairs
+        # (snapshots) within one recording, stereo CPU only -- see
+        # processing.parallel_stereo's module docstring for why stereo's
+        # per-pair work is exactly as independent as planar's. Same
+        # n_workers<=1 hard-fallback-to-serial requirement as planar (see
+        # parallel_planar's docstring): this branch is only ever taken
+        # for n_workers > 1.
+        if backend == "cpu" and not cfg.correlation.use_tiling:
+            n_workers = recommended_workers(cfg.performance.n_workers)
+            auto_note = "auto" if cfg.performance.n_workers is None else "user override"
+            self.log.emit(f"[info] stereo CPU batch: {n_workers} worker process(es) ({auto_note})")
+            if n_workers > 1:
+                return self._process_set_stereo_parallel(pair_source, cfg, output_dir, angles, n_workers)
+
         summary_rows = []
         cancelled = False
 
@@ -344,9 +413,55 @@ class PipelineWorker(QObject):
                     "n_rejected_range_residual": n_range, "n_rejected_std_dev": n_std,
                 })
                 self.progress.emit(len(summary_rows), 0)
+            except EngineCancelled:
+                # See the matching except clause in _process_set_planar --
+                # same contract, fired mid-pair (between passes, from
+                # either camera's _run_camera call) rather than at this
+                # loop's own top-of-iteration check.
+                cancelled = True
+                break
             except Exception as e:
                 self.error.emit(pair_id, str(e))
 
+        return summary_rows, cancelled
+
+    def _process_set_stereo_parallel(self, pair_source, cfg, output_dir, angles, n_workers):
+        """The n_workers > 1 branch of _process_set_stereo -- same Qt
+        signal contract as the serial loop (and as
+        _process_set_planar_parallel above), driven by
+        processing.parallel_stereo.run_stereo_batch_parallel's callbacks
+        instead of an inline try/except per pair."""
+        from piv_suite.processing.parallel_stereo import run_stereo_batch_parallel
+
+        finished_count = [0]
+
+        def _on_finished(pair_id, result):
+            if cfg.output.verbose:
+                self.log.emit(
+                    f"[timing] {pair_id}: preprocess/dewarp={result['t_pre']:.3f}s "
+                    f"correlation={result['elapsed']:.3f}s postprocess={result['t_post']:.3f}s "
+                    f"total={result['t_pre'] + result['elapsed'] + result['t_post']:.3f}s")
+            self.pair_finished.emit(pair_id, {
+                "elapsed": result["elapsed"], "n_valid": result["n_valid"], "n_total": result["n_total"],
+                "n_rejected_range_residual": result["n_rejected_range_residual"],
+                "n_rejected_std_dev": result["n_rejected_std_dev"],
+            })
+            finished_count[0] += 1
+            self.progress.emit(finished_count[0], 0)
+
+        def _on_error(pair_id, exc):
+            self.error.emit(pair_id, str(exc))
+
+        results, cancelled = run_stereo_batch_parallel(
+            pair_source, cfg, output_dir, angles, n_workers,
+            on_pair_started=self.pair_started.emit, on_pair_finished=_on_finished,
+            on_pair_error=_on_error, cancel_check=self._cancel_event.is_set,
+        )
+        summary_rows = [
+            (r["pair_id"], r["elapsed"], r["n_valid"], r["n_total"],
+             r["n_rejected_range_residual"], r["n_rejected_std_dev"])
+            for r in results
+        ]
         return summary_rows, cancelled
 
     def _run_dual_planar_camera(self, frame_a, frame_b, cfg):

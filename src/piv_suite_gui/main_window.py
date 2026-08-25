@@ -287,3 +287,67 @@ class MainWindow(QMainWindow):
         _start_run() keeps the enabled-state check in exactly one place."""
         self.tabs.setCurrentWidget(self.run_panel)
         self.run_panel.run_btn.click()
+
+    def _free_backend_resources(self):
+        """GPU memory pools + matplotlib Figures -- the two OS-visible
+        things a real user reported as still resident after closing the
+        window (no closeEvent existed at all before this, so nothing
+        ever ran on window close). Split out from closeEvent so app.py's
+        QApplication.aboutToQuit can call this SAME cleanup as a second
+        safety net (see app.main()'s comment for why aboutToQuit does
+        NOT also repeat closeEvent's running-batch stop_and_wait() logic)
+        without duplicating it. Safe to call more than once (both paths
+        normally fire on an ordinary close) -- free_gpu_pools() on
+        already-freed pools and plt.close('all') with no open figures
+        are both harmless no-ops, not errors.
+
+        Both cleanup calls are best-effort (never let shutdown cleanup
+        itself crash the app): free_gpu_pools() imports cupy internally
+        and raises ImportError outright if the GPU backend was never
+        installed/available this session (see engines/gpu_engine.py's
+        own module docstring for why cupy is lazy-imported everywhere in
+        this codebase); matplotlib is always installed but closing figures
+        that don't exist is guarded the same way for consistency."""
+        try:
+            from piv_suite.engines.gpu_engine import free_gpu_pools
+            free_gpu_pools()
+        except Exception:
+            pass
+
+        try:
+            import matplotlib.pyplot as plt
+            plt.close('all')
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        """Stop a running batch and free backend-held memory before the
+        window actually closes -- addresses two real user-reported bugs:
+        (1) closing the window while a batch is running previously left
+        its QThread/PipelineWorker (and, for GPU/parallel-CPU runs, its
+        held resources) running underneath the now-destroyed widgets,
+        with zero cleanup, since no closeEvent existed at all; (2)
+        closing after ANY run (even a finished one) left GPU memory pools
+        and matplotlib Figure objects still resident -- nothing on the
+        normal end-of-batch path frees those at the APPLICATION level
+        (pipeline_worker.py only frees per-engine GPU state between
+        pairs/at batch end, not on window close).
+
+        run_panel.stop_and_wait()'s timeout is a bounded wait, not an
+        unbounded block -- a worker that genuinely can't stop within it
+        (stuck deep inside one blocking correlation call; see
+        pipeline_worker.PipelineWorker.force_stop's docstring for why
+        that can't always be pre-empted instantly) must not be able to
+        hang window close forever. Logged (print(), not a status-bar
+        message -- there's no GUI left to see a status bar once the
+        window is gone) rather than silently ignored, since it's a real
+        signal something would need harder termination to fix."""
+        if self.run_panel.is_running():
+            stopped = self.run_panel.stop_and_wait(5000)
+            if not stopped:
+                print("[warn] closeEvent: batch worker didn't stop within 5s -- "
+                      "closing anyway, but its thread (and anything it holds, e.g. "
+                      "a GPU context) may still be alive after this process exits")
+
+        self._free_backend_resources()
+        super().closeEvent(event)

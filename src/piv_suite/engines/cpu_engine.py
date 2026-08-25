@@ -195,8 +195,18 @@ class CPUPIVProcess:
         )
         print(f"[info] perf autotune: {chunk_info}")
 
-    def __call__(self, frame_a, frame_b):
+    def __call__(self, frame_a, frame_b, cancel_check=None):
+        """cancel_check (see engines.base.PIVEngine.__call__'s docstring)
+        is polled once per pass boundary, below -- NOT mid-pass, since a
+        single pass's own correlation is one blocking openpiv call this
+        engine has no hook into. A typical 3-4 pass schedule still means
+        cancellation latency is bounded by ONE pass's wall-clock time
+        instead of the whole pair's, which is the actual, honest win
+        available here without either interrupting a blocking numpy/FFT
+        call (unsafe, not attempted -- see pipeline_worker.py) or
+        rewriting openpiv's own windef internals."""
         from openpiv import windef, validation, filters
+        from .base import EngineCancelled
 
         settings = self._settings
         frame_a = np.asarray(frame_a, dtype=np.float32)
@@ -230,6 +240,8 @@ class CPUPIVProcess:
 
         # -- passes 1..N-1 (decreasing window size, image deformation) --
         for i in range(1, settings.num_iterations):
+            if cancel_check is not None and cancel_check():
+                raise EngineCancelled(f"cancelled before pass {i}/{settings.num_iterations - 1}")
             x, y, u, v, grid_mask, flags = windef.multipass_img_deform(
                 frame_a, frame_b, i, x, y, u, v, settings)
             u, v = _fill_residual_nan(u, v)

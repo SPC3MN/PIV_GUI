@@ -341,6 +341,48 @@ def handle_pair_stereo(pair_id, dw_a0, dw_b0, dw_a1, dw_b1, cfg, angles, output_
 
 
 def process_pairs_stereo(pair_source, cfg, angles, output_dir, interactive_preview):
+    backend = cfg.project.backend
+
+    # Tier 3: process-level parallelism across independent pairs
+    # (snapshots) within one recording, stereo CPU only, and only for
+    # genuine batch runs -- same interactive_preview exclusion as
+    # process_pairs_planar (pair 0's actual x/y/U/V/W are needed back in
+    # THIS process to render a preview, which doesn't fit a fire-and-
+    # forget worker pool). n_workers<=1 always takes the unmodified
+    # serial loop below -- see processing.parallel_stereo's module
+    # docstring for why that's a hard requirement, not just an
+    # optimization.
+    if backend == "cpu" and not cfg.correlation.use_tiling and not interactive_preview:
+        n_workers = recommended_workers(cfg.performance.n_workers)
+        if cfg.output.verbose:
+            auto_note = "auto" if cfg.performance.n_workers is None else "user override"
+            print(f"[info] stereo CPU batch: {n_workers} worker process(es) ({auto_note})")
+        if n_workers > 1:
+            from ..processing.parallel_stereo import run_stereo_batch_parallel
+
+            def _on_finished(pair_id, result):
+                if cfg.output.verbose:
+                    print(f"[timing] {pair_id}: preprocess/dewarp={result['t_pre']:.3f}s "
+                          f"correlation={result['elapsed']:.3f}s postprocess={result['t_post']:.3f}s "
+                          f"total={result['t_pre'] + result['elapsed'] + result['t_post']:.3f}s "
+                          f"({result['n_valid']}/{result['n_total']} valid)")
+
+            def _on_error(pair_id, exc):
+                # Matches the serial loop's own behavior (no per-pair
+                # try/except there -- a bad pair crashes the CLI run):
+                # surface which pair failed, then re-raise.
+                print(f"[error] {pair_id} failed: {exc}")
+                raise exc
+
+            results, _cancelled = run_stereo_batch_parallel(
+                pair_source, cfg, output_dir, angles, n_workers,
+                on_pair_finished=_on_finished, on_pair_error=_on_error)
+            return [
+                (r["pair_id"], r["elapsed"], r["n_valid"], r["n_total"],
+                 r["n_rejected_range_residual"], r["n_rejected_std_dev"])
+                for r in results
+            ]
+
     summary_rows = []
     for idx, (pair_id, fa0, fb0, fa1, fb1) in enumerate(pair_source):
         fa0, fb0 = apply_preprocess_pair(fa0, fb0, cfg.preprocess)

@@ -44,6 +44,7 @@ from ..engines._openpiv_speedups import apply_speedups
 from ..engines.registry import get_engine_factory
 from ..plotting.planar import plot_and_save_planar
 from . import pipeline
+from ._parallel_cancel import start_cancel_poller
 from .postprocess import apply_calibration
 from .preprocess import apply_preprocess_pair
 
@@ -173,11 +174,19 @@ def run_planar_batch_parallel(pair_source, cfg, output_dir, n_workers,
     finished which pair first -- matching the serial loop's natural
     (submission-order) ordering exactly.
 
-    Cancellation: cancel_check() is polled before each new submission;
-    once it returns True, no FURTHER pairs are submitted, but pairs
-    already in flight are allowed to finish (a process pool can't
-    "half-cancel" a running task) -- their results are still collected
-    and included, matching "cancel stops new work, not in-progress work".
+    Cancellation: a background poller (processing._parallel_cancel.
+    start_cancel_poller) watches cancel_check() independent of the
+    submission loop below and, the instant it returns True, HARD-KILLS
+    every in-flight worker process (processing._parallel_cancel.
+    kill_executor_workers) rather than letting them finish naturally --
+    see that module's docstring for why "let in-flight pairs finish" was
+    tried first and turned out to be the reported bug ("Cancel doesn't
+    actually stop processing"): with submission throttled to a sliding
+    window of n_workers pairs, "let them finish" could mean waiting out a
+    dozen-plus already-running full-resolution correlations. A killed
+    pair's result is simply dropped -- not counted as an error, not
+    counted as completed (see _on_done below, which checks cancel_event
+    before treating a future's exception as a real error).
 
     Errors: if one pair's worker task raises, on_pair_error(pair_id, exc)
     is called and that pair is simply left out of the returned results --
@@ -225,14 +234,19 @@ def run_planar_batch_parallel(pair_source, cfg, output_dir, n_workers,
     results_lock = threading.Lock()
     semaphore = threading.Semaphore(n_workers)
     all_futures = []
-    cancelled = False
+    cancel_event = threading.Event()
 
     def _on_done(future, idx, pair_id):
         semaphore.release()
         try:
             result = future.result()
         except Exception as exc:
-            if on_pair_error is not None:
+            # A future killed (or cancelled while still queued) by the
+            # cancel poller raises here too (BrokenProcessPool /
+            # CancelledError) -- that's an EXPECTED consequence of
+            # cancellation, not a real per-pair error, so it's dropped
+            # silently rather than reported via on_pair_error.
+            if not cancel_event.is_set() and on_pair_error is not None:
                 on_pair_error(pair_id, exc)
             return
         with results_lock:
@@ -240,25 +254,54 @@ def run_planar_batch_parallel(pair_source, cfg, output_dir, n_workers,
         if on_pair_finished is not None:
             on_pair_finished(pair_id, result)
 
-    with ProcessPoolExecutor(max_workers=n_workers, initializer=_worker_init) as executor:
+    executor = ProcessPoolExecutor(max_workers=n_workers, initializer=_worker_init)
+    poll_thread, poll_stop = start_cancel_poller(cancel_check, executor, cancel_event, semaphore, n_workers)
+    try:
         for idx, (pair_id, frame_a, frame_b) in enumerate(pair_source):
             semaphore.acquire()  # blocks here until a slot frees up -- this IS the throttle
-            if cancel_check is not None and cancel_check():
-                cancelled = True
-                semaphore.release()
+            if cancel_event.is_set():
                 break
             if on_pair_started is not None:
                 on_pair_started(pair_id)
-            future = executor.submit(
-                process_one_pair_planar_worker, idx, pair_id, frame_a, frame_b, cfg, output_dir)
+            try:
+                future = executor.submit(
+                    process_one_pair_planar_worker, idx, pair_id, frame_a, frame_b, cfg, output_dir)
+            except Exception:
+                # Lost a race against the cancel poller: it killed workers
+                # between our semaphore.acquire()/cancel_event check above
+                # and this submit() call. The exception type varies --
+                # BrokenProcessPool is the common case, but killing a
+                # worker mid-replacement-spawn can also surface as a raw
+                # OSError/EOFError from the multiprocessing plumbing
+                # underneath (confirmed directly) -- so this deliberately
+                # doesn't pattern-match on BrokenProcessPool specifically.
+                # Only treated as "expected, from cancellation" (swallowed)
+                # when cancellation is actually in play; anything else
+                # re-raises as a genuine bug, same as before this fix.
+                if cancel_event.is_set() or (cancel_check is not None and cancel_check()):
+                    cancel_event.set()
+                    break
+                raise
             all_futures.append(future)
             future.add_done_callback(lambda f, idx=idx, pair_id=pair_id: _on_done(f, idx, pair_id))
 
         # Every future's own callback already ran (or will run) as it
         # completes -- this just blocks the calling thread until they all
         # have, before returning. A single wait() call on the whole
-        # (already-submitted) list, not a per-completion loop.
+        # (already-submitted) list, not a per-completion loop. If
+        # cancellation killed the workers, every outstanding future is
+        # already resolved (with BrokenProcessPool) by the time we get
+        # here -- this returns near-instantly, not after any killed
+        # pair's natural remaining runtime.
         wait(all_futures)
+    finally:
+        poll_stop.set()
+        if poll_thread is not None:
+            poll_thread.join(timeout=1.0)
+        # wait=False: workers are already dead (normal completion) or
+        # already killed (cancellation) by this point either way -- no
+        # reason to block shutdown() on anything.
+        executor.shutdown(wait=False, cancel_futures=True)
 
     ordered = [results[idx] for idx in sorted(results)]
-    return ordered, cancelled
+    return ordered, cancel_event.is_set()

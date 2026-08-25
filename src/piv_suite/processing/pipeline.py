@@ -18,7 +18,8 @@ from . import postprocess
 from ..calibration.reconstruction import reconstruct_stereo
 
 
-def process_frames(engine, frame_a, frame_b, post, report_gpu_mem=False, on_gpu_report=None):
+def process_frames(engine, frame_a, frame_b, post, report_gpu_mem=False, on_gpu_report=None,
+                    cancel_check=None):
     """Run one engine (from engines.registry.get_engine_factory(...)) on a
     frame pair and apply the shared post-processing pipeline. Returns
     (u, v, valid, elapsed) in px/frame -- calibration to physical units and
@@ -28,6 +29,14 @@ def process_frames(engine, frame_a, frame_b, post, report_gpu_mem=False, on_gpu_
     to be config.schema.PostProcessSettings specifically) with attributes:
     global_outlier_std, range_filter (a dict of range_filter() kwargs, or
     None to skip), replace_invalid, smooth_field, smooth_sigma.
+
+    cancel_check, if given, is forwarded straight to the engine call --
+    see engines.base.PIVEngine.__call__'s docstring for what each backend
+    actually does with it (CPUPIVProcess checks it between multi-pass
+    iterations; the GPU backend's non-tiled path ignores it). May raise
+    engines.base.EngineCancelled instead of returning, if the engine
+    fires it -- callers that pass cancel_check must be prepared to catch
+    that (see pipeline_worker.py).
 
     Post-processing order: validity mask -> range/residual filter ->
     std-dev outlier mask -> NaN-fill -> replace_invalid -> smooth -- same
@@ -39,7 +48,7 @@ def process_frames(engine, frame_a, frame_b, post, report_gpu_mem=False, on_gpu_
     the CSV-facing reject-count bookkeeping.
     """
     t0 = time.time()
-    u, v = engine(frame_a, frame_b)
+    u, v = engine(frame_a, frame_b, cancel_check=cancel_check)
     if report_gpu_mem and on_gpu_report is not None:
         on_gpu_report()
     elapsed = time.time() - t0
@@ -93,7 +102,7 @@ def process_frames(engine, frame_a, frame_b, post, report_gpu_mem=False, on_gpu_
 
 
 def process_frames_tiled(frame_a, frame_b, post, init_raw_fn, n_tiles_y, n_tiles_x, margin_px,
-                          report_gpu_mem=False, free_pools_fn=None, verbose=False):
+                          report_gpu_mem=False, free_pools_fn=None, verbose=False, cancel_check=None):
     """Tiled counterpart to process_frames() -- runs the GPU engine tile
     by tile (engines.gpu_engine.run_tiled) to bound peak GPU memory on
     very large frames, then applies the same post-processing chain.
@@ -102,7 +111,11 @@ def process_frames_tiled(frame_a, frame_b, post, init_raw_fn, n_tiles_y, n_tiles
     regular (ny, nx) grid -- range_filter's local-window median needs a
     grid to define "local," and smooth_field's Gaussian blur does too.
     global_outlier_mask has no such requirement (field-wide mean/std over
-    a flat array works the same regardless of shape), so it still runs."""
+    a flat array works the same regardless of shape), so it still runs.
+
+    cancel_check, if given, is forwarded to run_tiled(), which polls it
+    once per tile -- see run_tiled's docstring. May raise
+    engines.base.EngineCancelled instead of returning."""
     from ..engines.gpu_engine import run_tiled
 
     class _Ctrl:  # minimal shim -- run_tiled only reads .verbose
@@ -112,7 +125,7 @@ def process_frames_tiled(frame_a, frame_b, post, init_raw_fn, n_tiles_y, n_tiles
 
     x, y, u, v, valid_raw, elapsed = run_tiled(
         frame_a, frame_b, _ctrl, init_raw_fn, n_tiles_y, n_tiles_x, margin_px,
-        report_gpu_mem=report_gpu_mem, free_pools_fn=free_pools_fn,
+        report_gpu_mem=report_gpu_mem, free_pools_fn=free_pools_fn, cancel_check=cancel_check,
     )
 
     valid = valid_raw
