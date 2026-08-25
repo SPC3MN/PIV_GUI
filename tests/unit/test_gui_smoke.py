@@ -3,6 +3,8 @@ raise. Full interaction testing is lower priority for this single-user
 tool; core pipeline correctness is covered by the other unit tests plus
 the manual end-to-end preview/run checks in the project notes."""
 
+import os
+
 import pytest
 
 pytest.importorskip("PySide6")
@@ -45,7 +47,8 @@ def test_preview_shows_progress_bar_while_running_and_hides_after(qtbot):
         grid = np.zeros((3, 3))
         valid = np.ones((3, 3), dtype=bool)
         return dict(kind="planar", pair_id="0000", x=grid, y=grid, u=grid, v=grid,
-                    valid=valid, elapsed=0.0, n_valid=9, n_total=9, n_range=0, n_std=0)
+                    valid=valid, elapsed=0.0, n_valid=9, n_total=9, n_range=0, n_std=0,
+                    units="m/s")
 
     panel._compute_planar = fake_compute_planar
     panel.window = lambda: type("W", (), {
@@ -72,6 +75,62 @@ def test_preview_shows_progress_bar_while_running_and_hides_after(qtbot):
 
     qtbot.waitUntil(lambda: not panel.progress_bar.isVisible(), timeout=2000)
     assert panel.preview_btn.isEnabled() is True
+
+
+def test_range_preview_clamps_count_and_shows_determinate_progress(qtbot):
+    # Task 4: previewing a RANGE of pairs (range_count_spin > 1) must (a)
+    # clamp to however many pairs are actually available from the selected
+    # one onward -- never read past the end of pair_combo just because the
+    # spinbox was left at a stale, too-large value -- and (b) switch the
+    # progress bar to real "N/M pairs done" progress instead of the plain
+    # indeterminate bar a single-pair preview still uses.
+    import numpy as np
+    from piv_suite_gui.widgets.preview_panel import PreviewPanel
+
+    panel = PreviewPanel()
+    qtbot.addWidget(panel)
+    panel.show()
+
+    seen_indices = []
+
+    def fake_compute_planar(project, preprocess, correlation, validation, post, calibration, index):
+        seen_indices.append(index)
+        grid = np.zeros((3, 3))
+        valid = np.ones((3, 3), dtype=bool)
+        return dict(kind="planar", pair_id=f"{index:04d}", x=grid, y=grid, u=grid, v=grid,
+                    valid=valid, elapsed=0.0, n_valid=9, n_total=9, n_range=0, n_std=0,
+                    units="m/s")
+
+    panel._compute_planar = fake_compute_planar
+    panel.window = lambda: type("W", (), {
+        "project_panel": type("P", (), {
+            "get_project_settings": lambda self: type("S", (), {"mode": "planar", "dual_camera": False})(),
+            "get_preprocess_settings": lambda self: None,
+        })(),
+        "settings_panel": type("SP", (), {
+            "get_correlation_settings": lambda self: None,
+            "get_validation_settings": lambda self: None,
+            "get_postprocess_settings": lambda self: None,
+            "get_calibration_settings": lambda self: None,
+        })(),
+    })()
+    # only 3 pairs actually exist -- range_count_spin below deliberately
+    # asks for far more than that, starting from index 1.
+    panel.pair_combo.addItems(["0000", "0001", "0002"])
+    panel.pair_combo.setCurrentIndex(1)
+    panel.range_count_spin.setValue(50)
+
+    panel._do_preview()
+
+    # clamped to count=2 (indices 1, 2 -- everything from the selected
+    # pair onward, not 50) -> determinate progress bar range (0, 2)
+    assert panel.progress_bar.minimum() == 0
+    assert panel.progress_bar.maximum() == 2
+
+    qtbot.waitUntil(lambda: not panel.progress_bar.isVisible(), timeout=2000)
+    assert seen_indices == [1, 2]
+    # back to indeterminate, ready for the next (possibly single-pair) preview
+    assert panel.progress_bar.maximum() == 0
 
 
 def test_header_badge_reflects_backend_availability(qtbot):
@@ -136,52 +195,55 @@ def test_status_bar_shows_backend_and_version(qtbot):
 
 
 def test_preview_panel_pair_selector_and_plot_options_exist(qtbot):
+    # Per-component subplots/manual ranges/colormap choice are gone (see
+    # plotting.preview's docstring) -- the panel now offers a Pairs-count
+    # spinbox (Task 4's range-preview control, 1 = single pair, matching
+    # the previous default behavior exactly) and a single Vectors toggle
+    # that starts disabled until a real preview result exists to overlay
+    # onto (see _render/_on_vectors_toggled).
     from piv_suite_gui.widgets.preview_panel import PreviewPanel
 
     panel = PreviewPanel()
     qtbot.addWidget(panel)
 
     assert panel.pair_combo.count() == 0
-    assert panel.show_contour_check.isChecked() is True   # contours on by default
-    assert panel.show_vectors_check.isChecked() is False  # vectors off by default
-    assert panel.cmap_combo.count() > 1
-
-    # U/V/W range rows, each auto-scaled (spins disabled) by default
-    for name in ("U", "V", "W"):
-        _label, auto_check, min_spin, max_spin = panel._range_rows[name]
-        assert auto_check.isChecked() is True
-        assert min_spin.isEnabled() is False
-        assert max_spin.isEnabled() is False
+    assert panel.range_count_spin.value() == 1
+    assert panel.range_count_spin.minimum() == 1
+    assert panel.show_vectors_check.isChecked() is False
+    assert panel.show_vectors_check.isEnabled() is False  # nothing to overlay onto yet
 
 
-def test_preview_panel_range_row_toggles_manual_spins(qtbot):
+def test_preview_panel_vectors_enabled_after_render_and_toggle_reuses_cached_result(qtbot):
+    # Vectors becomes checkable only once a preview has actually rendered
+    # (Task 2's requirement) -- and toggling it afterward must re-render
+    # the SAME cached result rather than recomputing (Task 2's "don't
+    # require re-running the whole PIV computation just to toggle
+    # vectors"). Simulated directly via _render (the same plain-dict-
+    # payload entry point _on_preview_finished uses) since no real
+    # compute path is wired up here.
+    import numpy as np
     from piv_suite_gui.widgets.preview_panel import PreviewPanel
 
     panel = PreviewPanel()
     qtbot.addWidget(panel)
+    assert panel.show_vectors_check.isEnabled() is False
+    assert panel._last_result is None
 
-    _label, auto_check, min_spin, max_spin = panel._range_rows["U"]
-    auto_check.setChecked(False)
-    assert min_spin.isEnabled() is True
-    assert max_spin.isEnabled() is True
+    grid = np.ones((3, 3))
+    valid = np.ones((3, 3), dtype=bool)
+    result = dict(kind="planar", pair_id="0000", x=grid, y=grid, u=grid, v=grid,
+                  valid=valid, elapsed=0.1, n_valid=9, n_total=9, n_range=0, n_std=0,
+                  units="m/s")
+    panel._render(result)
+    assert panel.show_vectors_check.isEnabled() is True
+    assert panel._last_result is result
+    assert panel.canvas is not None
 
-    min_spin.setValue(-2.5)
-    max_spin.setValue(2.5)
-    ranges = panel._get_ranges()
-    assert ranges["U"] == (-2.5, 2.5)
-    assert "V" not in ranges  # still auto
-
-
-def test_preview_panel_w_range_row_hidden_until_stereo(qtbot):
-    window = MainWindow()
-    qtbot.addWidget(window)
-    window.show()
-    pp = window.preview_panel
-    label, auto_check, min_spin, max_spin = pp._range_rows["W"]
-    assert not label.isVisible()
-
-    window.project_panel.stereo_radio.setChecked(True)
-    assert label.isVisible()
+    # Toggling afterward must not raise/require a compute method -- there
+    # isn't one wired up on this bare panel, so a successful re-render
+    # here confirms it went through the cached-result path, not a re-run.
+    panel.show_vectors_check.setChecked(True)
+    assert panel.canvas is not None
 
 
 def test_loose_suffix_extension_comes_from_glob(qtbot):
@@ -817,6 +879,12 @@ def test_stereo_calibration_extraction_wiring_when_stereo_mode(qtbot, monkeypatc
     set_path.write_text("")
     stereo_settings = _fake_stereo_settings()
     monkeypatch.setattr(mw, "read_stereo_calibration_from_set", lambda path, idx: stereo_settings)
+    # This test's tmp_path .set has no real Properties/Calibration tree for
+    # detect_project_type_from_set to actually detect stereo from -- fake
+    # it detecting stereo (matching read_stereo_calibration_from_set's own
+    # fake above) so editingFinished's auto-detection step doesn't revert
+    # the manual stereo_radio selection below back to planar.
+    monkeypatch.setattr(mw, "detect_project_type_from_set", lambda path, idx: "stereo")
 
     window = MainWindow()
     qtbot.addWidget(window)
@@ -856,6 +924,9 @@ def test_stereo_calibration_extraction_failure_shows_status_and_does_not_crash(q
                          lambda path, idx: CalibrationSettings())
     monkeypatch.setattr(mw, "read_stereo_calibration_from_set",
                          lambda path, idx: (_ for _ in ()).throw(RuntimeError("boom")))
+    # see test_stereo_calibration_extraction_wiring_when_stereo_mode's
+    # comment above -- same reason this needs faking here too.
+    monkeypatch.setattr(mw, "detect_project_type_from_set", lambda path, idx: "stereo")
 
     window = MainWindow()
     qtbot.addWidget(window)
@@ -992,6 +1063,159 @@ def test_dual_planar_extraction_failure_shows_status_and_does_not_crash(qtbot, m
 
     assert not window.project_panel.dual_camera_check.isChecked()
     assert "boom" in window.statusBar().currentMessage()
+
+
+# ---- Task 1: auto-detect project type (planar/stereo/dual-planar) from
+# the .set itself, instead of requiring the Mode radio to be guessed
+# correctly BEFORE selection -- see main_window._on_input_path_changed
+# and davis_set.detect_project_type_from_set. ----
+
+REAL_DUAL_PLANAR_SET = r"D:\Truck_PIV_Round4\Loaded_CFD_Truck\X_150_mm_Y_0_mm.set"
+REAL_STEREO_SET = (
+    r"J:\Final_Stereo\Swirl\On Time=0.7_Burst On Time=0.0_Burst Off Time=0.0.set"
+)
+REAL_PLAIN_PLANAR_SET = (
+    r"C:\Users\Germiel\Downloads\PIV_COMP\PIV_COMP\Lavision_Sample"
+    r"\PIV_MP(3x32x32_75%ov_ImgCorr).set"
+)
+
+
+def test_auto_detect_selects_stereo_radio_when_set_is_stereo(qtbot, monkeypatch, tmp_path):
+    import piv_suite_gui.main_window as mw
+
+    set_path = tmp_path / "recording.set"
+    set_path.write_text("")
+    monkeypatch.setattr(mw, "detect_project_type_from_set", lambda path, idx: "stereo")
+    # stereo calibration extraction itself isn't under test here -- just
+    # keep it from raising and being noisy in the status bar.
+    monkeypatch.setattr(mw, "read_stereo_calibration_from_set",
+                         lambda path, idx: _fake_stereo_settings())
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    assert window.project_panel.planar_radio.isChecked()  # default, before selection
+
+    window.project_panel.input_path_edit.setText(str(set_path))
+    window.project_panel.input_path_edit.editingFinished.emit()
+
+    assert window.project_panel.stereo_radio.isChecked()
+    assert not window.project_panel.planar_radio.isChecked()
+
+
+def test_auto_detect_selects_planar_radio_and_checks_dual_camera_when_set_is_dual_planar(
+        qtbot, monkeypatch, tmp_path):
+    import piv_suite_gui.main_window as mw
+    from piv_suite.config.schema import DualPlanarSettings
+
+    set_path = tmp_path / "recording.set"
+    set_path.write_text("")
+    monkeypatch.setattr(mw, "detect_project_type_from_set", lambda path, idx: "dual_planar")
+    monkeypatch.setattr(mw, "detect_dual_planar_from_set", lambda path, idx: True)
+    monkeypatch.setattr(mw, "read_dual_planar_calibration_from_set",
+                         lambda path, idx: DualPlanarSettings(enabled=True))
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.project_panel.stereo_radio.setChecked(True)  # deliberately wrong prior guess
+
+    window.project_panel.input_path_edit.setText(str(set_path))
+    window.project_panel.input_path_edit.editingFinished.emit()
+
+    assert window.project_panel.planar_radio.isChecked()
+    assert not window.project_panel.stereo_radio.isChecked()
+    assert window.project_panel.dual_camera_check.isChecked()
+
+
+def test_auto_detect_falls_back_to_planar_when_nothing_recognized(qtbot, tmp_path):
+    # No monkeypatching of detect_project_type_from_set at all here -- the
+    # REAL function runs against a bare .set with no Properties/
+    # Calibration tree at all, which must fall back to "planar" (the
+    # existing, unchanged default), never raise.
+    set_path = tmp_path / "recording.set"
+    set_path.write_text("")
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.project_panel.stereo_radio.setChecked(True)  # wrong prior guess again
+
+    window.project_panel.input_path_edit.setText(str(set_path))
+    window.project_panel.input_path_edit.editingFinished.emit()
+
+    assert window.project_panel.planar_radio.isChecked()
+    assert not window.project_panel.stereo_radio.isChecked()
+
+
+def test_auto_detect_does_not_fight_a_later_manual_mode_override(qtbot, monkeypatch, tmp_path):
+    # The whole point of "still user-overridable afterward": once
+    # auto-detection has run for a given path selection, a SUBSEQUENT
+    # manual Mode-radio flip must stick -- not get silently reverted back
+    # to the auto-detected guess. Regression test for the specific
+    # re-entrancy trap this feature could have introduced (see main_window
+    # ._extract_calibration_for_current_mode's docstring): the mode-toggle
+    # connection must call the current-mode-only extraction helper, not
+    # re-trigger _on_input_path_changed's auto-detection step.
+    import piv_suite_gui.main_window as mw
+
+    set_path = tmp_path / "recording.set"
+    set_path.write_text("")
+    monkeypatch.setattr(mw, "detect_project_type_from_set", lambda path, idx: "planar")
+    monkeypatch.setattr(mw, "read_stereo_calibration_from_set",
+                         lambda path, idx: _fake_stereo_settings())
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.project_panel.input_path_edit.setText(str(set_path))
+    window.project_panel.input_path_edit.editingFinished.emit()
+    assert window.project_panel.planar_radio.isChecked()  # auto-detected planar
+
+    window.project_panel.stereo_radio.setChecked(True)  # user overrides by hand afterward
+
+    assert window.project_panel.stereo_radio.isChecked()  # must stick
+    assert not window.project_panel.planar_radio.isChecked()
+
+
+@pytest.mark.skipif(not os.path.exists(REAL_DUAL_PLANAR_SET),
+                     reason="real dual-camera planar project not available on this machine")
+def test_auto_detect_real_truck_project_selects_planar_and_dual_camera(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.project_panel.stereo_radio.setChecked(True)  # deliberately wrong prior guess
+
+    window.project_panel.input_path_edit.setText(REAL_DUAL_PLANAR_SET)
+    window.project_panel.input_path_edit.editingFinished.emit()
+
+    assert window.project_panel.planar_radio.isChecked()
+    assert not window.project_panel.stereo_radio.isChecked()
+    assert window.project_panel.dual_camera_check.isChecked()
+
+
+@pytest.mark.skipif(not os.path.exists(REAL_STEREO_SET),
+                     reason="real stereo project not available on this machine")
+def test_auto_detect_real_swirl_project_selects_stereo(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    assert window.project_panel.planar_radio.isChecked()  # default, before selection
+
+    window.project_panel.input_path_edit.setText(REAL_STEREO_SET)
+    window.project_panel.input_path_edit.editingFinished.emit()
+
+    assert window.project_panel.stereo_radio.isChecked()
+    assert not window.project_panel.planar_radio.isChecked()
+
+
+@pytest.mark.skipif(not os.path.exists(REAL_PLAIN_PLANAR_SET),
+                     reason="real single-camera planar project not available on this machine")
+def test_auto_detect_real_plain_planar_project_stays_planar(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.project_panel.stereo_radio.setChecked(True)  # deliberately wrong prior guess
+
+    window.project_panel.input_path_edit.setText(REAL_PLAIN_PLANAR_SET)
+    window.project_panel.input_path_edit.editingFinished.emit()
+
+    assert window.project_panel.planar_radio.isChecked()
+    assert not window.project_panel.stereo_radio.isChecked()
+    assert not window.project_panel.dual_camera_check.isChecked()
 
 
 def test_calibration_labels_use_math_notation(qtbot):

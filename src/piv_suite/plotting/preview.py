@@ -3,13 +3,35 @@ piv_common.preview_first_snapshot()'s blocking terminal y/N prompt with a
 figure the GUI's preview_panel can embed (FigureCanvasQTAgg) and let the
 user approve/re-tweak-and-re-preview before committing to a batch run.
 
-Unlike the batch run's per-pair saved plots (plotting.planar/plotting.stereo,
-a fixed quiver-only figure), the preview figure supports the GUI's
-configurable view: per-component (U, V, and W for stereo) filled contours
-with auto or manually-scaled colorbars, an optional vector overlay, and a
-choice of colormap -- since a single preview is looked at interactively
-this can afford to be heavier/more informative than the plot saved for
-every pair of a large batch.
+Renders a SINGLE velocity-magnitude field (sqrt(u**2+v**2), or
+sqrt(u**2+v**2+w**2) when a stereo w is given) rather than the previous
+one-subplot-per-component layout -- magnitude ("does this flow look
+physically sane") is what a sanity-check preview is actually for, and
+per-component subplots with independent manual color ranges never earned
+their UI complexity here. The presentation is fixed, not user-
+configurable: the filled contour is always on (there's nothing else TO
+turn off once there's only one field to show), it's always auto-scaled
+to that field's own min/max (comparing pairs on a pinned scale was never
+actually exercised), and the colormap is hard-coded to "turbo" (a
+perceptually-uniform sequential map, right for a magnitude/speed field
+the way a diverging map is right for a signed single component -- not a
+meaningful per-user choice any more with only one field). The one thing
+still toggleable is an optional (u, v) quiver overlay -- see
+preview_panel.py for why it's only enabled once a real preview result
+exists to draw it on top of.
+
+units labels the colorbar explicitly (e.g. "m/s" or "px/frame") instead
+of assuming -- a correctly-computed m/s field with an unlabeled colorbar
+reads as "these numbers look wrong" even when they aren't, which is very
+plausibly what actually prompted a real "the preview units look
+incorrect" report before this label existed at all. See
+preview_panel.py's _compute_planar/_compute_dual_planar/_compute_stereo
+for how `units` is decided from whether real calibration was available.
+
+Unlike the batch run's per-pair saved plots (plotting.planar/
+plotting.stereo, a fixed quiver-only figure), this can afford a heavier
+single interactive render since only one pair (or one averaged range,
+see preview_panel.py's _compute_range) is ever shown at a time.
 
 The CLI keeps the original terminal-prompt behavior (piv_suite.cli.main
 calls preview_first_snapshot_cli, not this module) since there's no GUI
@@ -25,49 +47,57 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# A short, GUI-facing list of colormaps that are meaningful for signed
-# velocity data (diverging) as well as speed/magnitude-like data
-# (sequential) -- not matplotlib's entire registry, which is mostly noise
-# for this use case.
-AVAILABLE_COLORMAPS = ["viridis", "plasma", "turbo", "jet", "coolwarm", "RdBu", "seismic"]
-
-_COMPONENT_LABELS = {"U": "U", "V": "V", "W": "W (out-of-plane)"}
+# Hard-coded, not a GUI choice any more -- see this module's docstring.
+MAGNITUDE_CMAP = "turbo"
 
 
-def _resolve_range(masked_data, vrange):
-    """vrange is (vmin, vmax), either entry possibly None for "auto from
-    data". Returns a concrete (vmin, vmax), falling back to (0, 1) if
-    there's no valid data at all to auto-scale from."""
-    vmin, vmax = vrange if vrange is not None else (None, None)
-    if vmin is None or vmax is None:
-        finite = masked_data.compressed()
-        auto_min = float(finite.min()) if finite.size else 0.0
-        auto_max = float(finite.max()) if finite.size else 1.0
-        vmin = auto_min if vmin is None else vmin
-        vmax = auto_max if vmax is None else vmax
+def _auto_range(masked_data):
+    """(vmin, vmax) auto-scaled from masked_data's own valid values.
+    Magnitude is never negative so this can't invert the way a signed
+    component's range could, but still needs a fallback for "no valid
+    data at all" (every cell rejected) and a nudge for contourf's own
+    zero-width-level-range rejection when every valid cell is identical."""
+    finite = masked_data.compressed()
+    vmin = float(finite.min()) if finite.size else 0.0
+    vmax = float(finite.max()) if finite.size else 1.0
     if vmin >= vmax:
-        vmax = vmin + 1e-9  # contourf rejects a zero-width/inverted level range
+        vmax = vmin + 1e-9
     return vmin, vmax
 
 
-def _plot_component(ax, x, y, data, valid, name, show_contour, show_vectors,
-                     cmap, vrange, quiver_u, quiver_v, quiver_scale):
-    masked = np.ma.masked_where(~valid, data)
-    if show_contour:
-        vmin, vmax = _resolve_range(masked, vrange)
-        levels = np.linspace(vmin, vmax, 21)
-        cs = ax.contourf(x, y, masked, levels=levels, cmap=cmap, extend="both")
-        ax.figure.colorbar(cs, ax=ax, label=_COMPONENT_LABELS.get(name, name))
+def make_preview_figure(mode, x, y, u, v, valid, title, w=None, units="m/s",
+                         show_vectors=False, quiver_scale=1000):
+    """Build (not save/show) a matplotlib Figure showing ONE velocity-
+    magnitude field for the GUI to embed directly. mode is "planar" or
+    "stereo" -- used only to label the axes (stereo's grid is DaVis's
+    dewarped "world px" canvas; planar's is the raw frame's own pixel
+    grid), not to branch the plotting logic itself the way the previous
+    per-component version did.
+
+    magnitude = sqrt(u**2+v**2), or sqrt(u**2+v**2+w**2) when w is given
+    (stereo's 3-component result) -- w=None vs w=array IS the planar/
+    stereo distinction for the actual math, matching what the caller has
+    on hand; `mode` only affects the axis label text.
+
+    show_vectors overlays a quiver of the in-plane (u, v) direction on
+    top of the magnitude contour -- always ON TOP, never an alternative
+    to it (there's no contour-off mode any more; magnitude IS the plot)."""
+    magnitude = np.sqrt(u**2 + v**2) if w is None else np.sqrt(u**2 + v**2 + w**2)
+    masked = np.ma.masked_where(~valid, magnitude)
+    vmin, vmax = _auto_range(masked)
+    levels = np.linspace(vmin, vmax, 21)
+
+    fig, ax = plt.subplots(figsize=(7, 6))
+    cs = ax.contourf(x, y, masked, levels=levels, cmap=MAGNITUDE_CMAP, extend="both")
+    fig.colorbar(cs, ax=ax, label=f"|V| ({units})")
     if show_vectors:
-        # black-on-contour reads clearly against any of AVAILABLE_COLORMAPS;
-        # red-on-blank matches the batch-run quiver plots' look when
-        # contours are off.
-        color = "black" if show_contour else "red"
-        ax.quiver(x[valid], y[valid], quiver_u[valid], quiver_v[valid], color=color, scale=quiver_scale)
-    ax.set_title(_COMPONENT_LABELS.get(name, name))
+        ax.quiver(x[valid], y[valid], u[valid], v[valid], color="black", scale=quiver_scale)
+    axlabel = ("x (world px)", "y (world px)") if mode == "stereo" else ("pixels", "pixels")
+    ax.set_xlabel(axlabel[0])
+    ax.set_ylabel(axlabel[1])
     # NOT ax.invert_yaxis() -- see plotting/planar.py's make_planar_figure
-    # for the full account (same root cause, same fix, all three plotting
-    # modules shared this bug). `y` already comes flipped out of
+    # for the full account (same root cause, same fix, every plotting
+    # module shares this). `y` already comes flipped out of
     # engines.cpu_engine/gpu_engine (row 0, the image's physical top,
     # gets the LARGEST y value) specifically so it renders correctly
     # under matplotlib's default axis orientation; inverting again here
@@ -77,33 +107,6 @@ def _plot_component(ax, x, y, data, valid, name, show_contour, show_vectors,
     # a user comparing this preview against a real DaVis render of the
     # same data (the flow pattern looked structurally right but
     # vertically mirrored).
-
-
-def make_preview_figure(mode, x, y, u, v, valid, title, w=None, quiver_scale=1000,
-                         show_contour=True, show_vectors=False, cmap="viridis", ranges=None):
-    """Build (not save/show) a matplotlib Figure for one pair, for the GUI
-    to embed directly. mode is "planar" or "stereo".
-
-    show_contour/show_vectors can both be on at once (vectors drawn on
-    top of the contour) or both off (an empty-but-labeled axes -- the
-    caller's status label still reports the numeric summary).
-    `ranges` is an optional {"U"/"V"/"W": (vmin, vmax)} dict; either side
-    of a tuple, or the whole entry, may be None for "auto-scale from this
-    pair's data" (the default when `ranges` itself is None).
-    """
-    ranges = ranges or {}
-    components = [("U", u), ("V", v)]
-    if mode == "stereo" and w is not None:
-        components.append(("W", w))
-
-    n = len(components)
-    fig, axes = plt.subplots(1, n, figsize=(6 * n, 5), squeeze=False)
-    axlabel = ("x (world px)", "y (world px)") if mode == "stereo" else ("pixels", "pixels")
-    for ax, (name, data) in zip(axes[0], components):
-        _plot_component(ax, x, y, data, valid, name, show_contour, show_vectors,
-                         cmap, ranges.get(name), u, v, quiver_scale)
-        ax.set_xlabel(axlabel[0])
-        ax.set_ylabel(axlabel[1])
     fig.suptitle(title)
     fig.tight_layout()
     return fig

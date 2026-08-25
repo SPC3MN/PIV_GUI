@@ -733,6 +733,55 @@ def _read_field_of_view(calibration_xml_path):
     return cs.attrib.get("FieldOfView") if cs is not None else None
 
 
+def detect_project_type_from_set(set_path, multiset_index=0):
+    """Best-effort: which acquisition geometry does this DaVis .set
+    project's OWN calibration describe -- "planar" (plain single-camera,
+    the existing default), "stereo" (two angled cameras triangulated into
+    3-component U/V/W, CoordinateSystem/@FieldOfView ==
+    "SideBySideStereoVolume" on a real project), or "dual_planar" (two
+    COPLANAR cameras stitched into one wider planar field, FieldOfView ==
+    "SideBySide2D", config.schema.DualPlanarSettings -- same signal
+    detect_dual_planar_from_set already checks)?
+
+    Used purely to steer the GUI's Mode radio (and, via the separate,
+    already-existing detect_dual_planar_from_set call, the "Dual camera"
+    checkbox) the moment a .set is selected -- instead of requiring the
+    user to correctly guess Planar vs Stereo mode BEFORE selecting a
+    project, which is what made calibration auto-extraction only ever
+    look in the right place by accident. Matches detect_dual_planar_
+    from_set's own contract exactly: never raises, always returns a
+    definite answer, falling back to "planar" (the existing, unchanged
+    default) for anything it can't positively identify -- no calibration
+    found, a single-camera project, or a FieldOfView value that's neither
+    of the two recognized ones -- since a wrong initial guess here just
+    means the user picks the right radio themselves, same as every other
+    auto-extracted/auto-guessed field in this app.
+
+    Deliberately does NOT try to distinguish "genuinely no calibration"
+    from "unrecognized FieldOfView" -- both collapse to "planar" here,
+    since a real angled-stereo/dual-planar project always writes one of
+    the two recognized values (confirmed against real projects of both
+    kinds, see read_stereo_calibration_from_set's docstring) and nothing
+    else meaningfully implies either one."""
+    project_root = _find_calibration_project_root(set_path)
+    if project_root is None:
+        return "planar"
+    recording_dt = _read_set_time(set_path)
+    snapshot_dir, _ = _select_calibration_snapshot(project_root, recording_dt)
+    calibration_xml = os.path.join(snapshot_dir, "Calibration.xml")
+    if not os.path.isfile(calibration_xml):
+        return "planar"
+    try:
+        field_of_view = _read_field_of_view(calibration_xml)
+    except ET.ParseError:
+        return "planar"
+    if field_of_view == "SideBySide2D":
+        return "dual_planar"
+    if field_of_view == "SideBySideStereoVolume":
+        return "stereo"
+    return "planar"
+
+
 def detect_dual_planar_from_set(set_path, multiset_index=0):
     """Best-effort: does this DaVis .set project's calibration say
     FieldOfView="SideBySide2D" (two coplanar cameras stitched into one

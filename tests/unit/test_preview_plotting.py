@@ -1,11 +1,12 @@
-"""Regression tests for plotting/preview.py's configurable preview figure
--- per-component contours, optional vector overlay, and manual color-range
-overrides. No Qt/GUI needed, matplotlib alone (Agg backend, set in the
-module under test)."""
+"""Regression tests for plotting/preview.py's single-magnitude-field
+preview figure -- auto-scaled colorbar (labeled with real units), optional
+vector overlay, hard-coded colormap. No Qt/GUI needed, matplotlib alone
+(Agg backend, set in the module under test)."""
 
 import numpy as np
+from matplotlib.quiver import Quiver
 
-from piv_suite.plotting.preview import _resolve_range, make_preview_figure
+from piv_suite.plotting.preview import MAGNITUDE_CMAP, _auto_range, make_preview_figure
 
 
 def _planar_field(nx=5, ny=4):
@@ -24,7 +25,7 @@ def test_preview_does_not_double_flip_y_orientation():
     # gpu_engine already flip y into a convention where the image's
     # physical TOP row gets the LARGEST y value (specifically so it
     # renders correctly under matplotlib's default, non-inverted y-axis
-    # orientation) -- _plot_component used to call ax.invert_yaxis() on
+    # orientation) -- the plotting code used to call ax.invert_yaxis() on
     # top of that, flipping a second time. This builds a field with an
     # unambiguous marker at the LARGEST y (standing in for the image's
     # physical top, per that convention) and checks it renders in the
@@ -36,12 +37,9 @@ def test_preview_does_not_double_flip_y_orientation():
     v[-1, :] = 100.0  # marker at the LARGEST y (last grid row)
     valid = np.ones((ny, nx), dtype=bool)
 
-    fig = make_preview_figure("planar", x, y, u, v, valid, title="t",
-                               show_contour=True, show_vectors=False)
-    # Locate the V axes by its title rather than assuming a fixed index
-    # (colorbar axes are interleaved among the data axes).
-    v_axes = next(ax for ax in fig.axes if ax.get_title() == "V")
-    ylim = v_axes.get_ylim()
+    fig = make_preview_figure("planar", x, y, u, v, valid, title="t")
+    data_axes = fig.axes[0]
+    ylim = data_axes.get_ylim()
     # NOT inverted: get_ylim()[0] (bottom of the displayed axes) must be
     # the SMALLER data value, matching matplotlib's default orientation
     # (larger y plotted higher) -- an inverted axes would report ylim
@@ -53,55 +51,77 @@ def test_preview_does_not_double_flip_y_orientation():
     )
 
 
-def test_planar_defaults_produce_two_axes_with_contours_no_vectors():
+def test_default_produces_one_data_axes_and_one_colorbar():
     x, y, u, v, valid = _planar_field()
     fig = make_preview_figure("planar", x, y, u, v, valid, title="t")
-    axes = fig.axes
-    # 2 data axes (U, V) + 1 colorbar axes each = 4
-    assert len(axes) == 4
-    # a contourf collection exists (indirect: the axes have QuadContourSet
-    # collections) but simplest reliable signal is that colorbars were
-    # created, i.e. figure has more axes than just the 2 data ones.
-    assert len(fig.axes) > 2
-
-
-def test_stereo_adds_a_third_w_axes():
-    x, y, u, v, valid = _planar_field()
-    w = u + v
-    fig_planar = make_preview_figure("planar", x, y, u, v, valid, title="t")
-    fig_stereo = make_preview_figure("stereo", x, y, u, v, valid, title="t", w=w)
-    assert len(fig_stereo.axes) > len(fig_planar.axes)
-
-
-def test_vectors_only_no_contour_has_no_colorbar_axes():
-    x, y, u, v, valid = _planar_field()
-    fig = make_preview_figure("planar", x, y, u, v, valid, title="t",
-                               show_contour=False, show_vectors=True)
-    # exactly 2 axes (U, V) -- no colorbar axes since contours are off
+    # 1 data axes + 1 colorbar axes -- a single magnitude field, not one
+    # subplot per component the way the previous version had.
     assert len(fig.axes) == 2
 
 
-def test_manual_range_overrides_auto_scale():
-    # data's own min/max is 0..3 (see _planar_field) -- a manual range
-    # must win over that, not just clamp/ignore it.
-    data = np.ma.masked_array(np.arange(4, dtype=float), mask=False)
-    assert _resolve_range(data, (-10, 10)) == (-10, 10)
-    assert _resolve_range(data, None) == (0.0, 3.0)
-    assert _resolve_range(data, (-10, None)) == (-10, 3.0)
-    assert _resolve_range(data, (None, 10)) == (0.0, 10)
-
-
-def test_manual_range_is_used_by_the_built_figure():
+def test_magnitude_is_planar_pythagorean_when_no_w_given():
     x, y, u, v, valid = _planar_field()
-    fig = make_preview_figure("planar", x, y, u, v, valid, title="t",
-                               ranges={"U": (-10, 10)})
+    fig = make_preview_figure("planar", x, y, u, v, valid, title="t")
     cs = fig.axes[0].collections[0] if fig.axes[0].collections else fig.axes[0]._children[0]
-    assert cs.get_clim() == (-10, 10)
+    expected_max = float(np.sqrt(u**2 + v**2).max())
+    assert cs.get_clim()[1] == expected_max
+
+
+def test_magnitude_includes_w_for_stereo():
+    x, y, u, v, valid = _planar_field()
+    w = np.full_like(u, 3.0)  # constant w so the 3-component sum is easy to check by hand
+    fig_planar = make_preview_figure("planar", x, y, u, v, valid, title="t")
+    fig_stereo = make_preview_figure("stereo", x, y, u, v, valid, title="t", w=w)
+    cs_planar = fig_planar.axes[0].collections[0]
+    cs_stereo = fig_stereo.axes[0].collections[0]
+    # adding a nonzero w must increase the magnitude's max -- confirms w
+    # is actually folded into sqrt(u**2+v**2+w**2), not silently ignored.
+    assert cs_stereo.get_clim()[1] > cs_planar.get_clim()[1]
+    expected_max = float(np.sqrt(u**2 + v**2 + w**2).max())
+    assert cs_stereo.get_clim()[1] == expected_max
+
+
+def test_colormap_is_hard_coded_to_turbo():
+    x, y, u, v, valid = _planar_field()
+    fig = make_preview_figure("planar", x, y, u, v, valid, title="t")
+    cs = fig.axes[0].collections[0] if fig.axes[0].collections else fig.axes[0]._children[0]
+    assert cs.get_cmap().name == "turbo" == MAGNITUDE_CMAP
+
+
+def test_colorbar_label_includes_units():
+    x, y, u, v, valid = _planar_field()
+    fig_ms = make_preview_figure("planar", x, y, u, v, valid, title="t", units="m/s")
+    fig_px = make_preview_figure("planar", x, y, u, v, valid, title="t", units="px/frame")
+    # the colorbar axes is whichever one isn't the data axes (index 0)
+    assert "m/s" in fig_ms.axes[1].get_ylabel()
+    assert "px/frame" in fig_px.axes[1].get_ylabel()
+
+
+def test_vectors_toggle_adds_a_quiver_without_extra_axes():
+    x, y, u, v, valid = _planar_field()
+    fig_off = make_preview_figure("planar", x, y, u, v, valid, title="t", show_vectors=False)
+    fig_on = make_preview_figure("planar", x, y, u, v, valid, title="t", show_vectors=True)
+    assert not any(isinstance(c, Quiver) for c in fig_off.axes[0].get_children())
+    assert any(isinstance(c, Quiver) for c in fig_on.axes[0].get_children())
+    # the contour (and its colorbar) is always there regardless -- there's
+    # no "contours off" mode any more, magnitude IS the plot.
+    assert len(fig_off.axes) == len(fig_on.axes) == 2
+
+
+def test_auto_range_scales_to_data_min_max():
+    data = np.ma.masked_array(np.arange(4, dtype=float), mask=False)
+    assert _auto_range(data) == (0.0, 3.0)
+
+
+def test_auto_range_falls_back_when_everything_is_masked():
+    data = np.ma.masked_array(np.zeros(4), mask=True)
+    vmin, vmax = _auto_range(data)
+    assert vmin == 0.0
+    assert vmax > vmin  # contourf rejects a zero-width level range
 
 
 def test_empty_valid_mask_does_not_raise():
     x, y, u, v, valid = _planar_field()
     valid[:] = False
-    fig = make_preview_figure("planar", x, y, u, v, valid, title="t",
-                               show_contour=True, show_vectors=True)
-    assert len(fig.axes) >= 2
+    fig = make_preview_figure("planar", x, y, u, v, valid, title="t", show_vectors=True)
+    assert len(fig.axes) == 2
