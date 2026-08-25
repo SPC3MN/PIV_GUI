@@ -46,6 +46,105 @@ unblocks immediately and observes cancel_event for itself.
 import threading
 
 
+def reap_executor_workers(executor, pids_before, timeout=2.0):
+    """Guarantee every worker process `executor` ever spawned is actually
+    GONE (not just told to shut down) before this returns, bounded by
+    `timeout` total -- not `executor.shutdown(wait=True)`, which can hang
+    indefinitely, and not bare `shutdown(wait=False)` either, which
+    returns immediately without confirming anything actually exited.
+
+    THE BUG THIS FIXES: found via real testing, not code review -- three
+    separate full test-suite runs (which construct many ProcessPoolExecutor
+    pools across parallel_planar.py's and parallel_stereo.py's own tests)
+    each finished their actual test output (pytest's own summary line
+    printed, correct pass/fail counts) in under 100s, but the PYTHON
+    PROCESS ITSELF then sat alive, at 0% CPU, for over an HOUR before
+    being killed manually. `executor.shutdown(wait=False, ...)` (used in
+    both modules' cancellation-path `finally` blocks, reasoned there as
+    "workers are already dead or already killed either way, no reason to
+    block") sends worker processes their shutdown signal but does NOT
+    confirm they actually exit before the calling function returns -- on
+    Windows (spawn-based multiprocessing, which this app targets), a
+    worker that doesn't cleanly notice its call-queue sentinel can be
+    left alive indefinitely. Every one of those lingering processes stays
+    registered in stdlib multiprocessing's own global active_children()
+    list, which the interpreter's `atexit` finalizer (multiprocessing.
+    util._exit_function) tries to join before the process is allowed to
+    actually exit -- explaining exactly the observed symptom: real test
+    work finishes fast, but the interpreter itself never gets to leave.
+
+    This joins each of `executor`'s own worker processes with a share of
+    `timeout`, then hard `.terminate()`s (and joins, briefly) anything
+    still alive after that -- so by the time this returns, `executor` has
+    provably left nothing behind, regardless of whether shutdown()'s own
+    signal was received cleanly or not. Safe to call after `shutdown()`
+    (idempotent on an already-dead process) or in place of relying on
+    `shutdown(wait=True)` alone.
+
+    `pids_before` is the set of `p.pid for p in multiprocessing.
+    active_children()` captured by the CALLER right when its executor was
+    created (before this pool spawned any worker of its own) -- see below
+    for why this, and not `executor._processes` alone, is needed.
+
+    Reads BOTH `executor._processes` (polled a few times over a short
+    window, not just once) AND stdlib `multiprocessing.active_children()`
+    filtered to pids NOT in `pids_before` (i.e. processes that appeared
+    DURING this executor's lifetime and therefore are, with high
+    confidence, this pool's own workers even if `_processes` itself never
+    captured them).
+
+    Both halves are needed, found via real, reproducible testing:
+    - `executor._processes`-only reaping left one specific worker alive
+      for minutes after every test run: ProcessPoolExecutor spawns
+      workers LAZILY (_adjust_process_count(), called from submit()), so
+      a worker whose OS process was created a moment ago but hasn't been
+      inserted into `_processes` yet at the exact instant this function's
+      first read happens is invisible to a single-snapshot read.
+    - Sweeping ALL of `active_children()` unconditionally (no
+      `pids_before` filter) fixed that but caused real collateral damage:
+      a DIFFERENT, still-legitimately-running pool's worker (pre-existing
+      before this call, unrelated to it) got caught by the same
+      unconditional sweep and killed mid-task, corrupting its shared
+      call_queue out from under it (observed directly: 'handle is
+      closed' / garbled-unpickle crashes on an otherwise-valid, unrelated
+      pair). Filtering to pids NOT in `pids_before` keeps the "catch a
+      lazily-spawned straggler" benefit while never touching a process
+      that already existed before this executor did."""
+    import multiprocessing
+    import time
+    # ProcessPoolExecutor sets self._processes = None (not "leaves it
+    # unset") once shutdown() has fully torn down its worker-management
+    # state -- getattr(..., {}) alone doesn't help, since the ATTRIBUTE
+    # exists (as None), so the fallback default never kicks in. Found via
+    # a real crash: `executor.shutdown(wait=False, ...)` immediately
+    # before this call can race ahead of THIS function reading
+    # `_processes`, on a pool that already finished shutting down.
+    deadline = time.monotonic() + timeout
+    by_pid = {}
+    for _ in range(5):  # a handful of quick re-reads catches a lazily-spawned straggler
+        for p in (getattr(executor, "_processes", None) or {}).values():
+            by_pid.setdefault(p.pid, p)
+        for p in multiprocessing.active_children():
+            if p.pid not in pids_before:
+                by_pid.setdefault(p.pid, p)
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    processes = list(by_pid.values())
+    if not processes:
+        return
+    for process in processes:
+        remaining = max(0.0, deadline - time.monotonic())
+        process.join(timeout=remaining)
+    for process in processes:
+        if process.is_alive():
+            try:
+                process.terminate()
+            except Exception:
+                pass
+            process.join(timeout=1.0)
+
+
 def kill_executor_workers(executor):
     """Hard-terminate every live worker process in `executor` RIGHT NOW.
     Whatever pair each was mid-processing is abandoned entirely -- there

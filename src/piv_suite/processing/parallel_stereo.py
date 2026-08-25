@@ -87,7 +87,7 @@ from ..engines._openpiv_speedups import apply_speedups
 from ..engines.registry import get_engine_factory
 from ..plotting.stereo import plot_and_save_stereo
 from . import pipeline
-from ._parallel_cancel import start_cancel_poller
+from ._parallel_cancel import reap_executor_workers, start_cancel_poller
 from .preprocess import apply_preprocess_pair
 
 # Process-local caches -- persist across tasks within the SAME worker
@@ -282,6 +282,12 @@ def run_stereo_batch_parallel(pair_source, cfg, output_dir, angles, n_workers,
         if on_pair_finished is not None:
             on_pair_finished(pair_id, result)
 
+    # Captured BEFORE this executor spawns any worker of its own --
+    # reap_executor_workers uses this to safely catch a lazily-spawned
+    # straggler this pool's own _processes dict missed, without ever
+    # touching a DIFFERENT, pre-existing pool's still-legitimate worker.
+    import multiprocessing
+    pids_before = {p.pid for p in multiprocessing.active_children()}
     executor = ProcessPoolExecutor(max_workers=n_workers, initializer=_worker_init, initargs=(cfg,))
     poll_thread, poll_stop = start_cancel_poller(cancel_check, executor, cancel_event, semaphore, n_workers)
     try:
@@ -327,8 +333,12 @@ def run_stereo_batch_parallel(pair_source, cfg, output_dir, angles, n_workers,
         if poll_thread is not None:
             poll_thread.join(timeout=1.0)
         # wait=False: workers are already dead (normal completion) or
-        # already killed (cancellation) by this point either way.
+        # already killed (cancellation) by this point either way. But
+        # shutdown(wait=False) alone doesn't CONFIRM they actually
+        # exited -- see reap_executor_workers's docstring (parallel_
+        # planar.py's identical fix) for the real hang this caused.
         executor.shutdown(wait=False, cancel_futures=True)
+        reap_executor_workers(executor, pids_before)
 
     ordered = [results[idx] for idx in sorted(results)]
     return ordered, cancel_event.is_set()

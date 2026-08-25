@@ -44,7 +44,7 @@ from ..engines._openpiv_speedups import apply_speedups
 from ..engines.registry import get_engine_factory
 from ..plotting.planar import plot_and_save_planar
 from . import pipeline
-from ._parallel_cancel import start_cancel_poller
+from ._parallel_cancel import reap_executor_workers, start_cancel_poller
 from .postprocess import apply_calibration
 from .preprocess import apply_preprocess_pair
 
@@ -254,6 +254,12 @@ def run_planar_batch_parallel(pair_source, cfg, output_dir, n_workers,
         if on_pair_finished is not None:
             on_pair_finished(pair_id, result)
 
+    # Captured BEFORE this executor spawns any worker of its own --
+    # reap_executor_workers uses this to safely catch a lazily-spawned
+    # straggler this pool's own _processes dict missed, without ever
+    # touching a DIFFERENT, pre-existing pool's still-legitimate worker.
+    import multiprocessing
+    pids_before = {p.pid for p in multiprocessing.active_children()}
     executor = ProcessPoolExecutor(max_workers=n_workers, initializer=_worker_init)
     poll_thread, poll_stop = start_cancel_poller(cancel_check, executor, cancel_event, semaphore, n_workers)
     try:
@@ -300,8 +306,13 @@ def run_planar_batch_parallel(pair_source, cfg, output_dir, n_workers,
             poll_thread.join(timeout=1.0)
         # wait=False: workers are already dead (normal completion) or
         # already killed (cancellation) by this point either way -- no
-        # reason to block shutdown() on anything.
+        # reason to block shutdown() on anything. But shutdown(wait=False)
+        # alone doesn't CONFIRM they actually exited -- see
+        # reap_executor_workers's docstring for the real hang this caused
+        # (worker processes lingering past this function's return, only
+        # surfacing as the whole interpreter refusing to exit later).
         executor.shutdown(wait=False, cancel_futures=True)
+        reap_executor_workers(executor, pids_before)
 
     ordered = [results[idx] for idx in sorted(results)]
     return ordered, cancel_event.is_set()
