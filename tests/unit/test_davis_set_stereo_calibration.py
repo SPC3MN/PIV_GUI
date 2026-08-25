@@ -1,27 +1,58 @@
 """Tests for davis_set.py's stereo dewarp calibration auto-extraction.
 
-The core design choice this file locks in: rather than parsing DaVis's own
-Calibration.xml CoefficientsA/CoefficientsB (confirmed, empirically, not to
-match CameraMapping's convention under any forward/backward/factor-of-2
-variant tried -- a flexible affine-transform search DID get an
-excellent-looking fit, but failed a hold-out test against the SAME
-camera's own second Z-plane, proving it was overfitting, not a real
-decode), extraction fits CameraMapping's OWN, UNCHANGED polynomial
+SECOND ATTEMPT'S OUTCOME (this file's current design): the FIRST parse
+attempt at DaVis's own Calibration.xml CoefficientsA/CoefficientsB
+(confirmed, empirically, not to match CameraMapping's convention under
+any forward/backward/factor-of-2 variant tried against an ARBITRARY
+'world pixel = world_mm * px_per_mm' grid -- a flexible affine-transform
+search DID get an excellent-looking fit, but failed a hold-out test
+against the SAME camera's own second Z-plane, proving it was
+overfitting) was superseded by fitting CameraMapping's OWN polynomial
 directly from MarkPositionTable.xml's real raw-pixel<->world-mm ground
-truth. The synthetic tests below construct marks the same way -- by
-generating raw positions FROM known CameraMapping parameters -- so the fit
-can be checked against exact, known-correct coefficients without needing
-real DaVis data.
+truth instead (_fit_camera_mapping_planes, still here, still tested
+below -- kept as a standalone utility, no longer wired into
+read_stereo_calibration_from_set's automatic path, see next paragraph).
 
-A second real-data finding, caught during manual GUI testing (not by any
-test below at the time): DaVis writes BYTE-IDENTICAL MarkPositionTable.xml
-files into both camera1/ and camera2/ folders for every calibration
-snapshot in the real project this was built against -- confirmed with a
-plain diff, and even the file's own internal <Camera CameraNumber="1">
-tag stays "1" inside camera2's copy. Fitting from it would silently
-produce IDENTICAL dewarp coefficients for both cameras. Extraction now
-detects this (_files_are_identical) and refuses rather than doing that --
-see test_read_stereo_calibration_from_real_swirl_set_refuses_duplicate_marks.
+A THIRD attempt (the one that actually cracked exact extraction) found
+that CoefficientsA/CoefficientsB DO match CameraMapping's formula
+EXACTLY, ZERO transformation needed -- the earlier attempt's grid was
+simply the wrong one. DaVis's Origin/NormalisationFactor define
+x0/x_span/y0/y_span in DaVis's OWN 'corrected image' pixel space (offset
+from the naive mm*px_per_mm grid by a per-snapshot constant baked into
+Scales/LinearScaleX/Y's OffsetMm), not the app's simple grid. Verified
+against real MarkPositionTable.xml ground truth (feeding real marks'
+WorldPos mm through the REAL LinearScaleX/Y inverse, and a real
+CameraMapping.world_to_raw call with x0=s_o/x_span=nx/y0=t_o/y_span=ny/
+dx_coefs=CoefficientsA/dy_coefs=CoefficientsB straight off Calibration.xml,
+no fitting at all): 0.29-0.69px RMS across 2 real Polynomial3rdOrder
+snapshots (both Z-planes each) -- see
+_exact_camera_mapping_from_calibration_xml's own docstring for the full
+derivation, including why a third real snapshot showed a bigger residual
+explained by an unrelated data-consistency quirk, not a decode failure.
+DaVis's OTHER internal calibration Type, 'PinholeOpenCV' (a standard
+OpenCV pinhole+distortion model), was ALSO attempted and got close
+(y-pixel already sub-pixel with a Euler-angle rotation) but not exact
+(x-pixel off by a few px in a way that isn't a simple affine correction)
+-- it has no exact path and read_stereo_calibration_from_set raises for
+it rather than silently falling back to the (real, but non-exact)
+mark-fit utility, per this project's explicit "exact values or manual
+entry, never present a fit as the automatic answer" requirement.
+
+A separate real-data finding, caught during manual GUI testing while the
+mark-fit approach was still the automatic path (kept here since
+_fit_camera_mapping_planes itself is still tested, and the underlying
+real-data characteristic is still true): DaVis writes BYTE-IDENTICAL
+MarkPositionTable.xml files into both camera1/ and camera2/ folders for
+every calibration snapshot in the real project this was built against --
+confirmed with a plain diff, and even the file's own internal
+<Camera CameraNumber="1"> tag stays "1" inside camera2's copy. This is
+now IRRELEVANT to the automatic extraction path (exact decode reads only
+Calibration.xml, never MarkPositionTable.xml) but is exactly why every
+real recording in that project -- which all resolve to a duplicate-marked
+PinholeOpenCV snapshot, never a Polynomial3rdOrder one -- still ends up
+needing manual entry: PinholeOpenCV has no exact decode, and the
+mark-fit fallback that WOULD otherwise apply is unusable on this
+project's real data regardless.
 """
 
 import os
@@ -33,9 +64,10 @@ import pytest
 
 from piv_suite.calibration.camera_mapping import COEF_KEYS, CameraMapping
 from piv_suite.io.davis_set import (
-    _derive_world_shape, _files_are_identical, _find_calibration_project_root,
-    _fit_camera_mapping_planes, _read_pixel_per_mm, _read_set_time,
-    _select_calibration_snapshot, read_stereo_calibration_from_set,
+    _derive_world_shape, _exact_camera_mapping_from_calibration_xml, _files_are_identical,
+    _find_calibration_project_root, _fit_camera_mapping_planes, _POLY3_COEF_SUFFIXES,
+    _read_pixel_per_mm, _read_set_time, _select_calibration_snapshot,
+    read_stereo_calibration_from_set,
 )
 
 REAL_PROJECT_ROOT = r"J:\Final_Stereo"
@@ -288,39 +320,134 @@ def test_derive_world_shape_uses_largest_extent():
     assert shape == (60, 100)
 
 
-# ---- full pipeline, synthetic (real data can no longer exercise the happy
-# path -- every real calibration snapshot found has duplicated marks) ----
+# ---- exact decode: _exact_camera_mapping_from_calibration_xml (synthetic) ----
 
-def _build_synthetic_project(tmp_path, cam0_coefs, cam1_coefs, recording_time=None):
-    """A minimal but structurally complete DaVis project: Properties/
-    Calibration/Calibration.xml (both cameras' PixelPerMmFactor) plus
-    camera1/camera2 MarkPositionTable.xml with GENUINELY DIFFERENT marks
-    -- exercises the real read_stereo_calibration_from_set happy path
-    end-to-end without depending on real (duplicated-marks) DaVis data."""
-    px_per_mm = 18.0
-    root = tmp_path / "Project"
-    cal_dir = root / "Properties" / "Calibration"
-    cal_dir.mkdir(parents=True)
-    (cal_dir / "Calibration.xml").write_text(f"""<?xml version="1.0"?>
+def _write_polynomial3rd_calibration_xml(path, planes_by_camera, ppm=18.0, corrected_wh=(2000.0, 1500.0)):
+    """planes_by_camera: {camera_id: [(z_position, s_o, t_o, nx, ny, a_coefs, b_coefs), ...]}
+    a_coefs/b_coefs: dicts keyed like CameraMapping.COEF_KEYS. Builds a
+    minimal but real-shaped Polynomial3rdOrder Calibration.xml -- the same
+    element names/nesting confirmed against real DaVis projects (see
+    _exact_camera_mapping_from_calibration_xml's docstring)."""
+    mappers = []
+    for cam_id, planes in planes_by_camera.items():
+        plane_xml = []
+        for z_pos, s_o, t_o, nx, ny, a, b in planes:
+            a_attrs = " ".join(f'a_{suf}="{a[key]}"' for key, suf in zip(COEF_KEYS, _POLY3_COEF_SUFFIXES))
+            b_attrs = " ".join(f'b_{suf}="{b[key]}"' for key, suf in zip(COEF_KEYS, _POLY3_COEF_SUFFIXES))
+            plane_xml.append(f"""
+     <PolynomialMapping>
+      <ZPosition Value="{z_pos}" />
+      <Origin s_o="{s_o}" t_o="{t_o}" />
+      <NormalisationFactor nx="{nx}" ny="{ny}" />
+      <Polynomial3rdOrder>
+       <CoefficientsA {a_attrs} />
+       <CoefficientsB {b_attrs} />
+      </Polynomial3rdOrder>
+     </PolynomialMapping>""")
+        mappers.append(f"""
+   <CoordinateMapper CameraIdentifier="{cam_id}" Type="Polynomial3rdOrder" GroupId="1">
+    <PolynomialParameters>
+     <CommonParameters>
+      <PixelPerMmFactor Value="{ppm}" />
+      <CorrectedImageSize Width="{corrected_wh[0]}" Height="{corrected_wh[1]}" />
+     </CommonParameters>{"".join(plane_xml)}
+    </PolynomialParameters>
+   </CoordinateMapper>""")
+    with open(path, "w") as f:
+        f.write(f"""<?xml version="1.0"?>
 <Calibration Version="2">
  <CoordinateSystemsForEachView>
-  <CoordinateSystem FieldOfView="SideBySideStereoVolume">
-   <CoordinateMapper CameraIdentifier="1" Type="Polynomial3rdOrder" GroupId="1">
-    <PolynomialParameters><CommonParameters><PixelPerMmFactor Value="{px_per_mm}" /></CommonParameters></PolynomialParameters>
-   </CoordinateMapper>
-   <CoordinateMapper CameraIdentifier="2" Type="Polynomial3rdOrder" GroupId="1">
-    <PolynomialParameters><CommonParameters><PixelPerMmFactor Value="{px_per_mm}" /></CommonParameters></PolynomialParameters>
-   </CoordinateMapper>
+  <CoordinateSystem FieldOfView="SideBySideStereoVolume">{"".join(mappers)}
   </CoordinateSystem>
  </CoordinateSystemsForEachView>
 </Calibration>
 """)
-    rows0 = _synthetic_plane_marks(100.0, 200.0, 50.0, 150.0, *cam0_coefs, px_per_mm)
-    rows1 = _synthetic_plane_marks(100.0, 200.0, 50.0, 150.0, *cam1_coefs, px_per_mm)
-    (cal_dir / "camera1").mkdir()
-    (cal_dir / "camera2").mkdir()
-    _write_mark_table(str(cal_dir / "camera1" / "MarkPositionTable.xml"), {"0": (1.0, rows0)})
-    _write_mark_table(str(cal_dir / "camera2" / "MarkPositionTable.xml"), {"0": (1.0, rows1)})
+
+
+def test_exact_camera_mapping_passes_coefficients_through_unchanged(tmp_path):
+    """The core claim this decode rests on: CoefficientsA/CoefficientsB
+    and Origin/NormalisationFactor map DIRECTLY onto
+    CameraMapping's dx_coefs/dy_coefs and x0/x_span/y0/y_span -- no
+    fitting, no transformation, exact pass-through (validated separately
+    against real ground truth by
+    test_exact_camera_mapping_matches_real_marks below)."""
+    a = {k: float(i) for i, k in enumerate(COEF_KEYS)}
+    b = {k: float(i) * 10 for i, k in enumerate(COEF_KEYS)}
+    ppm = 17.920975188143096
+    xml_path = tmp_path / "Calibration.xml"
+    _write_polynomial3rd_calibration_xml(
+        str(xml_path), {"1": [(ppm, 2807.0, 1387.0, 4096.0, 3008.0, a, b)]}, ppm=ppm)
+
+    result = _exact_camera_mapping_from_calibration_xml(str(xml_path), "1")
+    assert result is not None
+    planes, decoded_ppm, corrected_wh = result
+    assert len(planes) == 1
+    plane = planes[0]
+    assert decoded_ppm == pytest.approx(ppm)
+    assert corrected_wh == (2000.0, 1500.0)
+    assert plane.x0 == pytest.approx(2807.0)
+    assert plane.x_span == pytest.approx(4096.0)
+    assert plane.y0 == pytest.approx(1387.0)
+    assert plane.y_span == pytest.approx(3008.0)
+    assert plane.dx_coefs == pytest.approx(a)
+    assert plane.dy_coefs == pytest.approx(b)
+    assert plane.z_mm == pytest.approx(1.0)  # ZPosition == ppm -> z_mm == 1.0 exactly
+
+
+def test_exact_camera_mapping_two_planes_z_mm_recovered(tmp_path):
+    zero = {k: 0.0 for k in COEF_KEYS}
+    ppm = 18.0
+    xml_path = tmp_path / "Calibration.xml"
+    _write_polynomial3rd_calibration_xml(str(xml_path), {"1": [
+        (ppm * 1.0, 2807.0, 1387.0, 4096.0, 3008.0, zero, zero),
+        (ppm * -2.0, 2807.0, 1387.0, 4120.0, 3025.0, zero, zero),
+    ]}, ppm=ppm)
+
+    planes, _, _ = _exact_camera_mapping_from_calibration_xml(str(xml_path), "1")
+    assert len(planes) == 2
+    assert planes[0].z_mm == pytest.approx(1.0)
+    assert planes[1].z_mm == pytest.approx(-2.0)
+
+
+def test_exact_camera_mapping_returns_none_for_pinhole_opencv_type(tmp_path):
+    xml_path = tmp_path / "Calibration.xml"
+    xml_path.write_text(_PINHOLE_CAL_XML)
+    assert _exact_camera_mapping_from_calibration_xml(str(xml_path), "1") is None
+
+
+def test_exact_camera_mapping_returns_none_when_no_planes(tmp_path):
+    xml_path = tmp_path / "Calibration.xml"
+    _write_polynomial3rd_calibration_xml(str(xml_path), {"1": []})
+    assert _exact_camera_mapping_from_calibration_xml(str(xml_path), "1") is None
+
+
+def test_exact_camera_mapping_returns_none_for_missing_camera(tmp_path):
+    xml_path = tmp_path / "Calibration.xml"
+    zero = {k: 0.0 for k in COEF_KEYS}
+    _write_polynomial3rd_calibration_xml(str(xml_path), {"1": [(18.0, 0.0, 0.0, 100.0, 100.0, zero, zero)]})
+    assert _exact_camera_mapping_from_calibration_xml(str(xml_path), "2") is None
+
+
+# ---- full pipeline, synthetic exact-decode happy path (Calibration.xml
+# alone is enough -- no camera1/camera2 MarkPositionTable.xml needed at
+# all, unlike the old marks-fit path this replaced as the automatic
+# route) ----
+
+def _build_synthetic_exact_project(tmp_path, cam0_coefs, cam1_coefs, recording_time=None):
+    """A minimal DaVis project with ONLY Properties/Calibration/
+    Calibration.xml (Polynomial3rdOrder, both cameras) -- deliberately NO
+    camera1/camera2 MarkPositionTable.xml folders, to prove the exact
+    decode path never touches them."""
+    ppm = 18.0
+    root = tmp_path / "Project"
+    cal_dir = root / "Properties" / "Calibration"
+    cal_dir.mkdir(parents=True)
+    a0, b0 = cam0_coefs
+    a1, b1 = cam1_coefs
+    _write_polynomial3rd_calibration_xml(str(cal_dir / "Calibration.xml"), {
+        "1": [(ppm, 2807.0, 1387.0, 4096.0, 3008.0, a0, b0)],
+        "2": [(ppm, 2807.0, 1387.0, 4096.0, 3008.0, a1, b1)],
+    }, ppm=ppm)
 
     recording = root / "Swirl" / "recording.set"
     recording.parent.mkdir(parents=True)
@@ -331,34 +458,113 @@ def _build_synthetic_project(tmp_path, cam0_coefs, cam1_coefs, recording_time=No
     return str(recording)
 
 
-def test_read_stereo_calibration_from_set_synthetic_happy_path(tmp_path):
+def test_read_stereo_calibration_from_set_synthetic_exact_decode_happy_path(tmp_path):
     zero = {k: 0.0 for k in COEF_KEYS}
     cam0_coefs = ({k: 1.0 for k in COEF_KEYS}, zero)
     cam1_coefs = ({k: 2.0 for k in COEF_KEYS}, zero)  # genuinely different from cam0
-    recording = _build_synthetic_project(tmp_path, cam0_coefs, cam1_coefs)
+    recording = _build_synthetic_exact_project(tmp_path, cam0_coefs, cam1_coefs)
 
     result = read_stereo_calibration_from_set(recording)
 
     assert result.world_scale_px_per_mm == pytest.approx(18.0)
+    assert result.cam0_mapping.dx_coefs == pytest.approx(cam0_coefs[0])
+    assert result.cam1_mapping.dx_coefs == pytest.approx(cam1_coefs[0])
     assert result.cam0_mapping.dx_coefs != result.cam1_mapping.dx_coefs
     assert result.cam0_mapping_plane2 is None  # only one plane in this fixture
-    assert result.world_shape[0] > 0 and result.world_shape[1] > 0
+    assert result.world_shape == (1500, 2000)  # CorrectedImageSize (height, width)
+
+
+def test_read_stereo_calibration_from_set_raises_when_type_not_polynomial3rd(tmp_path):
+    """PinholeOpenCV (or anything else) has no exact decode -- must raise
+    (never silently fall back to the non-exact marks fit) so the GUI's
+    existing never-crash wiring surfaces this as 'enter manually'.
+    _PINHOLE_CAL_XML only defines camera '1' -- camera '2' being entirely
+    absent is itself a valid (if different) reason exact decode can't
+    proceed, exercised the same way as a genuine Type mismatch would be."""
+    root = tmp_path / "Project"
+    cal_dir = root / "Properties" / "Calibration"
+    cal_dir.mkdir(parents=True)
+    (cal_dir / "Calibration.xml").write_text(_PINHOLE_CAL_XML)
+    recording = root / "Swirl" / "recording.set"
+    recording.parent.mkdir(parents=True)
+    recording.write_text("#GROUP Sets\n")
+
+    with pytest.raises(NotImplementedError, match="Polynomial3rdOrder"):
+        read_stereo_calibration_from_set(str(recording))
 
 
 # ---- real-data-gated: the actual project this feature was built against ----
 
 @pytest.mark.skipif(not os.path.exists(REAL_SWIRL_SET), reason="real stereo project not available on this machine")
-def test_read_stereo_calibration_from_real_swirl_set_refuses_duplicate_marks():
+def test_read_stereo_calibration_from_real_swirl_set_raises_pinhole_not_exact():
     # The flagship real recording's applicable calibration snapshot
-    # (Calibration_260715_171237, confirmed by direct inspection) has
-    # byte-identical camera1/camera2 MarkPositionTable.xml files -- a real
-    # DaVis data characteristic confirmed across every snapshot in this
-    # project (DaVis writes the same mark-detection data into both camera
-    # folders). Fitting from it would silently produce IDENTICAL dewarp
-    # coefficients for both cameras, which was caught during manual GUI
-    # testing -- extraction must refuse rather than do that.
-    with pytest.raises(ValueError, match="identical"):
+    # (Calibration_260715_171237, confirmed by direct inspection) is a
+    # 'PinholeOpenCV' calibration Type -- confirmed, every real recording
+    # in this project resolves to a PinholeOpenCV-typed snapshot, never a
+    # Polynomial3rdOrder one, so exact extraction never applies here (it
+    # would if a Polynomial3rdOrder snapshot were ever the applicable
+    # one -- see test_exact_camera_mapping_matches_real_marks below,
+    # which validates the decode itself against two real
+    # Polynomial3rdOrder snapshots in this same project's History).
+    with pytest.raises(NotImplementedError, match="Polynomial3rdOrder"):
         read_stereo_calibration_from_set(REAL_SWIRL_SET)
+
+
+@pytest.mark.skipif(not os.path.exists(REAL_PROJECT_ROOT), reason="real stereo project not available on this machine")
+@pytest.mark.parametrize("calibration_xml,marks_path", [
+    (r"J:\Final_Stereo\Properties\Calibration\Calibration.xml",
+     r"J:\Final_Stereo\Properties\Calibration\camera1\MarkPositionTable.xml"),
+    (r"J:\Final_Stereo\Properties\Calibration History\Calibration_260713_181401\Calibration.xml",
+     r"J:\Final_Stereo\Properties\Calibration History\Calibration_260713_181401\camera1\MarkPositionTable.xml"),
+])
+def test_exact_camera_mapping_matches_real_marks(calibration_xml, marks_path):
+    """THE key real-ground-truth validation for the exact decode: camera1's
+    own MarkPositionTable.xml (confirmed genuine, unlike camera2's
+    byte-duplicated copy in this project -- see
+    test_files_are_identical_matches_real_duplicated_mark_tables) gives
+    real RawPos<->WorldPos correspondences that camera1's own
+    Calibration.xml CoefficientsA/CoefficientsB, decoded with ZERO
+    fitting, must reproduce. Verified: 0.29-0.69px RMS per plane across
+    both of this project's non-corrupted Polynomial3rdOrder snapshots
+    (the current calibration and Calibration_260713_181401 -- a third,
+    Calibration_260713_191850, has an unrelated data-consistency issue
+    between ITS marks and ITS own LinearScaleX/Y, documented in
+    _exact_camera_mapping_from_calibration_xml's docstring, so isn't used
+    as a regression gate here to avoid a flaky/misleading threshold)."""
+    planes, _, _ = _exact_camera_mapping_from_calibration_xml(calibration_xml, "1")
+    root = ET.parse(marks_path).getroot()
+    view = root.find(".//View")
+    by_z = {}
+    for mark in view.findall("Mark"):
+        z_index = mark.find("Index").attrib["z"]
+        raw = mark.find("RawPos").attrib
+        world = mark.find("WorldPos").attrib
+        by_z.setdefault(z_index, []).append(
+            (float(raw["x"]), float(raw["y"]), float(world["x"]), float(world["y"])))
+
+    # DaVis's own LinearScaleX/Y (real-mm -> DaVis's 'corrected image'
+    # pixel space that Origin/NormalisationFactor -- and so this decode --
+    # are defined in) -- read straight from the same CoordinateMapper.
+    cal_root = ET.parse(calibration_xml).getroot()
+    scales = cal_root.find(".//CoordinateMapper[@CameraIdentifier='1']//Scales")
+    fx, ox = (float(scales.find("LinearScaleX").attrib[k]) for k in ("FactorMmPerPixel", "OffsetMm"))
+    fy, oy = (float(scales.find("LinearScaleY").attrib[k]) for k in ("FactorMmPerPixel", "OffsetMm"))
+
+    assert len(planes) >= 1
+    for i, plane in enumerate(planes):
+        rows = by_z.get(str(i))
+        if not rows:
+            continue
+        xr = np.array([r[0] for r in rows]); yr = np.array([r[1] for r in rows])
+        xw_mm = np.array([r[2] for r in rows]); yw_mm = np.array([r[3] for r in rows])
+        cmap = CameraMapping(plane.x0, plane.x_span, plane.y0, plane.y_span, plane.dx_coefs, plane.dy_coefs)
+        cx = (xw_mm - ox) / fx
+        cy = (yw_mm - oy) / fy
+        px, py = cmap.world_to_raw(cx, cy)
+        rms_x = float(np.sqrt(np.mean((px - xr) ** 2)))
+        rms_y = float(np.sqrt(np.mean((py - yr) ** 2)))
+        assert rms_x < 1.0, f"plane {i}: rms_x={rms_x:.4f}px"
+        assert rms_y < 1.0, f"plane {i}: rms_y={rms_y:.4f}px"
 
 
 @pytest.mark.skipif(not os.path.exists(REAL_SWIRL_SET), reason="real stereo project not available on this machine")
