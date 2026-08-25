@@ -262,10 +262,25 @@ def combine_stereo_pair(u1, v1, u2, v2, angles, world_scale_px_per_mm, frame_dt_
     """Combine two cameras' per-camera (u, v) fields (already dewarped
     onto a shared world grid, in px/frame, at world_scale_px_per_mm
     px/mm) into 3-component (U, V, W), matching Stereo-PIV.py's
-    handle_pair(). angles = (alpha1, alpha2, beta1, beta2) in radians."""
+    handle_pair(). angles = (alpha1, alpha2, beta1, beta2) in radians.
+
+    frame_dt_s=None (no real time base available) leaves the result in
+    mm/frame, matching apply_calibration's/combine_dual_planar_pair's own
+    "no dt = stay in native displacement units, don't silently unit-shift"
+    convention. When frame_dt_s IS given, the result is m/s -- dividing
+    by frame_dt_s alone (mm/frame / s) only reaches mm/s, an extra /1000
+    is required to reach m/s, same as combine_dual_planar_pair already
+    does. THIS WAS MISSING (a real bug, not by design): every stereo
+    U/V/W this app has ever produced with frame_dt_s set -- CLI, GUI Run,
+    and Preview alike, all three call this same function -- was silently
+    1000x too large (mm/s reported as if it were m/s), never caught
+    because no test asserted absolute physical units, only relative
+    reconstruction accuracy against a synthetic displacement (see
+    test_stereo_pipeline.py, which uses frame_dt_s=None and so never
+    exercised this branch at all)."""
     alpha1, alpha2, beta1, beta2 = angles
     u1_mm, v1_mm, u2_mm, v2_mm = (a / world_scale_px_per_mm for a in (u1, v1, u2, v2))
     U, V, W = reconstruct_stereo(u1_mm, v1_mm, u2_mm, v2_mm, alpha1, alpha2, beta1, beta2)
     if frame_dt_s is not None:
-        U, V, W = (a / frame_dt_s for a in (U, V, W))
+        U, V, W = (a / frame_dt_s / 1000.0 for a in (U, V, W))
     return U, V, W

@@ -27,6 +27,34 @@ WORLD_SCALE_PX_PER_MM = 1.0  # keep units simple; reconstruction math has its ow
 TARGET_DX, TARGET_DY, TARGET_DZ = 2.0, 1.5, 1.0
 
 
+def test_combine_stereo_pair_converts_to_m_per_s_not_mm_per_s():
+    """Regression for a real unit bug: combine_stereo_pair divided by
+    frame_dt_s alone (mm/frame / s = mm/s) and returned that AS IF it
+    were m/s -- every stereo velocity this app has ever produced with a
+    real frame_dt_s (CLI, GUI Run, and Preview all call this same
+    function) was silently 1000x too large. Never caught by
+    test_stereo_pipeline_recovers_known_3d_displacement_* above because
+    those use frame_dt_s=None, which never exercised the /frame_dt_s
+    branch at all. Direct, minimal check: 1 mm/frame displacement at 1ms
+    per frame is 1 m/s, not 1000 m/s -- construct two per-camera
+    displacement fields whose triangulated 3D magnitude is EXACTLY known
+    (dx=dy=0, dz=1mm straight toward/away from both cameras, symmetric
+    +-45deg rig) and assert the output lands at 1.0 m/s, not 1000.0."""
+    dz_mm = 1.0
+    # symmetric +-45deg rig, straight-on Z motion only -- each camera's
+    # own apparent x-displacement is dz*tan(45deg) = dz, opposite sign
+    u1 = np.array([[dz_mm]])
+    u2 = np.array([[-dz_mm]])
+    v1 = v2 = np.array([[0.0]])
+    angles = (np.deg2rad(-45.0), np.deg2rad(45.0), 0.0, 0.0)
+
+    U, V, W = pipeline.combine_stereo_pair(u1, v1, u2, v2, angles, world_scale_px_per_mm=1.0, frame_dt_s=1e-3)
+
+    assert W[0, 0] == pytest.approx(1.0, rel=1e-6)  # 1mm / 1ms == 1 m/s, not 1000 m/s
+    assert U[0, 0] == pytest.approx(0.0, abs=1e-9)
+    assert V[0, 0] == pytest.approx(0.0, abs=1e-9)
+
+
 def _make_camera(dx_scale):
     ny, nx = WORLD_SHAPE
     # nonzero on every term, two DISTINCT cameras (dx_scale flips sign on
