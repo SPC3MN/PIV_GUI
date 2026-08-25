@@ -1,24 +1,29 @@
-"""Preview panel: runs the pipeline on one selected pair (defaulting to the
-first) and renders it inline, replacing piv_common.preview_first_snapshot()'s
-blocking terminal y/N prompt. Settings can be tweaked and re-previewed as
-many times as needed before committing to a full batch run (gates
-run_panel's Run button via the `previewed` signal -- see main_window.py).
-Supports both planar (single camera) and stereo (two cameras, dewarped and
-combined via reconstruct_stereo) preview.
+"""Preview panel: runs the pipeline on a small range of consecutive pairs
+(one pair by default, matching the previous single-pair-only behavior) and
+renders their AVERAGED velocity-magnitude field inline, replacing
+piv_common.preview_first_snapshot()'s blocking terminal y/N prompt.
+Settings can be tweaked and re-previewed as many times as needed before
+committing to a full batch run (gates run_panel's Run button via the
+`previewed` signal -- see main_window.py). Supports planar (single
+camera), dual-camera-planar (SideBySide2D, stitched), and stereo (two
+cameras, dewarped and combined via reconstruct_stereo) preview.
 
-The plot itself (make_preview_figure) supports per-component (U, V, and W
-for stereo) filled contours with auto or manually-scaled colorbars, an
-optional vector overlay on top, and a choice of colormap -- see
-piv_suite.plotting.preview.
+The plot itself (piv_suite.plotting.preview.make_preview_figure) always
+shows a single filled contour of |V| = sqrt(u**2+v**2[+w**2]), auto-scaled
+to that field's own min/max, on a fixed "turbo" colormap -- there is no
+longer a per-component/manual-range/colormap UI, see that module's
+docstring for why. The one remaining toggle is an optional (u, v) vector
+overlay, which only becomes available once a preview result exists to
+draw it on top of (see show_vectors_check below).
 """
 
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout,
-    QGroupBox, QHBoxLayout, QLabel, QProgressBar, QPushButton, QSizePolicy,
-    QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel, QProgressBar,
+    QPushButton, QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
 )
 from PySide6.QtCore import QObject, QThread, Signal
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+import matplotlib.pyplot as plt
 import numpy as np
 
 from piv_suite.calibration.camera_mapping import build_camera_mapping
@@ -32,12 +37,49 @@ from piv_suite.io.loose_files import (
     get_pair_from_loose_files, get_stereo_from_loose_files,
     list_pair_ids_from_loose_files, list_pair_ids_stereo_from_loose_files,
 )
-from piv_suite.plotting.preview import AVAILABLE_COLORMAPS, make_preview_figure
+from piv_suite.plotting.preview import make_preview_figure
 from piv_suite.processing import pipeline
 from piv_suite.processing.postprocess import apply_calibration
 from piv_suite.processing.preprocess import apply_preprocess_pair
 
 from ._util import style_spin
+
+
+def _average_results(results):
+    """Average several already-computed single-pair preview results
+    (same kind, same x/y grid -- the grid is deterministic from settings
+    alone, not from any pair's own data, so this is a plain element-wise
+    average, never a resample) into ONE combined field for
+    _compute_range's multi-pair case: per-cell nanmean, each pair's own
+    `valid` mask turning ITS OWN invalid cells to NaN before averaging --
+    the same convention pipeline.combine_dual_planar_pair's own overlap-
+    region averaging already uses (see its docstring), applied here
+    across PAIRS instead of across CAMERAS. `valid` in the returned dict
+    is True only where every component averaged to a real (non-NaN)
+    value."""
+    first = results[0]
+
+    def stacked(key):
+        return np.stack([np.where(r["valid"], r[key], np.nan) for r in results])
+
+    with np.errstate(invalid="ignore"):
+        u = np.nanmean(stacked("u"), axis=0)
+        v = np.nanmean(stacked("v"), axis=0)
+        w = np.nanmean(stacked("w"), axis=0) if first["kind"] == "stereo" else None
+    valid = ~np.isnan(u) & ~np.isnan(v)
+    if w is not None:
+        valid &= ~np.isnan(w)
+
+    return dict(
+        kind=first["kind"],
+        pair_id=f"{first['pair_id']}..{results[-1]['pair_id']} (avg of {len(results)})",
+        x=first["x"], y=first["y"], u=u, v=v, w=w, valid=valid,
+        elapsed=sum(r["elapsed"] for r in results),
+        n_valid=int(valid.sum()), n_total=int(valid.size),
+        n_range=sum(r["n_range"] for r in results),
+        n_std=sum(r["n_std"] for r in results),
+        units=first["units"],
+    )
 
 
 def _build_engine(backend, frame_shape, correlation, validation):
@@ -68,6 +110,10 @@ class _PreviewWorker(QObject):
 
     finished = Signal(object)   # dict payload -> PreviewPanel._render
     failed = Signal(str)
+    # (done, total) pairs -- only meaningful for a multi-pair range preview
+    # (_compute_range calls this once per pair); a single-pair preview
+    # still uses the plain indeterminate bar, see PreviewPanel._do_preview.
+    progress = Signal(int, int)
 
     def __init__(self, compute_fn):
         super().__init__()
@@ -88,9 +134,14 @@ class PreviewPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.canvas = None
-        self._range_rows = {}
         self._preview_thread = None
         self._preview_worker = None
+        # The last successfully-rendered result payload (see _render) --
+        # cached so toggling Vectors can re-render the SAME already-
+        # computed field with/without the overlay instead of re-running
+        # the whole (potentially ~45s-per-pair) PIV computation just to
+        # flip a display option.
+        self._last_result = None
         self._build_ui()
 
     def _build_ui(self):
@@ -102,20 +153,37 @@ class PreviewPanel(QWidget):
         self.pair_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.pair_combo.setToolTip("Which pair (by index/id) to preview -- click Refresh pairs after changing the input path/glob/suffixes.")
         pair_row.addWidget(self.pair_combo, 1)
+        pair_row.addWidget(QLabel("Pairs:"))
+        self.range_count_spin = style_spin(QSpinBox())
+        self.range_count_spin.setRange(1, 9999)
+        self.range_count_spin.setValue(1)
+        self.range_count_spin.setToolTip(
+            "How many consecutive pairs, starting at the selected pair above, "
+            "to average into ONE velocity field before plotting -- 1 (the "
+            "default) previews just the selected pair, unchanged from "
+            "before. >1 runs each pair through the same compute path and "
+            "averages U/V(/W) across them (per-cell nanmean, each pair's "
+            "own valid mask respected), smoothing out per-pair noise. "
+            "Clamped to however many pairs are actually available from the "
+            "selected one onward.")
+        pair_row.addWidget(self.range_count_spin)
         self.refresh_pairs_btn = QPushButton("Refresh pairs")
         self.refresh_pairs_btn.setToolTip("Re-scan the current input settings and repopulate the Pair list above.")
         self.refresh_pairs_btn.clicked.connect(self._refresh_pairs)
         pair_row.addWidget(self.refresh_pairs_btn)
         layout.addLayout(pair_row)
 
-        self.preview_btn = QPushButton("Preview selected pair")
+        self.preview_btn = QPushButton("Preview selected pair(s)")
         self.preview_btn.setProperty("accent", True)
         self.preview_btn.clicked.connect(self._do_preview)
         layout.addWidget(self.preview_btn)
 
-        # Indeterminate ("busy") mode -- there's no meaningful percentage
-        # for a single preview pair, just a running/not-running state.
-        # Hidden except while a preview is in progress.
+        # Indeterminate ("busy") mode by default -- there's no meaningful
+        # percentage for a single preview pair, just a running/not-running
+        # state. Switched to a determinate 0..count range for a multi-pair
+        # range preview instead (see _do_preview/_on_preview_progress),
+        # since there IS real per-pair progress to report there. Hidden
+        # except while a preview is in progress.
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setTextVisible(False)
@@ -132,73 +200,33 @@ class PreviewPanel(QWidget):
         layout.addStretch(1)
 
     def _build_plot_options_box(self):
+        # Contours (the magnitude field itself), auto-range, and colormap
+        # are no longer configurable -- see plotting.preview's docstring
+        # for why a single magnitude plot doesn't need any of that UI any
+        # more. Vectors is the one option left, and it starts disabled: it
+        # only makes sense once a preview result actually exists to draw
+        # arrows on top of (see _on_preview_finished/_render, which enable
+        # it, and _on_vectors_toggled, which re-renders the cached result
+        # rather than recomputing).
         box = QGroupBox("PLOT OPTIONS")
-        box_layout = QVBoxLayout(box)
-
-        toggle_row = QHBoxLayout()
-        self.show_contour_check = QCheckBox("Contours")
-        self.show_contour_check.setChecked(True)
-        self.show_contour_check.setToolTip("Filled color contour of each component (U, V, and W for stereo), one subplot per component with its own colorbar.")
+        box_layout = QHBoxLayout(box)
         self.show_vectors_check = QCheckBox("Vectors")
         self.show_vectors_check.setChecked(False)
-        self.show_vectors_check.setToolTip("Quiver arrow overlay on every subplot, drawn on top of the contour when both are on.")
-        toggle_row.addWidget(self.show_contour_check)
-        toggle_row.addWidget(self.show_vectors_check)
-        toggle_row.addWidget(QLabel("Colormap:"))
-        self.cmap_combo = QComboBox()
-        self.cmap_combo.addItems(AVAILABLE_COLORMAPS)
-        self.cmap_combo.setToolTip("Color map used for the filled contours.")
-        toggle_row.addWidget(self.cmap_combo)
-        toggle_row.addStretch(1)
-        box_layout.addLayout(toggle_row)
-
-        # Per-component (U, V, and stereo-only W) color-range controls --
-        # auto-scaled (min/max of that pair's data) by default, but each
-        # component can be pinned to a manual range independently (e.g. to
-        # compare pairs on a fixed scale instead of one that jumps around
-        # per-pair).
-        range_grid = QGridLayout()
-        range_grid.addWidget(QLabel("Component"), 0, 0)
-        range_grid.addWidget(QLabel("Auto range"), 0, 1)
-        range_grid.addWidget(QLabel("Min"), 0, 2)
-        range_grid.addWidget(QLabel("Max"), 0, 3)
-        for row, name in enumerate(("U", "V", "W"), start=1):
-            label = QLabel(name)
-            auto_check = QCheckBox()
-            auto_check.setChecked(True)
-            auto_check.setToolTip(f"Auto-scale {name}'s colorbar to this pair's own min/max. Uncheck to pin a fixed Min/Max instead -- useful for comparing pairs on the same scale.")
-            min_spin = style_spin(QDoubleSpinBox())
-            min_spin.setRange(-1e6, 1e6)
-            min_spin.setEnabled(False)
-            min_spin.setToolTip(f"Manual lower bound for {name}'s colorbar (enabled when Auto range is off).")
-            max_spin = style_spin(QDoubleSpinBox())
-            max_spin.setRange(-1e6, 1e6)
-            max_spin.setEnabled(False)
-            max_spin.setToolTip(f"Manual upper bound for {name}'s colorbar (enabled when Auto range is off).")
-            auto_check.toggled.connect(
-                lambda checked, mn=min_spin, mx=max_spin: (mn.setEnabled(not checked), mx.setEnabled(not checked)))
-            range_grid.addWidget(label, row, 0)
-            range_grid.addWidget(auto_check, row, 1)
-            range_grid.addWidget(min_spin, row, 2)
-            range_grid.addWidget(max_spin, row, 3)
-            self._range_rows[name] = (label, auto_check, min_spin, max_spin)
-        box_layout.addLayout(range_grid)
-
-        self.set_stereo_mode(False)
+        self.show_vectors_check.setEnabled(False)
+        self.show_vectors_check.setToolTip(
+            "Quiver arrow overlay of the in-plane (u, v) direction, drawn "
+            "on top of the magnitude contour. Unavailable until a preview "
+            "has actually rendered -- toggling it afterward re-renders the "
+            "same already-computed result, it doesn't re-run the PIV "
+            "computation.")
+        self.show_vectors_check.toggled.connect(self._on_vectors_toggled)
+        box_layout.addWidget(self.show_vectors_check)
+        box_layout.addStretch(1)
         return box
 
-    def set_stereo_mode(self, is_stereo):
-        """Called by main_window when the project Mode (planar/stereo)
-        changes -- the W range row only applies to stereo."""
-        for w in self._range_rows["W"]:
-            w.setVisible(is_stereo)
-
-    def _get_ranges(self):
-        ranges = {}
-        for name, (_label, auto_check, min_spin, max_spin) in self._range_rows.items():
-            if not auto_check.isChecked():
-                ranges[name] = (min_spin.value(), max_spin.value())
-        return ranges
+    def _on_vectors_toggled(self, _checked):
+        if self._last_result is not None:
+            self._render(self._last_result)
 
     def _list_pair_ids(self, project):
         if project.input_mode == "set":
@@ -252,8 +280,22 @@ class PreviewPanel(QWidget):
         return get_dual_planar_from_set(set_paths[0], index, project.multiset_index)
 
     def _set_canvas(self, fig):
+        # setParent(None) only detaches the OLD canvas WIDGET from Qt's
+        # layout -- it does nothing to the matplotlib Figure it wraps.
+        # pyplot keeps every Figure that was never explicitly plt.close()d
+        # alive forever in its own global registry (Gcf), regardless of Qt
+        # parentage/garbage collection, so every preview run (now also
+        # every range-preview average, and every Vectors-toggle re-render,
+        # see _render/_on_vectors_toggled) that built a new figure here
+        # leaked the previous one -- a real, unbounded memory leak (a full-
+        # resolution preview's contourf/quiver artists carry real array
+        # data, not just a few bytes), confirmed by watching
+        # matplotlib.pyplot.get_fignums() grow across repeated previews
+        # before this fix and stay flat after it.
         if self.canvas is not None:
+            old_fig = self.canvas.figure
             self.canvas.setParent(None)
+            plt.close(old_fig)
         self.canvas = FigureCanvasQTAgg(fig)
         self.canvas_container.addWidget(self.canvas)
 
@@ -266,6 +308,10 @@ class PreviewPanel(QWidget):
             self.previewed.emit(False)
             return
         index = self.pair_combo.currentIndex()
+        # Clamped to however many pairs are actually available from the
+        # selected one onward -- never read past the end of the list just
+        # because range_count_spin was left at a stale, too-large value.
+        count = min(self.range_count_spin.value(), self.pair_combo.count() - index)
 
         # Settings are read HERE, on the GUI thread -- they touch widgets,
         # which is not safe from a worker thread. Only the correlation
@@ -277,20 +323,9 @@ class PreviewPanel(QWidget):
             validation = main_window.settings_panel.get_validation_settings()
             post = main_window.settings_panel.get_postprocess_settings()
             calibration = main_window.settings_panel.get_calibration_settings()
-            if project.mode == "stereo":
-                stereo_settings = main_window.calibration_panel.get_settings()
-                def compute():
-                    return self._compute_stereo(project, preprocess, correlation, validation,
-                                                 post, calibration, stereo_settings, index)
-            elif project.dual_camera:
-                dual_planar_settings = main_window.project_panel.get_dual_planar_settings()
-                def compute():
-                    return self._compute_dual_planar(project, preprocess, correlation, validation,
-                                                       post, calibration, dual_planar_settings, index)
-            else:
-                def compute():
-                    return self._compute_planar(project, preprocess, correlation, validation,
-                                                 post, calibration, index)
+            stereo_settings = main_window.calibration_panel.get_settings() if project.mode == "stereo" else None
+            dual_planar_settings = (main_window.project_panel.get_dual_planar_settings()
+                                     if project.dual_camera else None)
         except Exception as e:
             self.status_label.setText(f"Preview failed: {e}")
             self.previewed.emit(False)
@@ -300,18 +335,41 @@ class PreviewPanel(QWidget):
         # second preview while one is still running.
         self.preview_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
+        if count > 1:
+            # Real "N/M pairs done" progress -- there's genuine multi-step
+            # work to report for a range preview (unlike a single pair,
+            # which keeps the plain indeterminate bar below).
+            self.progress_bar.setRange(0, count)
+            self.progress_bar.setValue(0)
         self.status_label.setText("Running preview...")
 
         self._preview_thread = QThread()
-        self._preview_worker = _PreviewWorker(compute)
+        self._preview_worker = _PreviewWorker(None)
+        progress_cb = self._preview_worker.progress.emit
+
+        def compute():
+            return self._compute_range(project, preprocess, correlation, validation, post, calibration,
+                                        stereo_settings, dual_planar_settings, index, count, progress_cb)
+
+        self._preview_worker._compute_fn = compute
         self._preview_worker.moveToThread(self._preview_thread)
         self._preview_thread.started.connect(self._preview_worker.run)
         self._preview_worker.finished.connect(self._on_preview_finished)
         self._preview_worker.failed.connect(self._on_preview_failed)
+        self._preview_worker.progress.connect(self._on_preview_progress)
         self._preview_thread.start()
+
+    def _on_preview_progress(self, done, total):
+        # total==1 (the single-pair case) keeps the plain indeterminate
+        # bar untouched -- see _do_preview, which only switches the bar
+        # to a determinate range when count > 1.
+        if total > 1:
+            self.progress_bar.setValue(done)
+            self.status_label.setText(f"Running preview... ({done}/{total} pairs done)")
 
     def _teardown_preview_thread(self):
         self.progress_bar.setVisible(False)
+        self.progress_bar.setRange(0, 0)  # back to indeterminate, ready for next time
         self.preview_btn.setEnabled(True)
         thread = getattr(self, "_preview_thread", None)
         if thread is not None:
@@ -336,25 +394,22 @@ class PreviewPanel(QWidget):
         self.previewed.emit(True)
 
     def _render(self, r):
-        """Build the figure and status line from a worker payload. Runs on
-        the GUI thread (matplotlib's Qt canvas requires it)."""
+        """Build the figure and status line from a worker payload (or the
+        cached _last_result, when only the Vectors toggle changed -- see
+        _on_vectors_toggled). Runs on the GUI thread (matplotlib's Qt
+        canvas requires it). Enables the Vectors checkbox -- it starts
+        disabled (see _build_plot_options_box) since there's nothing to
+        overlay vectors onto before a preview has actually rendered."""
         self.status_label.setText(
             f"Pair '{r['pair_id']}': {r['elapsed']:.3f}s, {r['n_valid']}/{r['n_total']} valid "
             f"(range/residual rejected {r['n_range']}, std-dev rejected {r['n_std']})"
         )
-        common = dict(
-            show_contour=self.show_contour_check.isChecked(),
-            show_vectors=self.show_vectors_check.isChecked(),
-            cmap=self.cmap_combo.currentText(), ranges=self._get_ranges(),
-        )
-        if r["kind"] == "stereo":
-            fig = make_preview_figure(
-                "stereo", r["x"], r["y"], r["u"], r["v"], r["valid"], w=r["w"],
-                title=f"Stereo preview -- {r['pair_id']}", **common)
-        else:
-            fig = make_preview_figure(
-                "planar", r["x"], r["y"], r["u"], r["v"], r["valid"],
-                title=f"Preview -- {r['pair_id']}", **common)
+        self._last_result = r
+        self.show_vectors_check.setEnabled(True)
+        fig = make_preview_figure(
+            "stereo" if r["kind"] == "stereo" else "planar",
+            r["x"], r["y"], r["u"], r["v"], r["valid"], w=r.get("w"), units=r["units"],
+            title=f"Preview -- {r['pair_id']}", show_vectors=self.show_vectors_check.isChecked())
         self._set_canvas(fig)
 
     def _compute_planar(self, project, preprocess, correlation, validation, post, calibration, index):
@@ -364,10 +419,14 @@ class PreviewPanel(QWidget):
 
         u, v, valid, elapsed, rejects = pipeline.process_frames(engine, frame_a, frame_b, post.for_pipeline())
         u, v = apply_calibration(u, v, calibration.pixel_pitch_mm, calibration.frame_dt_s)
+        # apply_calibration is a no-op (stays px/frame) unless BOTH
+        # pixel_pitch_mm and frame_dt_s are set -- see its own docstring.
+        units = ("m/s" if calibration.pixel_pitch_mm is not None and calibration.frame_dt_s is not None
+                 else "px/frame")
 
         return dict(kind="planar", pair_id=pair_id, x=x, y=y, u=u, v=v, valid=valid,
                     elapsed=elapsed, n_valid=int(valid.sum()), n_total=int(valid.size),
-                    n_range=rejects["range_residual"], n_std=rejects["std_dev"])
+                    n_range=rejects["range_residual"], n_std=rejects["std_dev"], units=units)
 
     def _compute_dual_planar(self, project, preprocess, correlation, validation, post, calibration,
                               dual_planar_settings, index):
@@ -389,11 +448,17 @@ class PreviewPanel(QWidget):
         X, Y, U, V, valid = pipeline.combine_dual_planar_pair(
             (u0, v0, x0, y0, valid0), (u1, v1, x1, y1, valid1),
             dual_planar_settings, calibration.frame_dt_s)
+        # combine_dual_planar_pair always converts position/velocity to mm
+        # (mandatory just to place two cameras on one shared canvas) --
+        # frame_dt_s=None only means it stops short of the final m/s
+        # divide, leaving mm/frame, NEVER raw px/frame -- see its own
+        # docstring.
+        units = "m/s" if calibration.frame_dt_s is not None else "mm/frame"
 
         return dict(kind="planar", pair_id=pair_id, x=X, y=Y, u=U, v=V, valid=valid,
                     elapsed=elapsed0 + elapsed1, n_valid=int(valid.sum()), n_total=int(valid.size),
                     n_range=r0["range_residual"] + r1["range_residual"],
-                    n_std=r0["std_dev"] + r1["std_dev"])
+                    n_std=r0["std_dev"] + r1["std_dev"], units=units)
 
     def _compute_stereo(self, project, preprocess, correlation, validation, post, calibration,
                          stereo_settings, index):
@@ -423,8 +488,44 @@ class PreviewPanel(QWidget):
         U = np.where(valid, U, np.nan)
         V = np.where(valid, V, np.nan)
         W = np.where(valid, W, np.nan)
+        # combine_stereo_pair always converts to mm (dividing by
+        # world_scale_px_per_mm happens unconditionally); frame_dt_s=None
+        # only means it stops short of the final /1000 divide to m/s,
+        # leaving mm/frame, NEVER raw px/frame -- see its own docstring
+        # (and 3fa6c8f, which fixed this function silently skipping the
+        # /1000 step when frame_dt_s WAS given).
+        units = "m/s" if calibration.frame_dt_s is not None else "mm/frame"
 
         return dict(kind="stereo", pair_id=pair_id, x=x, y=y, u=U, v=V, w=W, valid=valid,
                     elapsed=elapsed1 + elapsed2, n_valid=int(valid.sum()), n_total=int(valid.size),
                     n_range=r1["range_residual"] + r2["range_residual"],
-                    n_std=r1["std_dev"] + r2["std_dev"])
+                    n_std=r1["std_dev"] + r2["std_dev"], units=units)
+
+    def _compute_range(self, project, preprocess, correlation, validation, post, calibration,
+                        stereo_settings, dual_planar_settings, start_index, count, progress_cb):
+        """Run `count` consecutive pairs starting at start_index through
+        whichever single-pair compute path matches this project's mode
+        (_compute_stereo/_compute_dual_planar/_compute_planar, reused
+        as-is -- not duplicated), then, for count > 1, average their
+        results into ONE combined field via _average_results. count=1 is
+        the previous, unchanged single-pair preview: returns that one
+        pair's own result untouched, no averaging overhead for the common
+        case. progress_cb(done, total) is called after each pair
+        finishes so the GUI thread can show real per-pair progress for a
+        multi-pair range (see PreviewPanel._on_preview_progress) --
+        harmless for the single-pair case, which just ignores it."""
+        results = []
+        for offset in range(count):
+            index = start_index + offset
+            if project.mode == "stereo":
+                r = self._compute_stereo(project, preprocess, correlation, validation, post,
+                                          calibration, stereo_settings, index)
+            elif project.dual_camera:
+                r = self._compute_dual_planar(project, preprocess, correlation, validation, post,
+                                               calibration, dual_planar_settings, index)
+            else:
+                r = self._compute_planar(project, preprocess, correlation, validation, post,
+                                          calibration, index)
+            results.append(r)
+            progress_cb(offset + 1, count)
+        return results[0] if count == 1 else _average_results(results)
