@@ -1,10 +1,12 @@
 """Run panel: progress bar, per-pair status table, log console, and
 Run/Cancel buttons. Owns the QThread lifecycle for PipelineWorker --
 construct worker -> moveToThread -> connect signals -> thread.start();
-on cancel, sets the worker's cancellation flag and waits for a clean exit.
+on cancel, calls the worker's force_stop() (the strongest cancellation
+currently available -- see pipeline_worker.PipelineWorker.force_stop's
+docstring) and waits for a clean exit.
 """
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout, QHeaderView, QPlainTextEdit, QProgressBar, QPushButton,
     QTableView, QVBoxLayout, QWidget,
@@ -62,6 +64,13 @@ class RunPanel(QWidget):
         self.run_btn.setEnabled(enabled)
         self.run_enabled_changed.emit(enabled)
 
+    def is_running(self) -> bool:
+        """True while a batch's QThread is alive -- main_window.closeEvent
+        uses this (rather than reaching into self._thread/_worker
+        directly) to decide whether closing the window needs to stop a
+        running batch first."""
+        return self._thread is not None
+
     def _start_run(self):
         main_window = self.window()
         project = main_window.project_panel.get_project_settings()
@@ -99,6 +108,19 @@ class RunPanel(QWidget):
         self._worker.progress.connect(self._on_progress)
         self._worker.log.connect(self.log_console.appendPlainText)
         self._worker.finished.connect(self._on_finished)
+        # Direct (not queued) connection: guarantees the QThread's own
+        # event loop is told to quit the MOMENT the worker actually
+        # finishes, regardless of whether the GUI event loop happens to
+        # be pumping right then. _on_finished's own thread.quit()/wait()
+        # (queued, only runs once the GUI loop next pumps) is enough for
+        # the normal Cancel-button path, but stop_and_wait() (used by
+        # main_window.closeEvent) blocks the GUI thread on QThread.wait()
+        # itself -- with no event loop left to pump, that would otherwise
+        # deadlock until its own timeout even for a worker that already
+        # stopped. quit() is documented thread-safe, so calling it
+        # straight from the worker thread here is safe, and harmless
+        # alongside _on_finished's own call (idempotent).
+        self._worker.finished.connect(self._thread.quit, Qt.DirectConnection)
 
         self._thread.start()
 
@@ -125,5 +147,37 @@ class RunPanel(QWidget):
 
     def _cancel_run(self):
         if self._worker is not None:
-            self._worker.cancel()
-            self.log_console.appendPlainText("Cancelling after the current pair...")
+            self._worker.force_stop()
+            # Honest about the actual bound now: force_stop() (see its
+            # docstring) checks between multi-pass iterations/tiles, not
+            # only between whole pairs -- so this is usually much faster
+            # than "after the current pair", but the current PASS (or,
+            # tiled-GPU, the current TILE) still has to finish first,
+            # since a single blocking correlation call can't be safely
+            # pre-empted mid-call.
+            self.log_console.appendPlainText("Cancelling (finishes the current pass/tile first)...")
+
+    def stop_and_wait(self, timeout_ms=5000) -> bool:
+        """Used by main_window.closeEvent: force_stop() the worker (if one
+        is running) and block for up to timeout_ms waiting for its
+        QThread to actually terminate, so the window doesn't close while
+        a worker thread (or, once the sibling process-pool cancellation
+        change lands, its ProcessPoolExecutor's worker processes) is
+        still alive underneath it. Returns True if nothing was running or
+        the thread stopped in time; False if it's still running after the
+        timeout -- the caller should log that as a real problem, not
+        silently proceed as if cleanup succeeded.
+
+        Safe to call unconditionally (no-ops if nothing is running), but
+        callers should still gate on is_running() themselves if they want
+        to log/skip the "cancelling a running batch" messaging only when
+        there actually is one."""
+        if self._thread is None:
+            return True
+        if self._worker is not None:
+            self._worker.force_stop()
+        stopped = self._thread.wait(timeout_ms)
+        if stopped:
+            self._thread = None
+            self._worker = None
+        return stopped
