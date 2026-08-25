@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 from piv_suite import __version__
 from piv_suite.config.schema import DualPlanarSettings
 from piv_suite.io.davis_set import (
-    detect_dual_planar_from_set, read_calibration_from_set,
+    detect_dual_planar_from_set, detect_project_type_from_set, read_calibration_from_set,
     read_dual_planar_calibration_from_set, read_stereo_calibration_from_set,
     resolve_set_paths,
 )
@@ -88,24 +88,30 @@ class MainWindow(QMainWindow):
         self.project_panel.cpu_radio.toggled.connect(
             lambda checked: self.settings_panel.set_backend("cpu" if checked else "gpu"))
 
-        # .set input: auto-extract pixel pitch / frame Δt (and, in stereo
-        # mode, the dewarp calibration) straight off the DaVis project the
-        # moment it's selected, instead of requiring manual entry (see
-        # _on_input_path_changed).
+        # .set input: auto-detect the project's acquisition geometry and
+        # auto-extract pixel pitch / frame Δt (and, in stereo mode, the
+        # dewarp calibration) straight off the DaVis project the moment
+        # it's selected, instead of requiring manual entry -- or a correct
+        # manual Mode guess beforehand (see _on_input_path_changed).
         self.project_panel.input_path_changed.connect(self._on_input_path_changed)
-        # Switching Mode to Stereo AFTER a path is already selected (the
-        # common real order -- planar is the default mode, so a user
-        # typically picks the .set first) must ALSO re-trigger extraction:
-        # input_path_changed only fires on a path change, so without this,
-        # stereo calibration silently never gets extracted at all if the
-        # path was chosen before switching to Stereo mode.
+        # Switching Mode by hand AFTER a path is already selected (e.g.
+        # overriding what auto-detection picked, or re-processing the same
+        # project a different way) must ALSO re-trigger extraction --
+        # input_path_changed only fires on a path CHANGE, so without this,
+        # calibration for the newly-selected mode would silently never get
+        # extracted at all. Deliberately calls _extract_calibration_for_
+        # current_mode, NOT _on_input_path_changed: re-running the auto-
+        # detection step here would fight a user's deliberate manual
+        # override right back to whatever it originally guessed.
         self.project_panel.planar_radio.toggled.connect(
-            lambda: self._on_input_path_changed(self.project_panel.input_path_edit.text()))
+            lambda: self._extract_calibration_for_current_mode(self.project_panel.input_path_edit.text()))
         # the Calibration panel's own "Load stereo calibration from .set..."
         # button re-runs the same extraction against whatever path is
         # currently selected -- it has no reference to project_panel itself.
+        # Same reasoning as above: current-mode extraction only, no auto-
+        # detection re-run.
         self.calibration_panel.load_from_set_requested.connect(
-            lambda: self._on_input_path_changed(self.project_panel.input_path_edit.text()))
+            lambda: self._extract_calibration_for_current_mode(self.project_panel.input_path_edit.text()))
 
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
@@ -136,32 +142,81 @@ class MainWindow(QMainWindow):
         self.run_panel.run_enabled_changed.connect(self.header.set_run_enabled)
         self.header.run_requested.connect(self._run_from_header)
 
-        # the preview plot's W color-range row only makes sense in stereo
-        # mode (planar has no W component at all)
-        self.preview_panel.set_stereo_mode(self.project_panel.is_stereo)
-        self.project_panel.planar_radio.toggled.connect(
-            lambda checked: self.preview_panel.set_stereo_mode(not checked))
-
-    def _on_input_path_changed(self, path):
-        """.set-mode-only. Re-extracts and overwrites the Calibration
-        fields every time the input path (or multiset sub-index) changes
-        -- always trust the newly selected project's real calibration
-        over any prior manual edit. In stereo mode, also re-extracts the
-        dewarp calibration; in planar mode, also detects/extracts DaVis
-        "SideBySide2D" dual-camera calibration (config.schema.
-        DualPlanarSettings) and auto-checks/unchecks the Dual camera
-        checkbox to match what was actually found -- same "always trust
-        the newly selected project" convention as everything else here.
-        Never crashes the GUI: any failure is caught and surfaced via the
-        status bar, one message per extractor."""
+    def _resolve_set_for_extraction(self, path):
+        """Shared .set-mode-only guard/resolution used by both
+        _on_input_path_changed and _extract_calibration_for_current_mode:
+        nothing to do outside .set input mode, or before path is a real,
+        existing location, or if it doesn't resolve to at least one .set.
+        Returns (set_paths, multiset_index), or None if there's nothing to
+        extract from yet."""
         if not self.project_panel.mode_set.isChecked():
-            return
+            return None
         if not path or not os.path.exists(path):
-            return  # nothing to read yet, e.g. a fresh/partial manual path
+            return None  # nothing to read yet, e.g. a fresh/partial manual path
         set_paths, _ = resolve_set_paths(path)
         if not set_paths:
+            return None
+        return set_paths, self.project_panel.multiset_index_spin.value()
+
+    def _on_input_path_changed(self, path):
+        """.set-mode-only. Fired only when the input PATH (or multiset
+        sub-index) itself actually changes -- see _build_ui, which wires
+        Mode-radio toggles and the Calibration panel's "Load from .set..."
+        button to _extract_calibration_for_current_mode directly instead,
+        deliberately bypassing the auto-detection step below.
+
+        First, auto-detects the project's real acquisition geometry from
+        its own calibration (detect_project_type_from_set) and steers the
+        Mode radio (planar_radio/stereo_radio) to match, independent of
+        whatever mode happened to be selected already -- the user no
+        longer has to correctly guess Planar vs Stereo BEFORE picking a
+        .set for extraction to look in the right place. Only steers the
+        PLANAR/STEREO radio here; the dual-camera checkbox's own auto-
+        check already happens in _extract_calibration_for_current_mode's
+        planar branch (via detect_dual_planar_from_set) once Mode is
+        correctly planar -- no need to duplicate that decision twice.
+
+        Still freely user-overridable afterward: flipping the Mode radio
+        by hand after this runs goes through the toggled connection above,
+        NOT back through here, so it sticks -- auto-detection only ever
+        runs once, at path-selection time, never fighting a later manual
+        choice.
+
+        Then delegates to _extract_calibration_for_current_mode for the
+        (now correctly selected) mode's actual calibration extraction."""
+        resolved = self._resolve_set_for_extraction(path)
+        if resolved is None:
             return
-        idx = self.project_panel.multiset_index_spin.value()
+        set_paths, idx = resolved
+        project_type = detect_project_type_from_set(set_paths[0], idx)
+        if project_type == "stereo":
+            self.project_panel.stereo_radio.setChecked(True)
+        else:
+            self.project_panel.planar_radio.setChecked(True)
+        self._extract_calibration_for_current_mode(path)
+
+    def _extract_calibration_for_current_mode(self, path):
+        """Re-extracts and overwrites the Calibration fields for whatever
+        Mode is CURRENTLY selected -- always trust the newly selected
+        project's real calibration over any prior manual edit. In stereo
+        mode, also re-extracts the dewarp calibration; in planar mode,
+        also detects/extracts DaVis "SideBySide2D" dual-camera calibration
+        (config.schema.DualPlanarSettings) and auto-checks/unchecks the
+        Dual camera checkbox to match what was actually found -- same
+        "always trust the newly selected project" convention as everything
+        else here. Never crashes the GUI: any failure is caught and
+        surfaced via the status bar, one message per extractor.
+
+        Deliberately does NOT touch the Mode radio itself (unlike
+        _on_input_path_changed, which calls this after auto-detection) --
+        called directly by a manual Mode-radio toggle or the Calibration
+        panel's "Load from .set..." button (see _build_ui), neither of
+        which should re-run auto-detection and potentially revert a
+        user's own deliberate choice."""
+        resolved = self._resolve_set_for_extraction(path)
+        if resolved is None:
+            return
+        set_paths, idx = resolved
         base = os.path.basename(path)
         messages = []
 
