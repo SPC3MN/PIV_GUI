@@ -341,6 +341,125 @@ def _read_pixel_per_mm(calibration_xml_path, camera_identifier):
     return float(el.attrib["Value"])
 
 
+# DaVis's Polynomial3rdOrder CoefficientsA/CoefficientsB attribute suffixes,
+# in the SAME order as CameraMapping.COEF_KEYS -- the two naming schemes
+# refer to the identical 10 terms (1, s, s2, s3, t, t2, t3, st, s2t, s*t2),
+# DaVis just spells the last one 'a_st2' (s*t^2) where CameraMapping spells
+# it 't2s' (t^2*s) -- same term, cosmetic difference only. See
+# _exact_camera_mapping_from_calibration_xml's docstring for how this
+# mapping was determined to be exact (not assumed).
+_POLY3_COEF_SUFFIXES = ("o", "s", "s2", "s3", "t", "t2", "t3", "st", "s2t", "st2")
+
+
+def _exact_camera_mapping_from_calibration_xml(calibration_xml_path, camera_identifier, name_prefix=""):
+    """Decode a camera's dewarp mapping EXACTLY from DaVis's own stored
+    Calibration.xml -- no fitting, no marks needed at all -- for the
+    'Polynomial3rdOrder' calibration Type. Returns None if this camera's
+    CoordinateMapper isn't that Type (e.g. 'PinholeOpenCV', a genuinely
+    different, standard-pinhole-camera parameterization that was tried and
+    NOT successfully decoded to sub-pixel precision -- see
+    read_stereo_calibration_from_set's docstring) or has no usable
+    <PolynomialMapping> plane data.
+
+    THE DECODE (verified against real ground truth, not assumed): DaVis
+    stores, per calibrated Z-plane, an <Origin s_o t_o>, a
+    <NormalisationFactor nx ny>, and <CoefficientsA>/<CoefficientsB> --
+    which turn out to be EXACTLY CameraMapping's own x0/y0, x_span/y_span,
+    and dx_coefs/dy_coefs, with ZERO transformation needed, PROVIDED the
+    (xp, yp) fed into CameraMapping.world_to_raw are DaVis's own 'corrected
+    image' pixel coordinates (the same space CorrectedImageSize describes),
+    not some other world-pixel convention. Confirmed by taking real marks'
+    WorldPos (mm) from MarkPositionTable.xml, converting to corrected-image
+    pixels via the INVERSE of that same CoordinateMapper's own
+    LinearScaleX/Y (Cx = (world_mm_x - OffsetMm) / FactorMmPerPixel, same
+    for y), constructing a real CameraMapping(x0=s_o, x_span=nx, y0=t_o,
+    y_span=ny, dx_coefs=CoefficientsA, dy_coefs=CoefficientsB) UNCHANGED,
+    calling its real .world_to_raw(Cx, Cy), and comparing the result to
+    that same mark's real RawPos: 0.29-0.69px RMS across 2 real
+    Polynomial3rdOrder calibration snapshots (both Z-planes each,
+    J:\\Final_Stereo's current calibration and its
+    Calibration_260713_181401 History snapshot) -- matching DaVis's own
+    reported <FitError RMS> for those snapshots almost exactly, i.e. our
+    residual IS DaVis's own fit noise, not decode error. A third
+    Polynomial3rdOrder snapshot (Calibration_260713_191850) showed a
+    LINEAR (affine) discrepancy on top of this instead (~5-7px before
+    accounting for it, ~0.3-0.6px after subtracting a fitted affine
+    offset) -- diagnosed as that specific snapshot's own
+    MarkPositionTable.xml not being paired with the SAME LinearScaleX/Y
+    used to derive Cx/Cy for it (a data-consistency quirk in that one
+    History folder, the same general category of real DaVis inconsistency
+    already documented for the byte-duplicated camera1/camera2 mark files
+    elsewhere in this module) -- NOT a failure of the decode formula
+    itself, since removing a simple affine trend recovers the same
+    sub-pixel residual seen on the other two clean snapshots.
+
+    This was NOT tried by the previous session (see SESSION_HANDOFF.md /
+    the module's git history) -- that attempt tested CoefficientsA/B as a
+    DELTA correction against an arbitrary 'world pixel = world_mm *
+    px_per_mm' grid with no offset (CameraMapping's existing convention,
+    the one _fit_camera_mapping_planes's marks-based fit ALSO uses) and
+    concluded it didn't match under any variant tried. It doesn't, under
+    THAT world-pixel convention -- DaVis's Origin/NormalisationFactor are
+    defined in ITS OWN 'corrected image' pixel space (offset from the
+    simple mm*px_per_mm grid by a per-snapshot constant baked into
+    LinearScaleX/Y's OffsetMm), not the app's. Once fed genuinely
+    corrected-image-space (xp, yp) -- not w a substitute grid -- the exact
+    same CameraMapping formula the previous session already ruled out
+    (correctly, for a DIFFERENT grid) turns out to be exactly right.
+
+    world_shape for CameraMapping.dewarp_image doesn't need to match any
+    particular mm origin (stereo triangulation in
+    processing.pipeline.combine_stereo_pair only ever uses DISPLACEMENTS
+    between two dewarped frames of the SAME pair, warped through the SAME
+    fixed grid -- any constant offset in the grid's absolute origin
+    cancels out of a displacement and never appears in the output U/V/W).
+    So CorrectedImageSize (DaVis's own choice of how large a canvas this
+    camera's mapping is valid over -- returned here alongside the planes)
+    is used as-is for world_shape, not re-derived from x_span/y_span the
+    way the marks-fit path's _derive_world_shape does.
+
+    Returns (planes, pixel_per_mm, corrected_image_wh) where planes is a
+    list of 1 or 2 CameraMappingSettings (one per <PolynomialMapping>,
+    z_mm recovered as ZPosition/PixelPerMmFactor -- DaVis stores ZPosition
+    pre-scaled by PixelPerMmFactor, confirmed exactly: 17.920975188143096
+    /17.920975188143096 == 1.0 for a real z=1mm plane, -35.841950.../
+    17.920975188143096 == -2.0 for a real z=-2mm plane), or None if this
+    camera isn't Polynomial3rdOrder or has no usable plane."""
+    root = ET.parse(calibration_xml_path).getroot()
+    cm = root.find(f".//CoordinateMapper[@CameraIdentifier='{camera_identifier}']")
+    if cm is None or cm.attrib.get("Type") != "Polynomial3rdOrder":
+        return None
+    common = cm.find(".//CommonParameters")
+    ppm_el = common.find("PixelPerMmFactor") if common is not None else None
+    corrected_el = common.find("CorrectedImageSize") if common is not None else None
+    if ppm_el is None or corrected_el is None:
+        return None
+    ppm = float(ppm_el.attrib["Value"])
+    corrected_wh = (float(corrected_el.attrib["Width"]), float(corrected_el.attrib["Height"]))
+
+    planes = []
+    for pm in cm.findall(".//PolynomialMapping"):
+        z_el, origin_el, norm_el, poly3_el = (
+            pm.find("ZPosition"), pm.find("Origin"), pm.find("NormalisationFactor"), pm.find("Polynomial3rdOrder"))
+        if None in (z_el, origin_el, norm_el, poly3_el):
+            continue
+        a_el, b_el = poly3_el.find("CoefficientsA"), poly3_el.find("CoefficientsB")
+        if a_el is None or b_el is None:
+            continue
+        dx_coefs = {key: float(a_el.attrib[f"a_{suffix}"]) for key, suffix in zip(COEF_KEYS, _POLY3_COEF_SUFFIXES)}
+        dy_coefs = {key: float(b_el.attrib[f"b_{suffix}"]) for key, suffix in zip(COEF_KEYS, _POLY3_COEF_SUFFIXES)}
+        z_mm = float(z_el.attrib["Value"]) / ppm
+        planes.append(CameraMappingSettings(
+            x0=float(origin_el.attrib["s_o"]), x_span=float(norm_el.attrib["nx"]),
+            y0=float(origin_el.attrib["t_o"]), y_span=float(norm_el.attrib["ny"]),
+            dx_coefs=dx_coefs, dy_coefs=dy_coefs,
+            name=f"{name_prefix} z={z_mm:.2f}mm (DaVis Polynomial3rdOrder, exact)", z_mm=z_mm))
+
+    if not planes:
+        return None
+    return planes, ppm, corrected_wh
+
+
 def _fit_camera_mapping_planes(mark_table_path, px_per_mm, name_prefix=""):
     """Fit CameraMapping-compatible coefficients (CameraMapping itself is
     UNCHANGED -- same x0/x_span/y0/y_span/dx_coefs/dy_coefs, same formula)
@@ -443,28 +562,50 @@ def _derive_world_shape(cam0_planes, cam1_planes):
 
 
 def read_stereo_calibration_from_set(set_path, multiset_index=0):
-    """Extract stereo/dewarp calibration for both cameras directly from a
-    real DaVis stereo .set project's own calibration-target mark data
-    (see _fit_camera_mapping_planes), instead of hand-transcribing it
-    from DaVis's on-screen calibration report.
+    """Extract stereo/dewarp calibration for both cameras EXACTLY from a
+    real DaVis stereo .set project's own Calibration.xml -- no fitting, no
+    MarkPositionTable.xml needed at all -- when the applicable calibration
+    snapshot is DaVis's 'Polynomial3rdOrder' Type (see
+    _exact_camera_mapping_from_calibration_xml's docstring for the full
+    decode derivation and its real-ground-truth validation: 0.29-0.69px
+    RMS across 2 clean real snapshots, both Z-planes each).
+
+    A SECOND DaVis internal calibration Type exists, 'PinholeOpenCV' --
+    the standard OpenCV pinhole camera model (FocalLengthPixel,
+    PrincipalPoint, Radial/TangentialDistortion, TranslationMm,
+    RotationAngles). This WAS attempted (a Rodrigues-rotation projection
+    with Brown-Conrady distortion, plus Euler-angle rotation variants,
+    focal-length unit conversions, sign/axis permutations -- see this
+    module's git history / SESSION_HANDOFF.md for the exact sweep) and
+    got CLOSE but not exact: with a Z-Y-X Euler rotation order, the
+    y-pixel comes out already sub-pixel (0.7px RMS, matching
+    <FitError RMS>) but x is off by several px in a way that isn't a pure
+    additive constant (varies ~2.5px across the calibration volume even
+    after removing the best-fit affine trend) -- i.e. genuinely not
+    decoded, not merely a units/sign slip like the corrected-image-space
+    discovery that cracked Polynomial3rdOrder. PinholeOpenCV therefore
+    has NO exact path here and raises (see below) rather than silently
+    reusing the mark-fitting approach as if it were the automatic answer.
 
     Locates the project's calibration by walking up from set_path to find
     'Properties/Calibration/' (see _find_calibration_project_root), picks
     whichever calibration snapshot was actually in effect for this
     recording's own timestamp (see _select_calibration_snapshot -- a
     project's calibration can be recalibrated after older recordings were
-    taken), then fits each camera's mapping straight from that snapshot's
-    real MarkPositionTable.xml ground truth. Works regardless of whether
-    DaVis's own internal calibration model was 'Polynomial3rdOrder' or
-    'PinholeOpenCV' -- both were verified to fit the mark ground truth
-    equally well, since we're not depending on DaVis's own coefficient
-    representation at all.
+    taken), then decodes each camera's mapping straight from that
+    snapshot's Calibration.xml.
 
-    Raises (never silently wrong) if the project structure, the selected
-    snapshot, or its mark data genuinely isn't there -- there's nothing
-    sensible to fall back to for a stereo dewarp mapping specifically
-    (unlike the planar read_calibration_from_set, where a missing field
-    can just stay None)."""
+    Deliberately does NOT fall back to _fit_camera_mapping_planes's
+    least-squares mark fit when exact decode isn't available (wrong
+    calibration Type, or the plane/coefficient data isn't there) --
+    that fit is real, tested, and still in this module, but presenting it
+    as this function's AUTOMATIC answer would mean silently handing back
+    an approximate result where the user asked for exact values or
+    nothing. Raises instead (never silently wrong, and never silently
+    approximate) so the GUI's existing never-crash status-bar wiring
+    falls through to manual calibration entry -- the same behavior
+    duplicate-marks-refusal already relied on before this function
+    stopped needing marks at all."""
     project_root = _find_calibration_project_root(set_path)
     if project_root is None:
         raise FileNotFoundError(
@@ -480,34 +621,36 @@ def read_stereo_calibration_from_set(set_path, multiset_index=0):
             f"Selected calibration snapshot '{snapshot_label}' ({snapshot_dir}) has no "
             f"Calibration.xml.")
 
-    px_per_mm_0 = _read_pixel_per_mm(calibration_xml, "1")
-    px_per_mm_1 = _read_pixel_per_mm(calibration_xml, "2")
+    cam0_exact = _exact_camera_mapping_from_calibration_xml(
+        calibration_xml, "1", name_prefix=f"cam0 (DaVis {snapshot_label})")
+    cam1_exact = _exact_camera_mapping_from_calibration_xml(
+        calibration_xml, "2", name_prefix=f"cam1 (DaVis {snapshot_label})")
+    if cam0_exact is None or cam1_exact is None:
+        raise NotImplementedError(
+            f"Calibration snapshot '{snapshot_label}' ({snapshot_dir}) isn't a "
+            f"'Polynomial3rdOrder' DaVis calibration for both cameras (or is "
+            f"missing plane data) -- exact stereo dewarp coefficient extraction "
+            f"only supports that calibration Type (verified against real "
+            f"MarkPositionTable.xml ground truth to 0.3-0.7px RMS). DaVis's "
+            f"other internal calibration model, 'PinholeOpenCV', was attempted "
+            f"but not successfully decoded to exact precision (see this "
+            f"function's docstring) -- a least-squares fit from calibration "
+            f"marks exists in this module (_fit_camera_mapping_planes) but "
+            f"isn't exact, so it isn't used here automatically. Enter "
+            f"calibration manually on the Calibration panel.")
+
+    cam0_planes, px_per_mm_0, corrected_wh_0 = cam0_exact
+    cam1_planes, px_per_mm_1, corrected_wh_1 = cam1_exact
     if abs(px_per_mm_0 - px_per_mm_1) > 1e-6 * max(px_per_mm_0, px_per_mm_1):
         print(f"[warn] davis_set: cam0/cam1 PixelPerMmFactor disagree "
               f"({px_per_mm_0} vs {px_per_mm_1}) -- using cam0's")
 
-    cam0_marks = os.path.join(snapshot_dir, "camera1", "MarkPositionTable.xml")
-    cam1_marks = os.path.join(snapshot_dir, "camera2", "MarkPositionTable.xml")
-    if not os.path.isfile(cam0_marks) or not os.path.isfile(cam1_marks):
-        raise FileNotFoundError(
-            f"Calibration snapshot '{snapshot_label}' ({snapshot_dir}) has no "
-            f"camera1/camera2 MarkPositionTable.xml -- can't fit a dewarp mapping "
-            f"from it. Enter calibration manually on the Calibration panel.")
-    if _files_are_identical(cam0_marks, cam1_marks):
-        raise ValueError(
-            f"Calibration snapshot '{snapshot_label}' ({snapshot_dir}) has "
-            f"byte-identical camera1/camera2 MarkPositionTable.xml files -- "
-            f"confirmed on real DaVis project data that this happens (DaVis "
-            f"writing the same mark-detection data into both camera folders "
-            f"rather than each camera's own). Fitting from it would silently "
-            f"produce IDENTICAL dewarp coefficients for both cameras instead "
-            f"of each camera's own real distortion, which is worse than no "
-            f"calibration at all. Enter calibration manually on the "
-            f"Calibration panel.")
-
-    cam0_planes = _fit_camera_mapping_planes(cam0_marks, px_per_mm_0, name_prefix=f"cam0 (DaVis {snapshot_label})")
-    cam1_planes = _fit_camera_mapping_planes(cam1_marks, px_per_mm_1, name_prefix=f"cam1 (DaVis {snapshot_label})")
-    world_shape = _derive_world_shape(cam0_planes, cam1_planes)
+    # CorrectedImageSize is DaVis's own choice of shared canvas size for
+    # BOTH cameras (confirmed identical between camera1/camera2's
+    # CoordinateMapper on real data) -- take the larger of the two (should
+    # match exactly) rather than assuming which one to trust.
+    world_shape = (int(np.ceil(max(corrected_wh_0[1], corrected_wh_1[1]))),
+                   int(np.ceil(max(corrected_wh_0[0], corrected_wh_1[0]))))
 
     return StereoSettings(
         cam0_mapping=cam0_planes[0],
