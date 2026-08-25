@@ -50,7 +50,7 @@ def test_preview_shows_progress_bar_while_running_and_hides_after(qtbot):
     panel._compute_planar = fake_compute_planar
     panel.window = lambda: type("W", (), {
         "project_panel": type("P", (), {
-            "get_project_settings": lambda self: type("S", (), {"mode": "planar"})(),
+            "get_project_settings": lambda self: type("S", (), {"mode": "planar", "dual_camera": False})(),
             "get_preprocess_settings": lambda self: None,
         })(),
         "settings_panel": type("SP", (), {
@@ -882,6 +882,116 @@ def test_calibration_panel_load_from_set_button_triggers_main_window_extraction(
     window.calibration_panel.load_from_set_requested.emit()
 
     assert window.calibration_panel.cam0_form.plane2 is stereo_settings.cam0_mapping_plane2
+
+
+def test_dual_camera_checkbox_hidden_and_forced_off_in_stereo_mode(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    pp = window.project_panel
+    assert pp.dual_camera_check.isVisible()  # planar is the default mode
+    pp.dual_camera_check.setChecked(True)
+
+    pp.stereo_radio.setChecked(True)
+
+    assert not pp.dual_camera_check.isVisible()
+    assert not pp.dual_camera_check.isChecked()  # stereo already uses both cameras differently
+
+
+def test_dual_planar_extraction_auto_checks_checkbox_when_detected(qtbot, monkeypatch, tmp_path):
+    import piv_suite_gui.main_window as mw
+    from piv_suite.config.schema import DualPlanarCameraSettings, DualPlanarSettings
+
+    set_path = tmp_path / "recording.set"
+    set_path.write_text("")
+    dual_settings = DualPlanarSettings(
+        enabled=True,
+        cam0=DualPlanarCameraSettings(region_x=3865.0, region_width=4144.0, raw_width=4096, raw_height=3008),
+        cam1=DualPlanarCameraSettings(region_x=0.0, region_width=4111.0, raw_width=4096, raw_height=3008),
+        canvas_width=8009, canvas_height=3046,
+        scale_x_mm_per_px=0.0392775752732, scale_y_mm_per_px=-0.0392775752732,
+    )
+    monkeypatch.setattr(mw, "detect_dual_planar_from_set", lambda path, idx: True)
+    monkeypatch.setattr(mw, "read_dual_planar_calibration_from_set", lambda path, idx: dual_settings)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    assert window.project_panel.planar_radio.isChecked()  # default mode
+    assert not window.project_panel.dual_camera_check.isChecked()
+
+    window.project_panel.input_path_edit.setText(str(set_path))
+    window.project_panel.input_path_edit.editingFinished.emit()
+
+    assert window.project_panel.dual_camera_check.isChecked()
+    assert window.project_panel.get_dual_planar_settings() is dual_settings
+    assert "SideBySide2D" in window.project_panel.dual_camera_status_label.text()
+    assert "dual-camera" in window.statusBar().currentMessage().lower()
+
+
+def test_dual_planar_not_detected_leaves_checkbox_unchecked(qtbot, monkeypatch, tmp_path):
+    import piv_suite_gui.main_window as mw
+
+    set_path = tmp_path / "recording.set"
+    set_path.write_text("")
+    monkeypatch.setattr(mw, "detect_dual_planar_from_set", lambda path, idx: False)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.project_panel.input_path_edit.setText(str(set_path))
+    window.project_panel.input_path_edit.editingFinished.emit()
+
+    assert not window.project_panel.dual_camera_check.isChecked()
+
+
+def test_dual_planar_re_selecting_a_non_dual_project_clears_a_prior_auto_check(qtbot, monkeypatch, tmp_path):
+    # Matches this app's "always overwrite, never leave stale auto-loaded
+    # state behind" convention (see main_window._on_input_path_changed's
+    # docstring) -- picking a SECOND, non-dual-camera project after a
+    # first dual-camera one must un-check the box again, not leave it
+    # checked from the earlier selection.
+    import piv_suite_gui.main_window as mw
+    from piv_suite.config.schema import DualPlanarSettings
+
+    dual_path = tmp_path / "dual.set"
+    dual_path.write_text("")
+    plain_path = tmp_path / "plain.set"
+    plain_path.write_text("")
+
+    detected = {"is_dual": True}
+    monkeypatch.setattr(mw, "detect_dual_planar_from_set", lambda path, idx: detected["is_dual"])
+    monkeypatch.setattr(mw, "read_dual_planar_calibration_from_set",
+                         lambda path, idx: DualPlanarSettings(enabled=True))
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.project_panel.input_path_edit.setText(str(dual_path))
+    window.project_panel.input_path_edit.editingFinished.emit()
+    assert window.project_panel.dual_camera_check.isChecked()
+
+    detected["is_dual"] = False
+    window.project_panel.input_path_edit.setText(str(plain_path))
+    window.project_panel.input_path_edit.editingFinished.emit()
+
+    assert not window.project_panel.dual_camera_check.isChecked()
+    assert window.project_panel.get_dual_planar_settings().enabled is False
+
+
+def test_dual_planar_extraction_failure_shows_status_and_does_not_crash(qtbot, monkeypatch, tmp_path):
+    import piv_suite_gui.main_window as mw
+
+    set_path = tmp_path / "recording.set"
+    set_path.write_text("")
+    monkeypatch.setattr(mw, "detect_dual_planar_from_set", lambda path, idx: True)
+    monkeypatch.setattr(mw, "read_dual_planar_calibration_from_set",
+                         lambda path, idx: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.project_panel.input_path_edit.setText(str(set_path))
+    window.project_panel.input_path_edit.editingFinished.emit()  # must not raise
+
+    assert not window.project_panel.dual_camera_check.isChecked()
+    assert "boom" in window.statusBar().currentMessage()
 
 
 def test_calibration_labels_use_math_notation(qtbot):

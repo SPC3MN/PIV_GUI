@@ -24,7 +24,10 @@ import numpy as np
 from piv_suite.calibration.camera_mapping import build_camera_mapping
 from piv_suite.config.legacy import to_cpu_settings, to_gpu_settings
 from piv_suite.engines.registry import get_engine_factory
-from piv_suite.io.davis_set import get_pair_from_set, get_stereo_from_set, list_pair_ids_from_set, resolve_set_paths
+from piv_suite.io.davis_set import (
+    get_dual_planar_from_set, get_pair_from_set, get_stereo_from_set,
+    list_pair_ids_from_set, resolve_set_paths,
+)
 from piv_suite.io.loose_files import (
     get_pair_from_loose_files, get_stereo_from_loose_files,
     list_pair_ids_from_loose_files, list_pair_ids_stereo_from_loose_files,
@@ -241,6 +244,13 @@ class PreviewPanel(QWidget):
             project.input_path, index, project.loose_glob,
             project.suffix_cam0, project.suffix_cam1, project.stereo_frame_order)
 
+    def _first_pair_dual_planar(self, project, index):
+        # .set-mode-only -- see cli.main/pipeline_worker's identical
+        # restriction, a SideBySide2D combined 4-frame buffer has no
+        # loose-file equivalent in this app.
+        set_paths, _ = resolve_set_paths(project.input_path)
+        return get_dual_planar_from_set(set_paths[0], index, project.multiset_index)
+
     def _set_canvas(self, fig):
         if self.canvas is not None:
             self.canvas.setParent(None)
@@ -272,6 +282,11 @@ class PreviewPanel(QWidget):
                 def compute():
                     return self._compute_stereo(project, preprocess, correlation, validation,
                                                  post, calibration, stereo_settings, index)
+            elif project.dual_camera:
+                dual_planar_settings = main_window.project_panel.get_dual_planar_settings()
+                def compute():
+                    return self._compute_dual_planar(project, preprocess, correlation, validation,
+                                                       post, calibration, dual_planar_settings, index)
             else:
                 def compute():
                     return self._compute_planar(project, preprocess, correlation, validation,
@@ -353,6 +368,32 @@ class PreviewPanel(QWidget):
         return dict(kind="planar", pair_id=pair_id, x=x, y=y, u=u, v=v, valid=valid,
                     elapsed=elapsed, n_valid=int(valid.sum()), n_total=int(valid.size),
                     n_range=rejects["range_residual"], n_std=rejects["std_dev"])
+
+    def _compute_dual_planar(self, project, preprocess, correlation, validation, post, calibration,
+                              dual_planar_settings, index):
+        pair_id, fa0, fb0, fa1, fb1 = self._first_pair_dual_planar(project, index)
+        fa0, fb0 = apply_preprocess_pair(fa0, fb0, preprocess)
+        fa1, fb1 = apply_preprocess_pair(fa1, fb1, preprocess)
+
+        # RAW (row-down, unflipped) engine.coords -- NOT the display-
+        # flipped x, y _build_engine's factory returns -- see
+        # pipeline.combine_dual_planar_pair's docstring for why.
+        engine0, _x0f, _y0f = _build_engine(project.backend, fa0.shape, correlation, validation)
+        u0, v0, valid0, elapsed0, r0 = pipeline.process_frames(engine0, fa0, fb0, post.for_pipeline())
+        x0, y0 = engine0.coords
+
+        engine1, _x1f, _y1f = _build_engine(project.backend, fa1.shape, correlation, validation)
+        u1, v1, valid1, elapsed1, r1 = pipeline.process_frames(engine1, fa1, fb1, post.for_pipeline())
+        x1, y1 = engine1.coords
+
+        X, Y, U, V, valid = pipeline.combine_dual_planar_pair(
+            (u0, v0, x0, y0, valid0), (u1, v1, x1, y1, valid1),
+            dual_planar_settings, calibration.frame_dt_s)
+
+        return dict(kind="planar", pair_id=pair_id, x=X, y=Y, u=U, v=V, valid=valid,
+                    elapsed=elapsed0 + elapsed1, n_valid=int(valid.sum()), n_total=int(valid.size),
+                    n_range=r0["range_residual"] + r1["range_residual"],
+                    n_std=r0["std_dev"] + r1["std_dev"])
 
     def _compute_stereo(self, project, preprocess, correlation, validation, post, calibration,
                          stereo_settings, index):

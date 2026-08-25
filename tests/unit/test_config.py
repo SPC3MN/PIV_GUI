@@ -26,6 +26,31 @@ def test_json_roundtrip_stability(tmp_path):
     assert cfg2.postprocess.range_filter.window_size == 5
 
 
+def test_dual_planar_settings_roundtrip(tmp_path):
+    cfg = ProjectConfig()
+    cfg.project.dual_camera = True
+    cfg.dual_planar.enabled = True
+    cfg.dual_planar.cam0.region_x = 3865.0
+    cfg.dual_planar.cam0.region_width = 4144.0
+    cfg.dual_planar.cam0.raw_width = 4096
+    cfg.dual_planar.cam1.region_x = 0.0
+    cfg.dual_planar.canvas_width = 8009
+    cfg.dual_planar.canvas_height = 3046
+    cfg.dual_planar.scale_x_mm_per_px = 0.0392775752732
+    cfg.dual_planar.scale_y_mm_per_px = -0.0392775752732
+
+    d1 = to_dict(cfg)
+    cfg2 = from_dict(d1)
+    d2 = to_dict(cfg2)
+    assert d1 == d2
+    assert cfg2.project.dual_camera is True
+    assert cfg2.dual_planar.enabled is True
+    assert cfg2.dual_planar.cam0.region_x == 3865.0
+    assert cfg2.dual_planar.cam1.region_x == 0.0
+    assert cfg2.dual_planar.canvas_width == 8009
+    assert cfg2.dual_planar.scale_y_mm_per_px == pytest.approx(-0.0392775752732)
+
+
 def test_remove_small_groups_threshold_default_and_roundtrip(tmp_path):
     cfg = ProjectConfig()
     assert cfg.postprocess.remove_small_groups_threshold == 5  # on by default, matching DaVis

@@ -10,9 +10,9 @@ import os
 
 from .schema import (
     CalibrationSettings, CameraMappingSettings, CorrelationSettings,
-    OutputSettings, PassSettings, PerformanceSettings, PostProcessSettings,
-    PreprocessSettings, ProjectConfig, ProjectSettings, RangeFilterSettings,
-    StereoSettings, ValidationSettings,
+    DualPlanarCameraSettings, DualPlanarSettings, OutputSettings, PassSettings,
+    PerformanceSettings, PostProcessSettings, PreprocessSettings, ProjectConfig,
+    ProjectSettings, RangeFilterSettings, StereoSettings, ValidationSettings,
 )
 
 
@@ -72,6 +72,12 @@ def from_dict(d: dict) -> ProjectConfig:
         stereo_d["world_shape"] = tuple(stereo_d["world_shape"])
     stereo = StereoSettings(**_filtered_kwargs(StereoSettings, stereo_d))
 
+    dp_d = dict(d.get("dual_planar", {}))
+    for key in ("cam0", "cam1"):
+        if key in dp_d and dp_d[key] is not None:
+            dp_d[key] = DualPlanarCameraSettings(**_filtered_kwargs(DualPlanarCameraSettings, dp_d[key]))
+    dual_planar = DualPlanarSettings(**_filtered_kwargs(DualPlanarSettings, dp_d))
+
     output = OutputSettings(**_filtered_kwargs(OutputSettings, d.get("output", {})))
 
     performance = PerformanceSettings(**_filtered_kwargs(PerformanceSettings, d.get("performance", {})))
@@ -79,8 +85,8 @@ def from_dict(d: dict) -> ProjectConfig:
     return ProjectConfig(
         project=project, preprocess=preprocess, correlation=correlation,
         validation=validation, postprocess=postprocess,
-        calibration=calibration, stereo=stereo, output=output,
-        performance=performance,
+        calibration=calibration, stereo=stereo, dual_planar=dual_planar,
+        output=output, performance=performance,
     )
 
 

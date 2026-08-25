@@ -19,7 +19,8 @@ from piv_suite.calibration.camera_mapping import build_camera_mapping
 from piv_suite.config.legacy import to_cpu_settings, to_gpu_settings
 from piv_suite.engines.registry import get_engine_factory
 from piv_suite.io.davis_set import (
-    iter_pairs_from_set, iter_stereo_from_set, resolve_set_paths, set_label,
+    iter_dual_planar_from_set, iter_pairs_from_set, iter_stereo_from_set,
+    resolve_set_paths, set_label,
 )
 from piv_suite.io.loose_files import iter_pairs_from_loose_files, iter_stereo_from_loose_files
 from piv_suite.perf.autotune import recommended_workers
@@ -79,11 +80,17 @@ class PipelineWorker(QObject):
     def run(self):
         cfg = self.config
         stereo = cfg.project.mode == "stereo"
+        dual_planar = cfg.project.mode == "planar" and cfg.project.dual_camera
         cancelled = False
         try:
             os.makedirs(cfg.project.output_dir, exist_ok=True)
             if cfg.project.input_mode == "set":
                 set_paths, is_batch = resolve_set_paths(cfg.project.input_path)
+            elif dual_planar:
+                raise ValueError(
+                    "dual_camera planar mode currently only supports input_mode='set' -- "
+                    "a DaVis SideBySide2D project's combined 4-frame buffer layout isn't "
+                    "representable via loose_glob/suffix_a/suffix_b")
             else:
                 set_paths, is_batch = [cfg.project.input_path], False
 
@@ -117,6 +124,10 @@ class PipelineWorker(QObject):
                             cfg.project.suffix_cam0, cfg.project.suffix_cam1, cfg.project.stereo_frame_order)
                     summary_rows, batch_cancelled = self._process_set_stereo(
                         pair_source, cfg, output_dir, cam0, cam1, angles)
+                elif dual_planar:
+                    self.log.emit(f"[info] processing set '{set_path}'")
+                    pair_source = iter_dual_planar_from_set(set_path, cfg.project.multiset_index)
+                    summary_rows, batch_cancelled = self._process_set_dual_planar(pair_source, cfg, output_dir)
                 else:
                     if cfg.project.input_mode == "set":
                         self.log.emit(f"[info] processing set '{set_path}'")
@@ -326,6 +337,78 @@ class PipelineWorker(QObject):
 
                 n_range = r1["range_residual"] + r2["range_residual"]
                 n_std = r1["std_dev"] + r2["std_dev"]
+                row = (pair_id, elapsed, n_valid, n_total, n_range, n_std)
+                summary_rows.append(row)
+                self.pair_finished.emit(pair_id, {
+                    "elapsed": elapsed, "n_valid": n_valid, "n_total": n_total,
+                    "n_rejected_range_residual": n_range, "n_rejected_std_dev": n_std,
+                })
+                self.progress.emit(len(summary_rows), 0)
+            except Exception as e:
+                self.error.emit(pair_id, str(e))
+
+        return summary_rows, cancelled
+
+    def _run_dual_planar_camera(self, frame_a, frame_b, cfg):
+        """Same single-camera planar run as _run_camera, but returns the
+        RAW (row-down, unflipped) coordinate grid (engine.coords) instead
+        of the display-flipped one _build_engine's factory hands back --
+        pipeline.combine_dual_planar_pair needs each camera's raw grid to
+        place its field correctly on the shared canvas (see that
+        function's docstring)."""
+        backend = cfg.project.backend
+        engine, _x_flipped, _y_flipped = _build_engine(backend, frame_a.shape, cfg.correlation, cfg.validation)
+        u, v, valid, elapsed, rejects = pipeline.process_frames(engine, frame_a, frame_b, cfg.postprocess.for_pipeline())
+        x_raw, y_raw = engine.coords
+        del engine
+        if backend == "gpu":
+            from piv_suite.engines.gpu_engine import free_gpu_pools
+            free_gpu_pools()
+        return u, v, x_raw, y_raw, valid, elapsed, rejects
+
+    def _process_set_dual_planar(self, pair_source, cfg, output_dir):
+        summary_rows = []
+        cancelled = False
+
+        for pair_id, fa0, fb0, fa1, fb1 in pair_source:
+            if self._cancel_event.is_set():
+                cancelled = True
+                break
+
+            self.pair_started.emit(pair_id)
+            try:
+                t_pre0 = time.time()
+                fa0, fb0 = apply_preprocess_pair(fa0, fb0, cfg.preprocess)
+                fa1, fb1 = apply_preprocess_pair(fa1, fb1, cfg.preprocess)
+                t_pre = time.time() - t_pre0
+
+                t_run0 = time.time()
+                u0, v0, x0, y0, valid0, elapsed0, r0 = self._run_dual_planar_camera(fa0, fb0, cfg)
+                u1, v1, x1, y1, valid1, elapsed1, r1 = self._run_dual_planar_camera(fa1, fb1, cfg)
+                elapsed = elapsed0 + elapsed1
+                t_post = time.time() - t_run0 - elapsed
+
+                if cfg.output.verbose:
+                    self.log.emit(f"[timing] {pair_id}: preprocess={t_pre:.3f}s "
+                                   f"correlation={elapsed:.3f}s postprocess={t_post:.3f}s "
+                                   f"total={t_pre + elapsed + t_post:.3f}s")
+
+                X, Y, U, V, valid = pipeline.combine_dual_planar_pair(
+                    (u0, v0, x0, y0, valid0), (u1, v1, x1, y1, valid1),
+                    cfg.dual_planar, cfg.calibration.frame_dt_s)
+                n_valid, n_total = int(valid.sum()), int(valid.size)
+
+                if cfg.output.save_npz:
+                    np.savez(os.path.join(output_dir, f"{pair_id}_velocity.npz"),
+                              x=X, y=Y, u=U, v=V, valid=valid)
+                if cfg.output.save_plot:
+                    plot_and_save_planar(X, Y, U, V, valid,
+                                          os.path.join(output_dir, f"{pair_id}_quiver.png"),
+                                          title=f"Dual-camera PIV velocity field -- {pair_id}",
+                                          quiver_scale=cfg.output.quiver_scale, plot_dpi=cfg.output.plot_dpi)
+
+                n_range = r0["range_residual"] + r1["range_residual"]
+                n_std = r0["std_dev"] + r1["std_dev"]
                 row = (pair_id, elapsed, n_valid, n_total, n_range, n_std)
                 summary_rows.append(row)
                 self.pair_finished.emit(pair_id, {

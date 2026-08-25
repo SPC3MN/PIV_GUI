@@ -154,6 +154,110 @@ def process_frames_tiled(frame_a, frame_b, post, init_raw_fn, n_tiles_y, n_tiles
     return x, y, u_out, v_out, valid, elapsed, reject_counts
 
 
+def combine_dual_planar_pair(cam0, cam1, dual_planar, frame_dt_s=None):
+    """Stitch two coplanar cameras' independently-processed planar PIV
+    fields into one combined field on DaVis's own shared canvas (see
+    config.schema.DualPlanarSettings) -- the dual-camera-planar
+    counterpart to combine_stereo_pair, but no triangulation involved:
+    both cameras see the SAME flat plane, just an offset (overlapping)
+    region of it, so this only needs to PLACE each camera's field in the
+    right spot and average the overlap, not solve for a 3rd velocity
+    component.
+
+    cam0/cam1 are (u, v, x, y, valid) 5-tuples straight from
+    processing.pipeline.process_frames (u/v the postprocessed px/frame
+    field, valid its mask) plus that camera's coordinate grid -- x, y
+    MUST be that camera's own RAW (undewarped) sensor pixel grid in
+    ROW-DOWN convention, i.e. engine.coords, NOT the display-flipped
+    (x, y) engines.registry's factory/cpu_engine.init_cpu_processor
+    hands back for plotting. Using the flipped version here would place
+    cam0/cam1 upside-down relative to RegionWithinCorrectedImage's own
+    row-down convention (and DaVis's LinearScaleY, whose NEGATIVE slope
+    already encodes "canvas row increases downward, world Y increases
+    upward" -- see DualPlanarSettings' docstring).
+
+    Placement is a flat per-axis affine scale (region_width/raw_width,
+    region_height/raw_height -- see DualPlanarCameraSettings' docstring),
+    not a full per-camera polynomial lens dewarp: this feature's
+    deliberate starting point (see davis_set.read_dual_planar_
+    calibration_from_set's docstring) -- validate against real DaVis
+    output (a .vc7 from the same recording) before trusting it near the
+    overlap seam, where lens distortion is largest. Velocity is scaled by
+    the SAME per-axis factor a position displacement would be (a
+    displacement of N raw pixels covers N*scale canvas-mm, exactly like a
+    static position does), then by frame_dt_s to reach m/s -- generalizing
+    postprocess.apply_calibration's isotropic scalar pixel_pitch_mm to
+    this feature's real (anisotropic-SIGN) per-axis mm/px scale. Unlike
+    apply_calibration, frame_dt_s=None does NOT skip the position/mm
+    conversion (that conversion is mandatory just to place two different
+    cameras' pixel grids in one shared coordinate system, independent of
+    time) -- it only leaves velocity in mm/frame instead of m/s.
+
+    The two cameras' own PIV grids don't line up cell-for-cell on the
+    shared canvas (their region_width/raw_width ratios differ slightly --
+    confirmed on real data: 1.012 vs 1.004, since DaVis's own lens
+    correction stretches each camera's footprint by a slightly different
+    amount), so both are resampled (scipy.interpolate.griddata, linear)
+    onto ONE shared regular mm grid before combining. Only ORIGINALLY-
+    VALID points (per camera's own `valid` mask) are used as griddata's
+    source scatter -- an already-interpolated (replace_invalid-filled)
+    cell carries no independent information, so letting it feed this
+    interpolation too would double-smooth rather than genuinely combine
+    two cameras' measurements. The overlap strip (both cameras' resampled
+    footprints covering the same mm range) is averaged (nanmean) rather
+    than either camera arbitrarily overwriting the other.
+
+    Returns (X_mm, Y_mm, U, V, valid) on one shared regular grid -- valid
+    True wherever EITHER camera's resampled footprint reaches that cell."""
+    from scipy.interpolate import griddata
+
+    layers = []
+    for (u, v, x, y, valid), cam in ((cam0, dual_planar.cam0), (cam1, dual_planar.cam1)):
+        scale_x = cam.region_width / cam.raw_width
+        scale_y = cam.region_height / cam.raw_height
+        canvas_x = cam.region_x + x * scale_x
+        canvas_y = cam.region_y + y * scale_y
+        x_mm = canvas_x * dual_planar.scale_x_mm_per_px + dual_planar.scale_x_offset_mm
+        y_mm = canvas_y * dual_planar.scale_y_mm_per_px + dual_planar.scale_y_offset_mm
+
+        u_mm = u * scale_x * dual_planar.scale_x_mm_per_px
+        v_mm = v * scale_y * dual_planar.scale_y_mm_per_px
+        if frame_dt_s is not None:
+            u_mm, v_mm = u_mm / frame_dt_s / 1000.0, v_mm / frame_dt_s / 1000.0
+        layers.append((x_mm, y_mm, u_mm, v_mm, np.asarray(valid)))
+
+    # Shared output grid: spans the union of both cameras' placed extent,
+    # at cam0's own median mm spacing (both cameras use the same PIV
+    # window/overlap on the same-sized raw sensor, so their native
+    # spacings are already close -- this doesn't need to be exact, just a
+    # reasonable common resolution to resample both onto).
+    x0_mm, y0_mm = layers[0][0], layers[0][1]
+    step_x_mm = abs(float(np.median(np.diff(np.sort(np.unique(x0_mm[0, :]))))))
+    step_y_mm = abs(float(np.median(np.diff(np.sort(np.unique(y0_mm[:, 0]))))))
+
+    all_x = np.concatenate([lay[0].ravel() for lay in layers])
+    all_y = np.concatenate([lay[1].ravel() for lay in layers])
+    x_min, x_max = float(all_x.min()), float(all_x.max())
+    y_min, y_max = float(all_y.min()), float(all_y.max())
+    nx = max(2, int(round((x_max - x_min) / step_x_mm)) + 1)
+    ny = max(2, int(round((y_max - y_min) / step_y_mm)) + 1)
+    xi = np.linspace(x_min, x_max, nx)
+    yi = np.linspace(y_min, y_max, ny)
+    X, Y = np.meshgrid(xi, yi)
+
+    u_layers, v_layers = [], []
+    for x_mm, y_mm, u_mm, v_mm, valid in layers:
+        pts = np.column_stack([x_mm[valid].ravel(), y_mm[valid].ravel()])
+        u_layers.append(griddata(pts, u_mm[valid].ravel(), (X, Y), method="linear"))
+        v_layers.append(griddata(pts, v_mm[valid].ravel(), (X, Y), method="linear"))
+
+    with np.errstate(invalid="ignore"):
+        U = np.nanmean(np.stack(u_layers), axis=0)
+        V = np.nanmean(np.stack(v_layers), axis=0)
+    valid_out = ~np.isnan(U)
+    return X, Y, U, V, valid_out
+
+
 def combine_stereo_pair(u1, v1, u2, v2, angles, world_scale_px_per_mm, frame_dt_s=None):
     """Combine two cameras' per-camera (u, v) fields (already dewarped
     onto a shared world grid, in px/frame, at world_scale_px_per_mm
