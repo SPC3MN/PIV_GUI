@@ -17,6 +17,7 @@ from PySide6.QtCore import QObject, Signal
 
 from piv_suite.calibration.camera_mapping import build_camera_mapping
 from piv_suite.config.legacy import to_cpu_settings, to_gpu_settings
+from piv_suite.engines.base import EngineCancelled
 from piv_suite.engines.registry import get_engine_factory
 from piv_suite.io.davis_set import (
     iter_dual_planar_from_set, iter_pairs_from_set, iter_stereo_from_set,
@@ -76,6 +77,41 @@ class PipelineWorker(QObject):
 
     def cancel(self):
         self._cancel_event.set()
+
+    def force_stop(self):
+        """Strongest cancellation currently available -- a deliberate SEAM
+        for a sibling change (process-pool cancellation in
+        processing.parallel_planar / a new processing.parallel_stereo,
+        wired through _process_set_planar_parallel / an eventual
+        _process_set_stereo_parallel) to extend, not a finished hard-kill
+        of everything this worker might be doing.
+
+        Right now this just calls cancel(): for the SERIAL loop (both
+        planar and stereo, and the tiled-GPU path), that IS the strongest
+        safe option available -- self._cancel_event is polled between
+        PAIRS (the outer loops below) same as before, but is now ALSO
+        forwarded as `cancel_check` into pipeline.process_frames /
+        process_frames_tiled, which poll it between multi-pass iterations
+        (engines.cpu_engine.CPUPIVProcess) or between tiles
+        (engines.gpu_engine.run_tiled) -- see EngineCancelled's docstring
+        (engines/base.py). That bounds worst-case cancellation latency to
+        one pass or one tile instead of one whole pair, without resorting
+        to killing a thread mid-BLAS/FFT call (unsafe -- deliberately not
+        attempted, see this module's docstring history / the task that
+        added this method).
+
+        For the PARALLEL executor path (n_workers > 1), setting the event
+        only stops NEW submissions -- pairs already dispatched to a
+        worker process finish naturally (see
+        processing.parallel_planar.run_planar_batch_parallel's own
+        docstring). A sibling change is expected to extend THIS method
+        (not add a second, competing one) to also reach into a live
+        ProcessPoolExecutor and terminate its in-flight worker processes
+        once that lands. Callers (run_panel.py's Cancel button,
+        main_window.py's closeEvent) call force_stop(), not cancel()
+        directly, so they pick up that strengthening automatically the
+        moment it exists here -- no caller-side change needed."""
+        self.cancel()
 
     def run(self):
         cfg = self.config
@@ -190,13 +226,15 @@ class PipelineWorker(QObject):
                     x, y, u, v, valid, elapsed, rejects = pipeline.process_frames_tiled(
                         frame_a, frame_b, post, init_fn, correlation.n_tiles_y, correlation.n_tiles_x,
                         margin, free_pools_fn=lambda: _free_gpu(backend),
+                        cancel_check=self._cancel_event.is_set,
                     )
                     t_post = time.time() - t_post0 - elapsed
                 else:
                     if engine is None:
                         engine, x, y = _build_engine(backend, frame_a.shape, correlation, validation)
                     t_post0 = time.time()
-                    u, v, valid, elapsed, rejects = pipeline.process_frames(engine, frame_a, frame_b, post)
+                    u, v, valid, elapsed, rejects = pipeline.process_frames(
+                        engine, frame_a, frame_b, post, cancel_check=self._cancel_event.is_set)
                     t_post = time.time() - t_post0 - elapsed
 
                 if cfg.output.verbose:
@@ -224,6 +262,16 @@ class PipelineWorker(QObject):
                     "n_rejected_std_dev": rejects["std_dev"],
                 })
                 self.progress.emit(len(summary_rows), 0)
+            except EngineCancelled:
+                # Fired mid-pair (between passes/tiles, see cpu_engine.py/
+                # gpu_engine.py) rather than at this loop's own top-of-
+                # iteration check -- this pair's partial result is
+                # discarded (no summary row, no pair_finished signal,
+                # matching the outer per-pair check's behavior when it
+                # fires BEFORE a pair even starts), and the batch stops
+                # the same way an between-pairs cancel does.
+                cancelled = True
+                break
             except Exception as e:
                 self.error.emit(pair_id, str(e))
 
@@ -280,7 +328,9 @@ class PipelineWorker(QObject):
     def _run_camera(self, frame_a, frame_b, cfg):
         backend = cfg.project.backend
         engine, x, y = _build_engine(backend, frame_a.shape, cfg.correlation, cfg.validation)
-        u, v, valid, elapsed, rejects = pipeline.process_frames(engine, frame_a, frame_b, cfg.postprocess.for_pipeline())
+        u, v, valid, elapsed, rejects = pipeline.process_frames(
+            engine, frame_a, frame_b, cfg.postprocess.for_pipeline(),
+            cancel_check=self._cancel_event.is_set)
         del engine
         if backend == "gpu":
             from piv_suite.engines.gpu_engine import free_gpu_pools
@@ -360,6 +410,13 @@ class PipelineWorker(QObject):
                     "n_rejected_range_residual": n_range, "n_rejected_std_dev": n_std,
                 })
                 self.progress.emit(len(summary_rows), 0)
+            except EngineCancelled:
+                # See the matching except clause in _process_set_planar --
+                # same contract, fired mid-pair (between passes, from
+                # either camera's _run_camera call) rather than at this
+                # loop's own top-of-iteration check.
+                cancelled = True
+                break
             except Exception as e:
                 self.error.emit(pair_id, str(e))
 

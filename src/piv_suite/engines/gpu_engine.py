@@ -135,7 +135,19 @@ class _NanSafeGPUProcess:
     def __init__(self, process):
         self._process = process
 
-    def __call__(self, frame_a, frame_b):
+    def __call__(self, frame_a, frame_b, cancel_check=None):
+        # cancel_check is accepted (not rejected with a TypeError) to
+        # satisfy engines.base.PIVEngine's shared call signature, but it's
+        # genuinely IGNORED here -- piv_gpu's own multi-pass loop lives
+        # entirely inside the external openpiv_gpu package with no
+        # per-pass hook this wrapper can reach, unlike CPUPIVProcess's
+        # multi-pass loop which this repo owns directly (see
+        # cpu_engine.py). The non-tiled GPU path's cancellation latency
+        # is therefore bounded by one whole pair, same as before this
+        # change -- the tiled path (run_tiled, below) is where the real
+        # GPU-specific win is: tiles ARE a natural, separable per-pair
+        # cancellation point this wrapper doesn't need piv_gpu's
+        # cooperation for.
         u, v = self._process(frame_a, frame_b)
         if np.isnan(u).any():
             u = np.where(np.isnan(u), np.nanmedian(u), u)
@@ -267,16 +279,31 @@ def default_tile_margin(min_search_size, piv_settings):
 
 
 def run_tiled(frame_a, frame_b, ctrl, init_raw_fn, n_tiles_y, n_tiles_x, margin_px,
-              report_gpu_mem=False, free_pools_fn=None):
+              report_gpu_mem=False, free_pools_fn=None, cancel_check=None):
     """Run a PIV engine (built per-tile via init_raw_fn(tile_shape) ->
     (process, x, y), e.g. a partial application of
     _init_gpu_processor_raw) across spatial tiles of a large frame pair
     instead of the whole frame at once.
 
+    cancel_check, if given, is polled once per TILE (before that tile's
+    engine is even built) -- tiles are fully independent work within one
+    pair (each builds/runs/frees its own engine, see the module docstring
+    above), so this is a genuinely cheap, natural cancellation point the
+    non-tiled GPU path doesn't have (see _NanSafeGPUProcess.__call__'s
+    docstring for why not). Raises EngineCancelled the moment it fires,
+    same contract as CPUPIVProcess's between-pass check -- pipeline_worker
+    catches it the same way regardless of which path raised it. A large
+    tile grid (the main reason tiling is used at all -- very large
+    frames) means this can cut cancellation latency from "the rest of
+    this whole pair" down to "the rest of this one tile," which is the
+    actual point.
+
     Returns (x, y, u, v, valid, elapsed) -- valid here is directly from
     each tile's val_locations (True = invalid, inverted to the "valid"
     convention), BEFORE any outlier-std/replace/smooth post-processing;
     see process_frames_tiled() for the full pipeline including that."""
+    from .base import EngineCancelled
+
     H, W = frame_a.shape
     tiles = compute_tiles((H, W), n_tiles_y, n_tiles_x, margin_px)
 
@@ -286,6 +313,8 @@ def run_tiled(frame_a, frame_b, ctrl, init_raw_fn, n_tiles_y, n_tiles_x, margin_
     min_core = None
 
     for i, tile in enumerate(tiles):
+        if cancel_check is not None and cancel_check():
+            raise EngineCancelled(f"cancelled before tile {i + 1}/{len(tiles)}")
         y0, y1, x0, x1 = tile["core"]
         py0, py1, px0, px1 = tile["padded"]
         tile_a = frame_a[py0:py1, px0:px1]
