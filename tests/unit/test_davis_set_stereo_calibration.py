@@ -322,7 +322,8 @@ def test_derive_world_shape_uses_largest_extent():
 
 # ---- exact decode: _exact_camera_mapping_from_calibration_xml (synthetic) ----
 
-def _write_polynomial3rd_calibration_xml(path, planes_by_camera, ppm=18.0, corrected_wh=(2000.0, 1500.0)):
+def _write_polynomial3rd_calibration_xml(path, planes_by_camera, ppm=18.0, corrected_wh=(2000.0, 1500.0),
+                                          field_of_view="SideBySideStereoVolume"):
     """planes_by_camera: {camera_id: [(z_position, s_o, t_o, nx, ny, a_coefs, b_coefs), ...]}
     a_coefs/b_coefs: dicts keyed like CameraMapping.COEF_KEYS. Builds a
     minimal but real-shaped Polynomial3rdOrder Calibration.xml -- the same
@@ -357,7 +358,7 @@ def _write_polynomial3rd_calibration_xml(path, planes_by_camera, ppm=18.0, corre
         f.write(f"""<?xml version="1.0"?>
 <Calibration Version="2">
  <CoordinateSystemsForEachView>
-  <CoordinateSystem FieldOfView="SideBySideStereoVolume">{"".join(mappers)}
+  <CoordinateSystem FieldOfView="{field_of_view}">{"".join(mappers)}
   </CoordinateSystem>
  </CoordinateSystemsForEachView>
 </Calibration>
@@ -472,6 +473,46 @@ def test_read_stereo_calibration_from_set_synthetic_exact_decode_happy_path(tmp_
     assert result.cam0_mapping.dx_coefs != result.cam1_mapping.dx_coefs
     assert result.cam0_mapping_plane2 is None  # only one plane in this fixture
     assert result.world_shape == (1500, 2000)  # CorrectedImageSize (height, width)
+
+
+def test_read_stereo_calibration_from_set_rejects_side_by_side_2d(tmp_path):
+    """A DaVis 'SideBySide2D' project (two coplanar cameras stitched into
+    one wider field -- config.schema.DualPlanarSettings, NOT an angled
+    stereo pair) uses the identical CoordinateMapper/CoefficientsA/B XML
+    shape as real stereo -- confirmed by comparing a real SideBySide2D
+    Calibration.xml against a real stereo one. Caught via real GUI
+    testing: selecting a real SideBySide2D project's .set while
+    Mode=Stereo silently extracted a 'Stereo calibration ... exact'
+    status with no error, before this FieldOfView check was added. Must
+    raise instead of geometrically-wrong-but-numerically-successful
+    triangulation calibration."""
+    zero = {k: 0.0 for k in COEF_KEYS}
+    root = tmp_path / "Project"
+    cal_dir = root / "Properties" / "Calibration"
+    cal_dir.mkdir(parents=True)
+    _write_polynomial3rd_calibration_xml(str(cal_dir / "Calibration.xml"), {
+        "1": [(18.0, 2807.0, 1387.0, 4096.0, 3008.0, zero, zero)],
+        "2": [(18.0, 2807.0, 1387.0, 4096.0, 3008.0, zero, zero)],
+    }, field_of_view="SideBySide2D")
+    recording = root / "Recording" / "recording.set"
+    recording.parent.mkdir(parents=True)
+    recording.write_text("#GROUP Sets\n")
+
+    with pytest.raises(ValueError, match="SideBySide2D"):
+        read_stereo_calibration_from_set(str(recording))
+
+
+@pytest.mark.skipif(not os.path.exists(r"D:\Truck_PIV_Round4\Loaded_CFD_Truck"),
+                     reason="real dual-camera planar project not available on this machine")
+def test_read_stereo_calibration_from_real_side_by_side_2d_project_rejects():
+    """The real project this repo's dual-camera planar feature was built
+    against (D:\\Truck_PIV_Round4\\Loaded_CFD_Truck) must be rejected by
+    the STEREO extractor, not silently accepted as if it were a valid
+    stereo pair -- see test_read_stereo_calibration_from_set_rejects_side_by_side_2d
+    for the synthetic version of this same regression."""
+    with pytest.raises(ValueError, match="SideBySide2D"):
+        read_stereo_calibration_from_set(
+            r"D:\Truck_PIV_Round4\Loaded_CFD_Truck\X_150_mm_Y_0_mm.set")
 
 
 def test_read_stereo_calibration_from_set_raises_when_type_not_polynomial3rd(tmp_path):

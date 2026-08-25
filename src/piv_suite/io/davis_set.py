@@ -655,6 +655,30 @@ def read_stereo_calibration_from_set(set_path, multiset_index=0):
             f"Selected calibration snapshot '{snapshot_label}' ({snapshot_dir}) has no "
             f"Calibration.xml.")
 
+    # A DaVis "SideBySide2D" calibration (two COPLANAR cameras stitched into
+    # one wider field -- config.schema.DualPlanarSettings, detected by
+    # detect_dual_planar_from_set) uses the EXACT SAME CoordinateMapper/
+    # CoefficientsA/CoefficientsB XML shape as a real angled stereo pair
+    # ("SideBySideStereoVolume" on a real project) -- confirmed by directly
+    # comparing a real SideBySide2D Calibration.xml (D:\Truck_PIV_Round4)
+    # against a real stereo one (J:\Final_Stereo): both cameras' polynomial
+    # blocks parse identically either way. Without this check,
+    # _exact_camera_mapping_from_calibration_xml would happily decode a
+    # SideBySide2D project's per-camera mapping and this function would
+    # silently hand it back AS IF it were a valid stereo triangulation pair
+    # -- geometrically wrong (coplanar cameras have no baseline angle to
+    # triangulate a W component from) even though every individual number
+    # decoded correctly. Caught via real GUI testing: selecting a real
+    # SideBySide2D project's .set while Mode=Stereo extracted a "Stereo
+    # calibration ... exact" status message with no error at all.
+    field_of_view = _read_field_of_view(calibration_xml)
+    if field_of_view == "SideBySide2D":
+        raise ValueError(
+            f"Calibration snapshot '{snapshot_label}' ({snapshot_dir}) is a DaVis "
+            f"'SideBySide2D' calibration -- two coplanar cameras stitched into one "
+            f"wider field, not an angled stereo pair. Use Planar mode with 'Dual "
+            f"camera (SideBySide)' checked instead of Stereo mode for this project.")
+
     cam0_exact = _exact_camera_mapping_from_calibration_xml(
         calibration_xml, "1", name_prefix=f"cam0 (DaVis {snapshot_label})")
     cam1_exact = _exact_camera_mapping_from_calibration_xml(
