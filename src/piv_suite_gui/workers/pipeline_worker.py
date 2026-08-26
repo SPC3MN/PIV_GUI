@@ -482,6 +482,24 @@ class PipelineWorker(QObject):
         return u, v, x_raw, y_raw, valid, elapsed, rejects
 
     def _process_set_dual_planar(self, pair_source, cfg, output_dir):
+        backend = cfg.project.backend
+
+        # Tier 3: process-level parallelism across independent pairs
+        # (snapshots) within one recording, dual-planar CPU only -- see
+        # processing.parallel_dual_planar's module docstring. This was
+        # missing entirely until reported directly by the user ("doesn't
+        # work for parallel computing when the planar 2 camera setup is
+        # used -- it just processes sequentially") after planar and
+        # stereo had already gained it; dual-planar pairs are exactly as
+        # mutually independent as either. Same n_workers<=1
+        # hard-fallback-to-serial requirement as planar/stereo.
+        if backend == "cpu" and not cfg.correlation.use_tiling:
+            n_workers = recommended_workers(cfg.performance.n_workers)
+            auto_note = "auto" if cfg.performance.n_workers is None else "user override"
+            self.log.emit(f"[info] dual-planar CPU batch: {n_workers} worker process(es) ({auto_note})")
+            if n_workers > 1:
+                return self._process_set_dual_planar_parallel(pair_source, cfg, output_dir, n_workers)
+
         summary_rows = []
         cancelled = False
 
@@ -534,6 +552,45 @@ class PipelineWorker(QObject):
             except Exception as e:
                 self.error.emit(pair_id, str(e))
 
+        return summary_rows, cancelled
+
+    def _process_set_dual_planar_parallel(self, pair_source, cfg, output_dir, n_workers):
+        """The n_workers > 1 branch of _process_set_dual_planar -- same Qt
+        signal contract as the serial loop (and as _process_set_planar_
+        parallel/_process_set_stereo_parallel above), driven by
+        processing.parallel_dual_planar.run_dual_planar_batch_parallel's
+        callbacks instead of an inline try/except per pair."""
+        from piv_suite.processing.parallel_dual_planar import run_dual_planar_batch_parallel
+
+        finished_count = [0]
+
+        def _on_finished(pair_id, result):
+            if cfg.output.verbose:
+                self.log.emit(
+                    f"[timing] {pair_id}: preprocess={result['t_pre']:.3f}s "
+                    f"correlation={result['elapsed']:.3f}s postprocess={result['t_post']:.3f}s "
+                    f"total={result['t_pre'] + result['elapsed'] + result['t_post']:.3f}s")
+            self.pair_finished.emit(pair_id, {
+                "elapsed": result["elapsed"], "n_valid": result["n_valid"], "n_total": result["n_total"],
+                "n_rejected_range_residual": result["n_rejected_range_residual"],
+                "n_rejected_std_dev": result["n_rejected_std_dev"],
+            })
+            finished_count[0] += 1
+            self.progress.emit(finished_count[0], 0)
+
+        def _on_error(pair_id, exc):
+            self.error.emit(pair_id, str(exc))
+
+        results, cancelled = run_dual_planar_batch_parallel(
+            pair_source, cfg, output_dir, n_workers,
+            on_pair_started=self.pair_started.emit, on_pair_finished=_on_finished,
+            on_pair_error=_on_error, cancel_check=self._cancel_event.is_set,
+        )
+        summary_rows = [
+            (r["pair_id"], r["elapsed"], r["n_valid"], r["n_total"],
+             r["n_rejected_range_residual"], r["n_rejected_std_dev"])
+            for r in results
+        ]
         return summary_rows, cancelled
 
     def _write_summary(self, summary_rows, output_dir, cfg, stereo=False):
