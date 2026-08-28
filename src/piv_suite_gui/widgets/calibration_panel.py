@@ -257,13 +257,13 @@ class CalibrationPanel(QWidget):
         angle_grid.setContentsMargins(6, 6, 6, 6)
         angle_grid.setSpacing(4)
         self.alpha1_spin = self._angle_spin(-45.0)
-        self.alpha1_spin.setToolTip("Camera 0's in-plane viewing angle (deg) relative to the world Z-axis, used by reconstruct_stereo to solve for U/V/W.")
+        self.alpha1_spin.setToolTip("Camera 0's in-plane viewing angle (deg) relative to the world Z-axis, used by reconstruct_stereo to solve for U/V/W. Auto-derived from the calibration's own two Z-planes when you select a .set with Polynomial3rdOrder calibration (see davis_set._estimate_stereo_angles) -- a geometric estimate, not a measured rig value; edit freely if you know the real angle.")
         self.alpha2_spin = self._angle_spin(45.0)
-        self.alpha2_spin.setToolTip("Camera 1's in-plane viewing angle (deg) relative to the world Z-axis, used by reconstruct_stereo to solve for U/V/W.")
+        self.alpha2_spin.setToolTip("Camera 1's in-plane viewing angle (deg) relative to the world Z-axis, used by reconstruct_stereo to solve for U/V/W. Auto-derived -- see α₁'s tooltip.")
         self.beta1_spin = self._angle_spin(0.0)
-        self.beta1_spin.setToolTip("Camera 0's out-of-plane viewing angle (deg), used by reconstruct_stereo to solve for U/V/W.")
+        self.beta1_spin.setToolTip("Camera 0's out-of-plane viewing angle (deg), used by reconstruct_stereo to solve for U/V/W. Auto-derived -- see α₁'s tooltip.")
         self.beta2_spin = self._angle_spin(0.0)
-        self.beta2_spin.setToolTip("Camera 1's out-of-plane viewing angle (deg), used by reconstruct_stereo to solve for U/V/W.")
+        self.beta2_spin.setToolTip("Camera 1's out-of-plane viewing angle (deg), used by reconstruct_stereo to solve for U/V/W. Auto-derived -- see α₁'s tooltip.")
         for i, (label, w) in enumerate([
             ("α₁:", self.alpha1_spin), ("α₂:", self.alpha2_spin),
             ("β₁:", self.beta1_spin), ("β₂:", self.beta2_spin),
@@ -305,6 +305,21 @@ class CalibrationPanel(QWidget):
             self.world_h_spin.setValue(settings.world_shape[0])
             self.world_w_spin.setValue(settings.world_shape[1])
         self.world_scale_spin.setValue(settings.world_scale_px_per_mm)
+        # alpha1/alpha2/beta1/beta2: davis_set.read_stereo_calibration_
+        # from_set now derives these from the real calibration mapping
+        # itself (see its own _estimate_stereo_angles docstring) rather
+        # than leaving them at this form's -45/45/0/0 placeholder --
+        # THIS WAS A REAL GAP before this fix: read_stereo_calibration_
+        # from_set could return good derived values and this method would
+        # still silently ignore them, leaving the GUI's stale spin-box
+        # values (or the placeholder, on first load) in effect instead.
+        # Still just a starting point, same "always overwrite, user can
+        # edit afterward" convention as every other auto-extracted field
+        # here -- not locked/read-only.
+        self.alpha1_spin.setValue(settings.alpha1_deg)
+        self.alpha2_spin.setValue(settings.alpha2_deg)
+        self.beta1_spin.setValue(settings.beta1_deg)
+        self.beta2_spin.setValue(settings.beta2_deg)
         self.sheet_z_mm_check.setChecked(settings.sheet_z_mm is not None)
         if settings.sheet_z_mm is not None:
             self.sheet_z_mm_spin.setValue(settings.sheet_z_mm)

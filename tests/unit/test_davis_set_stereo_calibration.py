@@ -63,10 +63,11 @@ import numpy as np
 import pytest
 
 from piv_suite.calibration.camera_mapping import COEF_KEYS, CameraMapping
+from piv_suite.config.schema import CameraMappingSettings
 from piv_suite.io.davis_set import (
-    _derive_world_shape, _exact_camera_mapping_from_calibration_xml, _files_are_identical,
-    _find_calibration_project_root, _fit_camera_mapping_planes, _POLY3_COEF_SUFFIXES,
-    _read_pixel_per_mm, _read_set_time, _select_calibration_snapshot,
+    _derive_world_shape, _estimate_stereo_angles, _exact_camera_mapping_from_calibration_xml,
+    _files_are_identical, _find_calibration_project_root, _fit_camera_mapping_planes,
+    _POLY3_COEF_SUFFIXES, _read_pixel_per_mm, _read_set_time, _select_calibration_snapshot,
     read_stereo_calibration_from_set,
 )
 
@@ -427,6 +428,92 @@ def test_exact_camera_mapping_returns_none_for_missing_camera(tmp_path):
     zero = {k: 0.0 for k in COEF_KEYS}
     _write_polynomial3rd_calibration_xml(str(xml_path), {"1": [(18.0, 0.0, 0.0, 100.0, 100.0, zero, zero)]})
     assert _exact_camera_mapping_from_calibration_xml(str(xml_path), "2") is None
+
+
+# ---- _estimate_stereo_angles: synthetic, exact-angle recovery ----
+
+def _planes_with_known_angle(angle_deg, dz_mm=1.0, px_per_mm=1.0):
+    """Two CameraMappingSettings ("planes" of ONE camera) whose world_to_
+    raw x-shift between them, at ANY sampled (X,Y) point (constant dx_coefs
+    only -- no s/t dependence, so the estimate is exact, not merely
+    averaged-to-approximately-correct), corresponds EXACTLY to angle_deg
+    under _estimate_stereo_angles' own sign convention (dx = dX -
+    dZ*tan(alpha) -- see that function's docstring): d_raw_mm = -tan
+    (angle_deg)*dz_mm, achieved here via each plane's constant ("1") dx_
+    coef term alone, everything else zero."""
+    # world_to_raw_x = xp - dx_coefs["1"] (constant-only poly), so
+    # rx1-rx2 = -dx_coefs["1"] for plane2's coefs=0 -- the coefficient
+    # itself must be the NEGATION of the target (rx1-rx2)/px_per_mm value
+    # (matches _estimate_stereo_angles' own -atan2(...) sign convention;
+    # confirmed against the real Calibration.xml-driven end-to-end test
+    # below, which does NOT pre-negate its own coefficient and recovers
+    # its target angle correctly).
+    zero = {k: 0.0 for k in COEF_KEYS}
+    d_raw_mm = np.tan(np.radians(angle_deg)) * dz_mm
+    c1 = {**zero, "1": d_raw_mm}  # plane1's world_to_raw_x = xp - d_raw_mm
+    c2 = dict(zero)               # plane2's world_to_raw_x = xp
+    plane1 = CameraMappingSettings(x0=0.0, x_span=100.0, y0=0.0, y_span=100.0,
+                                    dx_coefs=c1, dy_coefs=zero, z_mm=dz_mm)
+    plane2 = CameraMappingSettings(x0=0.0, x_span=100.0, y0=0.0, y_span=100.0,
+                                    dx_coefs=c2, dy_coefs=zero, z_mm=0.0)
+    return [plane1, plane2], px_per_mm
+
+
+def test_estimate_stereo_angles_recovers_known_alpha_exactly():
+    planes, px_per_mm = _planes_with_known_angle(30.0)
+    alpha1, alpha2, beta1, beta2 = _estimate_stereo_angles(
+        planes, planes, px_per_mm, world_shape=(100, 100), n_samples=5)
+    assert alpha1 == pytest.approx(30.0, abs=1e-9)
+    assert alpha2 == pytest.approx(30.0, abs=1e-9)
+    assert beta1 == pytest.approx(0.0, abs=1e-9)
+    assert beta2 == pytest.approx(0.0, abs=1e-9)
+
+
+def test_estimate_stereo_angles_recovers_known_negative_alpha_exactly():
+    planes, px_per_mm = _planes_with_known_angle(-35.78)
+    alpha1, _alpha2, _beta1, _beta2 = _estimate_stereo_angles(
+        planes, planes, px_per_mm, world_shape=(100, 100), n_samples=5)
+    assert alpha1 == pytest.approx(-35.78, abs=1e-9)
+
+
+def test_estimate_stereo_angles_returns_zeros_for_single_plane():
+    zero = {k: 0.0 for k in COEF_KEYS}
+    one_plane = [CameraMappingSettings(x0=0.0, x_span=100.0, y0=0.0, y_span=100.0,
+                                        dx_coefs=zero, dy_coefs=zero, z_mm=1.0)]
+    result = _estimate_stereo_angles(one_plane, one_plane, 1.0, world_shape=(100, 100))
+    assert result == (0.0, 0.0, 0.0, 0.0)
+
+
+def test_read_stereo_calibration_from_set_populates_angles_when_two_planes(tmp_path):
+    """End-to-end: read_stereo_calibration_from_set's own returned
+    StereoSettings carries non-default angles when the calibration has
+    two Z-planes with a real angular difference between them -- not just
+    _estimate_stereo_angles in isolation."""
+    zero = {k: 0.0 for k in COEF_KEYS}
+    ppm = 18.0
+    # _estimate_stereo_angles divides the raw dx_coefs["1"] (RAW PIXEL
+    # units, matching what a real a_o coefficient is in Calibration.xml)
+    # by px_per_mm before comparing to dz (mm) -- so the coefficient
+    # itself must be pre-scaled by ppm to land on a known target angle,
+    # not just -tan(angle)*dz directly (that would be correct only if
+    # px_per_mm==1, which the real pipeline never has).
+    a_o = np.tan(np.radians(20.0)) * ppm  # plane1 z=1, plane2 z=0, dz=1
+    a1 = {**zero, "1": a_o}
+    root = tmp_path / "Project"
+    cal_dir = root / "Properties" / "Calibration"
+    cal_dir.mkdir(parents=True)
+    _write_polynomial3rd_calibration_xml(str(cal_dir / "Calibration.xml"), {
+        "1": [(ppm * 1.0, 0.0, 0.0, 100.0, 100.0, a1, zero), (ppm * 0.0, 0.0, 0.0, 100.0, 100.0, zero, zero)],
+        "2": [(ppm * 1.0, 0.0, 0.0, 100.0, 100.0, a1, zero), (ppm * 0.0, 0.0, 0.0, 100.0, 100.0, zero, zero)],
+    }, ppm=ppm)
+    recording = root / "Recording" / "recording.set"
+    recording.parent.mkdir(parents=True)
+    recording.write_text("#GROUP Sets\n")
+
+    result = read_stereo_calibration_from_set(str(recording))
+    assert result.alpha1_deg == pytest.approx(20.0, abs=1e-6)
+    assert result.alpha2_deg == pytest.approx(20.0, abs=1e-6)
+    assert result.beta1_deg == pytest.approx(0.0, abs=1e-9)
 
 
 # ---- full pipeline, synthetic exact-decode happy path (Calibration.xml
