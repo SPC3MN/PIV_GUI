@@ -351,7 +351,16 @@ def handle_pair_stereo(pair_id, dw_a0, dw_b0, dw_a1, dw_b1, cfg, angles, output_
 
     u1, v1, valid1, elapsed1, x, y, r1, t_post1 = _run_camera(dw_a0, dw_b0, cfg)
     u2, v2, valid2, elapsed2, _, _, r2, t_post2 = _run_camera(dw_a1, dw_b1, cfg)
-    valid = valid1 & valid2
+    # See preview_panel._compute_stereo's comment on the same mask: reject
+    # a correlation point either camera can't actually see (world_to_raw
+    # outside its real raw sensor). cfg.stereo._cam0/_cam1 are the same
+    # CameraMapping instances process_pairs_stereo's caller already built
+    # and used to dewarp dw_a0/dw_b0/dw_a1/dw_b1 above. y is _build_
+    # engine's DISPLAY-flipped coordinate -- un-flip back to world_to_raw's
+    # row-down grid convention first.
+    y_row_down = cfg.stereo.world_shape[0] - y
+    valid = (valid1 & valid2 & cfg.stereo._cam0.raw_domain_valid(x, y_row_down)
+              & cfg.stereo._cam1.raw_domain_valid(x, y_row_down))
     elapsed = elapsed1 + elapsed2
 
     U, V, W = pipeline.combine_stereo_pair(

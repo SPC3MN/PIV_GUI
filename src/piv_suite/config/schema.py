@@ -254,6 +254,28 @@ class CameraMappingSettings:
     # `cam*_mapping_plane2`) when a camera has two DaVis-calibrated Z-planes;
     # see calibration.camera_mapping.interpolate_camera_mapping.
     z_mm: Optional[float] = None
+    # This camera's real raw sensor size (DaVis Calibration.xml's own
+    # OriginalImageSize, sibling to CorrectedImageSize/PixelPerMmFactor in
+    # the same CommonParameters block -- see io.davis_set.
+    # _exact_camera_mapping_from_calibration_xml) -- a fixed per-camera
+    # constant, identical across every plane of that camera, unlike x0/
+    # x_span/y0/y_span/dx_coefs/dy_coefs which are per-Z-plane. Used by
+    # calibration.camera_mapping.CameraMapping.raw_domain_valid to reject
+    # correlation-grid points that world_to_raw maps OUTSIDE this camera's
+    # real sensor -- dewarp_image already zero-fills those pixels (map_
+    # coordinates' cval=0.0), but a correlation window straddling that
+    # zero-padding can still return a spurious "valid-looking" vector that
+    # post-processing's statistical filters don't reliably catch (see
+    # CameraMapping.raw_domain_valid's docstring). 0 (the default) means
+    # "unknown, no masking possible" -- matches this schema's existing
+    # 0/None-means-not-available convention (e.g. CalibrationSettings'
+    # pixel_pitch_mm/frame_dt_s) -- set for the exact-decode calibration
+    # path (which reads it straight off Calibration.xml) but NOT the
+    # marks-fit path (_fit_camera_mapping_planes has no OriginalImageSize
+    # to read), so raw_domain_valid must treat 0 as "always valid" rather
+    # than assuming it's populated.
+    raw_width: int = 0
+    raw_height: int = 0
 
 
 @dataclass

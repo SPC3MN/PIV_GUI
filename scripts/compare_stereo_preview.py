@@ -47,8 +47,13 @@ explicitly-scoped validation tool, not a batch runner):
         --set-file "J:\\Final_Stereo\\Swirl\\On Time=6.0_Burst On Time=0.0_Burst Off Time=0.0.set" \\
         --vc7-dir "J:\\Final_Stereo\\Swirl\\On Time=6.0_Burst On Time=0.0_Burst Off Time=0.0\\StereoPIV_MPd(3x32x32_75%ov)" \\
         --start-index 0 --max-pairs 3 \\
-        --alpha1-deg 33.29 --alpha2-deg -35.78 --beta1-deg 0.29 --beta2-deg -0.19 \\
         --sheet-z-mm -0.5
+
+--alpha1-deg/--alpha2-deg/--beta1-deg/--beta2-deg are now OPTIONAL (added
+5ac0563, after this script itself was first written) -- read_stereo_
+calibration_from_set already auto-derives them from the calibration
+mapping itself (io.davis_set._estimate_stereo_angles); pass one only to
+override the auto-derived estimate with an explicit value.
 """
 
 import argparse
@@ -115,7 +120,17 @@ def build_stereo_settings_bundle(set_path, multiset_index, angles_deg, sheet_z_m
     config's own "what a real user gets without touching anything"
     philosophy -- no hand-tuned settings to make numbers look better)
     except for the calibration fields that must come from the real
-    project itself."""
+    project itself.
+
+    angles_deg: (alpha1, alpha2, beta1, beta2), each Optional[float] --
+    None (the default, when --alpha*/--beta* aren't passed on the CLI)
+    means "keep whatever read_stereo_calibration_from_set already
+    auto-derived" (io.davis_set._estimate_stereo_angles, added in
+    5ac0563 -- estimates alpha/beta straight from the two-Z-plane
+    calibration mapping itself, validated to corr(W)=0.955-0.983 against
+    real DaVis reference data). This function only OVERRIDES with an
+    explicit CLI value when the caller actually supplied one -- e.g. to
+    A/B a hand-measured rig angle against the auto-derived estimate."""
     alpha1, alpha2, beta1, beta2 = angles_deg
 
     project = ProjectSettings(input_mode="set", input_path=set_path, mode="stereo",
@@ -127,8 +142,14 @@ def build_stereo_settings_bundle(set_path, multiset_index, angles_deg, sheet_z_m
 
     calibration = read_calibration_from_set(set_path, multiset_index)
     stereo_settings = read_stereo_calibration_from_set(set_path, multiset_index)
-    stereo_settings.alpha1_deg, stereo_settings.alpha2_deg = alpha1, alpha2
-    stereo_settings.beta1_deg, stereo_settings.beta2_deg = beta1, beta2
+    if alpha1 is not None:
+        stereo_settings.alpha1_deg = alpha1
+    if alpha2 is not None:
+        stereo_settings.alpha2_deg = alpha2
+    if beta1 is not None:
+        stereo_settings.beta1_deg = beta1
+    if beta2 is not None:
+        stereo_settings.beta2_deg = beta2
     stereo_settings.dewarp_order = dewarp_order
 
     if stereo_settings.cam0_mapping_plane2 is not None and sheet_z_mm is None:
@@ -145,7 +166,8 @@ def build_stereo_settings_bundle(set_path, multiset_index, angles_deg, sheet_z_m
           f"({'m/s output' if calibration.frame_dt_s is not None else 'mm/frame output -- no frame_dt_s found'})")
     print(f"stereo calibration: {stereo_settings.cam0_mapping.name}")
     print(f"angles (CALIBRATION-DERIVED ESTIMATE, NOT A MEASURED RIG VALUE -- see module "
-          f"docstring): alpha1={alpha1}deg alpha2={alpha2}deg beta1={beta1}deg beta2={beta2}deg")
+          f"docstring): alpha1={stereo_settings.alpha1_deg}deg alpha2={stereo_settings.alpha2_deg}deg "
+          f"beta1={stereo_settings.beta1_deg}deg beta2={stereo_settings.beta2_deg}deg")
     print(f"sheet_z_mm: {sheet_z_mm} (APPROXIMATION unless --sheet-z-mm was a real measured value)")
 
     return project, preprocess, correlation, validation, post, calibration, stereo_settings
@@ -161,10 +183,13 @@ def main():
     parser.add_argument("--max-pairs", type=int, required=True,
                          help="Required -- this tool must never silently default to "
                               "processing an entire (possibly 1000+ pair) recording.")
-    parser.add_argument("--alpha1-deg", type=float, required=True)
-    parser.add_argument("--alpha2-deg", type=float, required=True)
-    parser.add_argument("--beta1-deg", type=float, required=True)
-    parser.add_argument("--beta2-deg", type=float, required=True)
+    parser.add_argument("--alpha1-deg", type=float, default=None,
+                         help="Override the auto-derived alpha1 (see io.davis_set."
+                              "_estimate_stereo_angles, 5ac0563) with an explicit value. "
+                              "Omit to use the auto-derived estimate.")
+    parser.add_argument("--alpha2-deg", type=float, default=None)
+    parser.add_argument("--beta1-deg", type=float, default=None)
+    parser.add_argument("--beta2-deg", type=float, default=None)
     parser.add_argument("--sheet-z-mm", type=float, default=None)
     parser.add_argument("--dewarp-order", type=int, default=1)
     parser.add_argument("--out-dir", default="piv_comparison_output")

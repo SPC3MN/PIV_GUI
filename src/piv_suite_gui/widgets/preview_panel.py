@@ -480,7 +480,21 @@ class PreviewPanel(QWidget):
         engine1, _, _ = _build_engine(project.backend, dw_a1.shape, correlation, validation)
         u2, v2, valid2, elapsed2, r2 = pipeline.process_frames(engine1, dw_a1, dw_b1, post.for_pipeline())
 
-        valid = valid1 & valid2
+        # cam0/cam1 each genuinely see this world-grid point (x, y) --
+        # rejects a point that maps (via world_to_raw) outside either
+        # camera's real raw sensor bounds, which dewarp_image already
+        # zero-fills but a correlation window straddling that zero-padded
+        # region can still return a spurious "valid-looking" vector for.
+        # See CameraMapping.raw_domain_valid's docstring. `y` here is
+        # _build_engine's DISPLAY-flipped ("y increases upward") coordinate
+        # (engines.cpu_engine.init_cpu_processor / gpu_engine.
+        # init_gpu_processor: y = frame_shape[0]*scaling_par - y_raw,
+        # scaling_par==1.0 pre-calibration) -- world_to_raw's own grid
+        # (_ensure_grid's np.mgrid) is row-down/UNflipped, so raw_domain_
+        # valid needs y un-flipped back first or every point near the
+        # canvas's top/bottom edge gets checked against the wrong row.
+        y_row_down = stereo_settings.world_shape[0] - y
+        valid = valid1 & valid2 & cam0.raw_domain_valid(x, y_row_down) & cam1.raw_domain_valid(x, y_row_down)
         angles = (np.deg2rad(stereo_settings.alpha1_deg), np.deg2rad(stereo_settings.alpha2_deg),
                   np.deg2rad(stereo_settings.beta1_deg), np.deg2rad(stereo_settings.beta2_deg))
         U, V, W = pipeline.combine_stereo_pair(u1, v1, u2, v2, angles, stereo_settings.world_scale_px_per_mm,
