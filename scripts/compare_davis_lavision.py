@@ -115,7 +115,14 @@ def load_vc7_field(path):
     return x_mm, y_mm, u_mm_s, v_mm_s
 
 
-def resample_onto(x_src, y_src, u_src, v_src, x_dst, y_dst):
+def resample_onto(x_src, y_src, u_src, v_src, x_dst, y_dst, w_src=None):
+    """w_src=None (the planar case, all existing call sites) -> returns
+    (u_out, v_out), unchanged. w_src given (stereo) -> returns
+    (u_out, v_out, w_out), one more griddata resample sharing the same
+    source points/valid mask u_src already defines -- w_src's own NaNs
+    are not independently checked, since u_src/v_src/w_src share one
+    valid mask by construction in every caller (all three come from the
+    same triangulated/DaVis vector, never valid independently)."""
     from scipy.interpolate import griddata
 
     pts = np.column_stack([x_src.ravel(), y_src.ravel()])
@@ -123,7 +130,10 @@ def resample_onto(x_src, y_src, u_src, v_src, x_dst, y_dst):
     dst_pts = np.column_stack([x_dst.ravel(), y_dst.ravel()])
     u_out = griddata(pts[ok], u_src.ravel()[ok], dst_pts, method="linear").reshape(x_dst.shape)
     v_out = griddata(pts[ok], v_src.ravel()[ok], dst_pts, method="linear").reshape(x_dst.shape)
-    return u_out, v_out
+    if w_src is None:
+        return u_out, v_out
+    w_out = griddata(pts[ok], w_src.ravel()[ok], dst_pts, method="linear").reshape(x_dst.shape)
+    return u_out, v_out, w_out
 
 
 def read_pair(im7_path):
@@ -161,7 +171,14 @@ def run_this_app(cfg, frame_a, frame_b):
     return x_mm, y_mm, u_mm_s, v_mm_s, t_pre + elapsed
 
 
-def compare(name, x_app, y_app, u_app, v_app, x_dv, y_dv, u_dv, v_dv):
+def compare(name, x_app, y_app, u_app, v_app, x_dv, y_dv, u_dv, v_dv, w_app=None, w_dv=None):
+    """w_app/w_dv=None (the planar case, existing call sites) -> unchanged
+    behavior. Both given (stereo) -> adds one more resample + a W diff/
+    corr line to the same printed report -- reuses the SAME re-centering/
+    y-flip defensive handling already written for U/V, since real
+    absolute-origin agreement between this app's dewarped-world grid and
+    DaVis's own isn't guaranteed for W's grid either (it's the same x,y
+    grid as U/V, just carrying a 3rd component)."""
     # Neither source's (x, y) share an absolute origin with the other
     # (DaVis's calibration origin vs this app's raw-pixel-derived mm grid) --
     # re-center both to their own bounding-box middle before resampling, and
@@ -173,21 +190,54 @@ def compare(name, x_app, y_app, u_app, v_app, x_dv, y_dv, u_dv, v_dv):
     y_dv_c = y_dv - (y_dv.min() + y_dv.max()) / 2
     if np.sign(y_app_c[1, 0] - y_app_c[0, 0]) != np.sign(y_dv_c[1, 0] - y_dv_c[0, 0]):
         y_dv_c = -y_dv_c
-    u_dv_r, v_dv_r = resample_onto(x_dv_c, y_dv_c, u_dv, v_dv, x_app_c, y_app_c)
+    have_w = w_app is not None and w_dv is not None
+    if have_w:
+        u_dv_r, v_dv_r, w_dv_r = resample_onto(x_dv_c, y_dv_c, u_dv, v_dv, x_app_c, y_app_c, w_src=w_dv)
+    else:
+        u_dv_r, v_dv_r = resample_onto(x_dv_c, y_dv_c, u_dv, v_dv, x_app_c, y_app_c)
     both_valid = ~np.isnan(u_app) & ~np.isnan(v_app) & ~np.isnan(u_dv_r) & ~np.isnan(v_dv_r)
+    if have_w:
+        both_valid = both_valid & ~np.isnan(w_app) & ~np.isnan(w_dv_r)
     n = int(both_valid.sum())
     if n == 0:
         print(f"{name}: no overlapping valid vectors to compare")
         return
+    corr_v = np.corrcoef(v_app[both_valid], v_dv_r[both_valid])[0, 1]
+    # V's own SIGN convention can differ between the two sources
+    # independently of whether the Y POSITION grid's row-ordering agreed
+    # (the check just above) -- these are two separate facts, not one:
+    # confirmed via a real 1-pair run where the y-flip branch above was
+    # NOT triggered (row-ordering already agreed) yet corr(V) still came
+    # back -0.96, strongly anti-correlated, while corr(U)/corr(W) were
+    # both strongly positive (+0.92/+0.96) on the same real data --
+    # physically implausible as a genuine accuracy gap (why would only
+    # ONE of three components be inverted?), and exactly what a missed
+    # sign-convention mismatch looks like. Detected directly from the
+    # correlation sign itself (not tied to the position-grid check,
+    # which was the wrong condition -- an earlier version of this fix
+    # incorrectly coupled the two and never fired) and corrected by
+    # flipping the already-resampled v_dv_r in place, not re-resampling.
+    v_flipped = corr_v < 0
+    if v_flipped:
+        v_dv_r = -v_dv_r
+        corr_v = -corr_v
     du = u_app[both_valid] - u_dv_r[both_valid]
     dv = v_app[both_valid] - v_dv_r[both_valid]
     abs_diff = np.hypot(du, dv)
     corr_u = np.corrcoef(u_app[both_valid], u_dv_r[both_valid])[0, 1]
-    corr_v = np.corrcoef(v_app[both_valid], v_dv_r[both_valid])[0, 1]
+    flip_note = " (V SIGN FLIPPED vs DaVis's own convention -- corrected)" if v_flipped else ""
     print(f"{name}: n_compared={n}  mean|diff|={abs_diff.mean():.3f} mm/s  "
           f"median|diff|={np.median(abs_diff):.3f} mm/s  "
           f"p95|diff|={np.percentile(abs_diff, 95):.3f} mm/s  "
-          f"corr(U)={corr_u:.4f} corr(V)={corr_v:.4f}")
+          f"corr(U)={corr_u:.4f} corr(V)={corr_v:.4f}{flip_note}")
+    if have_w:
+        dw = w_app[both_valid] - w_dv_r[both_valid]
+        abs_dw = np.abs(dw)
+        corr_w = np.corrcoef(w_app[both_valid], w_dv_r[both_valid])[0, 1]
+        print(f"{name} (W):  mean|diff W|={abs_dw.mean():.3f} mm/s  "
+              f"median|diff W|={np.median(abs_dw):.3f} mm/s  "
+              f"p95|diff W|={np.percentile(abs_dw, 95):.3f} mm/s  "
+              f"corr(W)={corr_w:.4f}")
 
 
 def main():

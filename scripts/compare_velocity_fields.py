@@ -112,16 +112,31 @@ def normalized_local_residual(u, v, size=1, eps=0.1):
         return np.sqrt(r_u ** 2 + r_v ** 2)
 
 
-def field_stats(label, u, v, residual_thresholds=(2.0, 3.0, 5.0, 10.0)):
+def field_stats(label, u, v, native_scale=None, residual_thresholds=(2.0, 3.0, 5.0, 10.0)):
+    """native_scale: divide u,v by this to reach the native displacement
+    units normalized_local_residual's eps=0.1 floor was calibrated for
+    (px/frame for the planar Lavision_Sample dataset this module was
+    originally written against -- see that function's docstring).
+    Defaults to PX_PER_MM_TO_MM_S so every EXISTING call site in this
+    module (all planar, all implicitly assuming that dataset's own
+    pixel pitch/dt) keeps behaving exactly as before -- this default
+    was a hidden, hardcoded module-level global prior to this parameter
+    existing, silently wrong for any OTHER dataset's units. A caller
+    for a different dataset (e.g. compare_stereo_preview.py) must pass
+    its own native_scale explicitly; there is no dataset-agnostic
+    default that would be correct."""
+    if native_scale is None:
+        native_scale = PX_PER_MM_TO_MM_S
     finite = np.isfinite(u) & np.isfinite(v)
     n_total = u.size
     n_valid = int(finite.sum())
     mag = np.hypot(u, v)
 
-    # Score residuals on the px/frame form of the field, never the mm/s
-    # form -- normalized_local_residual's eps floor is defined in pixels
-    # and silently stops working otherwise (see its docstring).
-    resid = normalized_local_residual(u / PX_PER_MM_TO_MM_S, v / PX_PER_MM_TO_MM_S)
+    # Score residuals on the field's own NATIVE displacement units, never
+    # whatever physical-velocity form it was handed in -- normalized_
+    # local_residual's eps floor is defined in native units and silently
+    # stops working otherwise (see its docstring).
+    resid = normalized_local_residual(u / native_scale, v / native_scale)
     resid_valid = resid[finite & np.isfinite(resid)]
 
     stats = {
