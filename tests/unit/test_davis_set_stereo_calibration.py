@@ -324,12 +324,19 @@ def test_derive_world_shape_uses_largest_extent():
 # ---- exact decode: _exact_camera_mapping_from_calibration_xml (synthetic) ----
 
 def _write_polynomial3rd_calibration_xml(path, planes_by_camera, ppm=18.0, corrected_wh=(2000.0, 1500.0),
-                                          field_of_view="SideBySideStereoVolume"):
+                                          field_of_view="SideBySideStereoVolume", original_wh=(4096.0, 3008.0)):
     """planes_by_camera: {camera_id: [(z_position, s_o, t_o, nx, ny, a_coefs, b_coefs), ...]}
     a_coefs/b_coefs: dicts keyed like CameraMapping.COEF_KEYS. Builds a
     minimal but real-shaped Polynomial3rdOrder Calibration.xml -- the same
     element names/nesting confirmed against real DaVis projects (see
-    _exact_camera_mapping_from_calibration_xml's docstring)."""
+    _exact_camera_mapping_from_calibration_xml's docstring).
+
+    original_wh: this camera's OriginalImageSize (Width, Height) --
+    included by default (matching every real Calibration.xml, which
+    always has it -- see J:\\Final_Stereo's own, Width=4096 Height=3008)
+    so existing tests exercise the SAME real-shaped XML this decode
+    actually sees; pass None to omit it, for a test that specifically
+    checks the "not present" fallback."""
     mappers = []
     for cam_id, planes in planes_by_camera.items():
         plane_xml = []
@@ -346,12 +353,15 @@ def _write_polynomial3rd_calibration_xml(path, planes_by_camera, ppm=18.0, corre
        <CoefficientsB {b_attrs} />
       </Polynomial3rdOrder>
      </PolynomialMapping>""")
+        original_xml = (f'<OriginalImageSize Width="{original_wh[0]}" Height="{original_wh[1]}" />'
+                         if original_wh is not None else "")
         mappers.append(f"""
    <CoordinateMapper CameraIdentifier="{cam_id}" Type="Polynomial3rdOrder" GroupId="1">
     <PolynomialParameters>
      <CommonParameters>
       <PixelPerMmFactor Value="{ppm}" />
       <CorrectedImageSize Width="{corrected_wh[0]}" Height="{corrected_wh[1]}" />
+      {original_xml}
      </CommonParameters>{"".join(plane_xml)}
     </PolynomialParameters>
    </CoordinateMapper>""")
@@ -394,6 +404,24 @@ def test_exact_camera_mapping_passes_coefficients_through_unchanged(tmp_path):
     assert plane.dx_coefs == pytest.approx(a)
     assert plane.dy_coefs == pytest.approx(b)
     assert plane.z_mm == pytest.approx(1.0)  # ZPosition == ppm -> z_mm == 1.0 exactly
+    assert plane.raw_width == 4096
+    assert plane.raw_height == 3008
+
+
+def test_exact_camera_mapping_missing_original_image_size_defaults_to_zero(tmp_path):
+    """OriginalImageSize is read on a best-effort basis (see
+    CameraMappingSettings.raw_width/raw_height's own comment) -- its
+    absence must NOT fail the exact decode (dewarp itself never needed
+    it), just leave raw_width/raw_height at their "unknown, no masking
+    possible" default of 0."""
+    zero = {k: 0.0 for k in COEF_KEYS}
+    xml_path = tmp_path / "Calibration.xml"
+    _write_polynomial3rd_calibration_xml(
+        str(xml_path), {"1": [(18.0, 0.0, 0.0, 100.0, 100.0, zero, zero)]}, original_wh=None)
+
+    planes, _, _ = _exact_camera_mapping_from_calibration_xml(str(xml_path), "1")
+    assert planes[0].raw_width == 0
+    assert planes[0].raw_height == 0
 
 
 def test_exact_camera_mapping_two_planes_z_mm_recovered(tmp_path):
@@ -560,6 +588,13 @@ def test_read_stereo_calibration_from_set_synthetic_exact_decode_happy_path(tmp_
     assert result.cam0_mapping.dx_coefs != result.cam1_mapping.dx_coefs
     assert result.cam0_mapping_plane2 is None  # only one plane in this fixture
     assert result.world_shape == (1500, 2000)  # CorrectedImageSize (height, width)
+    # OriginalImageSize (4096x3008, this file's default -- see
+    # _write_polynomial3rd_calibration_xml) round-trips onto both
+    # cameras' CameraMappingSettings, for CameraMapping.raw_domain_valid.
+    assert result.cam0_mapping.raw_width == 4096
+    assert result.cam0_mapping.raw_height == 3008
+    assert result.cam1_mapping.raw_width == 4096
+    assert result.cam1_mapping.raw_height == 3008
 
 
 def test_read_stereo_calibration_from_set_rejects_side_by_side_2d(tmp_path):

@@ -149,3 +149,68 @@ def test_build_camera_mapping_interpolated_dewarp_is_sane():
     assert dewarped.shape == (100, 100)
     assert not np.isnan(dewarped).any()
     assert np.any(dewarped > 0)
+
+
+# ---- raw_domain_valid: geometric FOV mask (real raw sensor bounds) ----
+
+def test_raw_domain_valid_true_inside_false_outside_sensor_bounds():
+    # Identity mapping (zero coefs) -- world_to_raw(x, y) == (x, y), so
+    # raw_domain_valid's own bounds check is exercised directly against a
+    # known raw_width/raw_height with no polynomial distortion in the way.
+    cm = CameraMapping(x0=50.0, x_span=100.0, y0=50.0, y_span=100.0,
+                        dx_coefs=_zero_coefs(), dy_coefs=_zero_coefs(),
+                        raw_width=100, raw_height=80)
+    x = np.array([10.0, 99.0, 100.0, 150.0, -5.0])
+    y = np.array([10.0, 79.0, 80.0, 10.0, 10.0])
+    # (10,10) and (99,79) are inside [0,100)x[0,80); (100,80) is exactly
+    # on the exclusive upper bound (outside); (150,10) and (-5,10) are
+    # outside in x either direction.
+    expected = np.array([True, True, False, False, False])
+    np.testing.assert_array_equal(cm.raw_domain_valid(x, y), expected)
+
+
+def test_raw_domain_valid_all_true_when_raw_size_unknown():
+    # raw_width/raw_height default to None (no OriginalImageSize data --
+    # the marks-fit calibration path, or any hand-built CameraMapping that
+    # doesn't pass them, e.g. every other test in this file) -- must mean
+    # "no masking possible", not "everything is out of view".
+    cm = CameraMapping(x0=0.0, x_span=100.0, y0=0.0, y_span=100.0,
+                        dx_coefs=_zero_coefs(), dy_coefs=_zero_coefs())
+    x = np.array([-1000.0, 0.0, 1e6])
+    y = np.array([-1000.0, 0.0, 1e6])
+    assert cm.raw_domain_valid(x, y).all()
+
+
+def test_raw_domain_valid_all_true_when_raw_size_zero():
+    # Same "unknown" contract as None, via config.schema.
+    # CameraMappingSettings' own 0-default (not every caller passes None
+    # explicitly -- build_camera_mapping always forwards settings.raw_
+    # width/raw_height, which default to 0, not None).
+    cm = CameraMapping(x0=0.0, x_span=100.0, y0=0.0, y_span=100.0,
+                        dx_coefs=_zero_coefs(), dy_coefs=_zero_coefs(),
+                        raw_width=0, raw_height=0)
+    x = np.array([-1000.0, 1e6])
+    y = np.array([-1000.0, 1e6])
+    assert cm.raw_domain_valid(x, y).all()
+
+
+def test_build_camera_mapping_threads_raw_width_height_single_plane():
+    plane = _plane(z_mm=None, x0=10.0, x_span=50.0, y0=5.0, y_span=40.0)
+    plane.raw_width, plane.raw_height = 4096, 3008
+    cm = build_camera_mapping(plane)
+    assert cm.raw_width == 4096
+    assert cm.raw_height == 3008
+
+
+def test_build_camera_mapping_threads_raw_width_height_two_planes():
+    # raw_width/raw_height is a fixed per-camera constant (see
+    # interpolate_camera_mapping's own comment) -- both planes carry the
+    # SAME real value here, matching how _exact_camera_mapping_from_
+    # calibration_xml actually populates them (one OriginalImageSize per
+    # camera, stamped onto every plane).
+    p1, p2 = _plane(z_mm=1.0), _plane(z_mm=-2.0, coef_scale=2.0)
+    p1.raw_width = p2.raw_width = 4096
+    p1.raw_height = p2.raw_height = 3008
+    cm = build_camera_mapping(p1, p2, sheet_z_mm=-0.5)
+    assert cm.raw_width == 4096
+    assert cm.raw_height == 3008

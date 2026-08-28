@@ -379,7 +379,14 @@ class PipelineWorker(QObject):
                 t_run0 = time.time()
                 u1, v1, valid1, elapsed1, x, y, r1 = self._run_camera(dw_a0, dw_b0, cfg)
                 u2, v2, valid2, elapsed2, _, _, r2 = self._run_camera(dw_a1, dw_b1, cfg)
-                valid = valid1 & valid2
+                # See preview_panel._compute_stereo's comment on the same
+                # mask: reject a correlation point either camera can't
+                # actually see (world_to_raw outside its real raw sensor).
+                # y is _build_engine's DISPLAY-flipped coordinate -- un-flip
+                # back to world_to_raw's row-down grid convention first.
+                y_row_down = cfg.stereo.world_shape[0] - y
+                valid = (valid1 & valid2 & cam0.raw_domain_valid(x, y_row_down)
+                          & cam1.raw_domain_valid(x, y_row_down))
                 elapsed = elapsed1 + elapsed2
                 t_post = time.time() - t_run0 - elapsed
 

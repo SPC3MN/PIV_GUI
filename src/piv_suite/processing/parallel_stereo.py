@@ -188,7 +188,13 @@ def process_one_pair_stereo_worker(idx, pair_id, fa0, fb0, fa1, fb1, cfg, output
 
     u1, v1, valid1, elapsed1, r1 = pipeline.process_frames(engine, dw_a0, dw_b0, post)
     u2, v2, valid2, elapsed2, r2 = pipeline.process_frames(engine, dw_a1, dw_b1, post)
-    valid = valid1 & valid2
+    # See preview_panel._compute_stereo's comment on the same mask: reject
+    # a correlation point either camera can't actually see (world_to_raw
+    # outside its real raw sensor). y is _get_worker_engine's DISPLAY-
+    # flipped coordinate -- un-flip back to world_to_raw's row-down grid
+    # convention first.
+    y_row_down = cfg.stereo.world_shape[0] - y
+    valid = valid1 & valid2 & cam0.raw_domain_valid(x, y_row_down) & cam1.raw_domain_valid(x, y_row_down)
     elapsed = elapsed1 + elapsed2
 
     t_post0 = time.time()

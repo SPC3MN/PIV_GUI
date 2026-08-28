@@ -457,8 +457,11 @@ def _exact_camera_mapping_from_calibration_xml(calibration_xml_path, camera_iden
     z_mm recovered as ZPosition/PixelPerMmFactor -- DaVis stores ZPosition
     pre-scaled by PixelPerMmFactor, confirmed exactly: 17.920975188143096
     /17.920975188143096 == 1.0 for a real z=1mm plane, -35.841950.../
-    17.920975188143096 == -2.0 for a real z=-2mm plane), or None if this
-    camera isn't Polynomial3rdOrder or has no usable plane."""
+    17.920975188143096 == -2.0 for a real z=-2mm plane; each plane also
+    carries this camera's raw_width/raw_height, read from this same
+    CommonParameters block's OriginalImageSize -- see CameraMappingSettings'
+    own comment), or None if this camera isn't Polynomial3rdOrder or has
+    no usable plane."""
     root = ET.parse(calibration_xml_path).getroot()
     cm = root.find(f".//CoordinateMapper[@CameraIdentifier='{camera_identifier}']")
     if cm is None or cm.attrib.get("Type") != "Polynomial3rdOrder":
@@ -470,6 +473,25 @@ def _exact_camera_mapping_from_calibration_xml(calibration_xml_path, camera_iden
         return None
     ppm = float(ppm_el.attrib["Value"])
     corrected_wh = (float(corrected_el.attrib["Width"]), float(corrected_el.attrib["Height"]))
+
+    # OriginalImageSize is this camera's real raw sensor size -- sibling of
+    # PixelPerMmFactor/CorrectedImageSize in the same CommonParameters
+    # block (confirmed on real data: J:\Final_Stereo\Properties\
+    # Calibration\Calibration.xml, Width=4096 Height=3008), the same
+    # element _read_dual_planar_camera already reads for the SideBySide2D
+    # path. A camera-level constant, not per-plane -- read once here and
+    # stamped onto every CameraMappingSettings this function returns for
+    # this camera (see CameraMappingSettings.raw_width/raw_height's own
+    # comment for what it's used for: calibration.camera_mapping.
+    # CameraMapping.raw_domain_valid). Missing (0, 0) rather than raising
+    # if this element isn't there for some reason -- matches this field's
+    # "0 = unknown, no masking possible" contract instead of making an
+    # otherwise-valid exact-decode calibration fail over a field that's
+    # only an OPTIONAL refinement (FOV masking), not required for dewarp
+    # itself.
+    original_el = common.find("OriginalImageSize")
+    raw_wh = ((int(float(original_el.attrib["Width"])), int(float(original_el.attrib["Height"])))
+              if original_el is not None else (0, 0))
 
     planes = []
     for pm in cm.findall(".//PolynomialMapping"):
@@ -487,7 +509,8 @@ def _exact_camera_mapping_from_calibration_xml(calibration_xml_path, camera_iden
             x0=float(origin_el.attrib["s_o"]), x_span=float(norm_el.attrib["nx"]),
             y0=float(origin_el.attrib["t_o"]), y_span=float(norm_el.attrib["ny"]),
             dx_coefs=dx_coefs, dy_coefs=dy_coefs,
-            name=f"{name_prefix} z={z_mm:.2f}mm (DaVis Polynomial3rdOrder, exact)", z_mm=z_mm))
+            name=f"{name_prefix} z={z_mm:.2f}mm (DaVis Polynomial3rdOrder, exact)", z_mm=z_mm,
+            raw_width=raw_wh[0], raw_height=raw_wh[1]))
 
     if not planes:
         return None

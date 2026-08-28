@@ -18,11 +18,21 @@ class CameraMapping:
     '1','s','s2','s3','t','t2','t3','st','s2t','t2s' -- read directly off
     DaVis's calibration report panel, in order.
     """
-    def __init__(self, x0, x_span, y0, y_span, dx_coefs, dy_coefs, name=""):
+    def __init__(self, x0, x_span, y0, y_span, dx_coefs, dy_coefs, name="",
+                 raw_width=None, raw_height=None):
         self.x0, self.x_span = x0, x_span
         self.y0, self.y_span = y0, y_span
         self.dx_coefs, self.dy_coefs = dx_coefs, dy_coefs
         self.name = name
+        # This camera's real raw sensor size (DaVis Calibration.xml's
+        # OriginalImageSize), used by raw_domain_valid to tell a genuinely
+        # out-of-view correlation point (world_to_raw lands outside the
+        # real sensor) from an in-view one. None/0 (the default -- every
+        # existing caller that doesn't pass these, e.g. the marks-fit
+        # calibration path or a hand-built CameraMapping in a test) means
+        # "unknown, no masking possible" -- raw_domain_valid then always
+        # returns True, leaving behavior for those callers unchanged.
+        self.raw_width, self.raw_height = raw_width, raw_height
         self._cached_shape = None
         self._x_raw = self._y_raw = None
 
@@ -59,6 +69,52 @@ class CameraMapping:
         return map_coordinates(raw_image, [self._y_raw, self._x_raw],
                                 order=order, mode="constant", cval=0.0)
 
+    def raw_domain_valid(self, x, y):
+        """True where world-grid point (x, y) maps, via this camera's own
+        world_to_raw, to a pixel actually INSIDE its real raw sensor --
+        [0, raw_width) x [0, raw_height). False where it maps outside
+        (this camera genuinely can't see that point at all).
+
+        WHY THIS EXISTS, separately from dewarp_image's existing cval=0.0:
+        dewarp_image already correctly zero-fills a dewarped pixel outside
+        this camera's true view (map_coordinates' cval=0.0 for any
+        (x_raw, y_raw) sample landing outside the real raw frame) -- the
+        IMAGE is already right. But a correlation WINDOW straddling that
+        zero-padded region can still correlate mostly-zero content against
+        mostly-zero content and return a spurious, statistically
+        plausible-looking displacement -- nothing about a flat black patch
+        trips the range/std-dev outlier filters in processing.postprocess,
+        since those look at whether a vector's VALUE is an outlier, not
+        whether the pixels behind it were ever real image content. DaVis's
+        own stereo output doesn't report vectors there at all (crops the
+        overlapping-FOV region rather than emitting bad ones); this is the
+        geometric check that lets this app's own `valid` mask do the same
+        thing, at the correlation grid's own points -- confirmed directly
+        against real dual-plane calibration data that grid points near a
+        world_shape canvas's edges fall outside one camera's raw_width/
+        raw_height while a same-region point stays inside the other's,
+        exactly the "only one camera can see this" case a stereo pair
+        needs both cameras' agreement to reject.
+
+        Deliberately evaluated directly on the (typically few-hundred-
+        point) CORRELATION grid handed in by the caller, NOT routed
+        through _ensure_grid/dewarp_image's cached PER-PIXEL world_shape
+        grid (which can be several million points, e.g. 3067x5874) --
+        world_to_raw is a handful of polynomial evaluations, cheap enough
+        to simply call fresh here every time rather than adding a second
+        cache keyed by grid shape for what's already a tiny computation.
+
+        raw_width/raw_height default to None (see __init__) for any
+        caller that doesn't have OriginalImageSize data (the marks-fit
+        calibration path, or a hand-built CameraMapping in a test) --
+        this returns all-True (no masking) in that case, exactly like
+        this schema's existing 0/None-means-not-available convention
+        elsewhere, so those callers' behavior is unaffected."""
+        if not self.raw_width or not self.raw_height:
+            return np.ones(np.asarray(x).shape, dtype=bool)
+        raw_x, raw_y = self.world_to_raw(x, y)
+        return (raw_x >= 0) & (raw_x < self.raw_width) & (raw_y >= 0) & (raw_y < self.raw_height)
+
 
 COEF_KEYS = ("1", "s", "s2", "s3", "t", "t2", "t3", "st", "s2t", "t2s")
 
@@ -83,10 +139,16 @@ def interpolate_camera_mapping(plane_a, plane_b, sheet_z_mm, name=""):
 
     dx_coefs = {k: lerp(plane_a.dx_coefs[k], plane_b.dx_coefs[k]) for k in COEF_KEYS}
     dy_coefs = {k: lerp(plane_a.dy_coefs[k], plane_b.dy_coefs[k]) for k in COEF_KEYS}
+    # raw_width/raw_height are a fixed per-CAMERA constant (the physical
+    # sensor doesn't change between calibrated Z-planes), so no lerp() --
+    # plane_a/plane_b carry the identical value (both populated straight
+    # off the same camera's OriginalImageSize by _exact_camera_mapping_
+    # from_calibration_xml); plane_a's is used as-is.
     return CameraMapping(
         lerp(plane_a.x0, plane_b.x0), lerp(plane_a.x_span, plane_b.x_span),
         lerp(plane_a.y0, plane_b.y0), lerp(plane_a.y_span, plane_b.y_span),
         dx_coefs, dy_coefs, name,
+        raw_width=plane_a.raw_width, raw_height=plane_a.raw_height,
     )
 
 
@@ -99,7 +161,8 @@ def build_camera_mapping(settings, plane2_settings=None, sheet_z_mm=None):
     means a single-plane mapping -- sheet_z_mm is ignored."""
     if plane2_settings is None:
         return CameraMapping(settings.x0, settings.x_span, settings.y0, settings.y_span,
-                              settings.dx_coefs, settings.dy_coefs, settings.name)
+                              settings.dx_coefs, settings.dy_coefs, settings.name,
+                              raw_width=settings.raw_width, raw_height=settings.raw_height)
     if sheet_z_mm is None:
         raise ValueError("sheet_z_mm is required when a camera has two calibrated Z-planes")
     return interpolate_camera_mapping(settings, plane2_settings, sheet_z_mm, name=settings.name)
