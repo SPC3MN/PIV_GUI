@@ -5,22 +5,36 @@ Migrated unchanged from piv_common.CPUPIVProcess/init_cpu_processor
 anywhere in this module -- this engine works on any machine with plain
 openpiv-python installed.
 
-VALIDATION LIVES IN POST-PROCESSING, NOT HERE. This engine's job is
-purely to produce a displacement field; the openpiv internals it drives
-(windef.first_pass / windef.multipass_img_deform) still call
-validation.typical_validation and filters.replace_outliers
-unconditionally every pass -- openpiv gives no settings flag to disable
-that -- but _openpiv_speedups.apply_speedups() replaces
-typical_validation with a version that flags a vector invalid ONLY when
-it is literal NaN (see _openpiv_speedups.loose_typical_validation).
-That keeps replace_outliers as a pure numerical-stability mechanism
+THE FINAL VALID/INVALID DECISION LIVES IN POST-PROCESSING, NOT HERE --
+but by default (per_pass_validation=True) this engine now also REPLACES
+(never permanently rejects) a spurious vector mid-calculation, between
+passes, before it gets deformed into the next, finer pass. The openpiv
+internals this engine drives (windef.first_pass / multipass_img_deform)
+call validation.typical_validation and filters.replace_outliers
+unconditionally every pass -- openpiv gives no flag to disable that --
+and _openpiv_speedups.apply_speedups()/use_real_validation() (see
+__init__) swaps typical_validation for openpiv's OWN real
+implementation when per_pass_validation is True, so a vector failing
+either the per-pass local-median (UOD) test OR a per-pass correlation
+peak2mean signal-to-noise threshold gets locally-mean-replaced by
+replace_outliers right there, before deformation -- matching DaVis's own
+multi-pass postprocessing, which pairs a median removal factor with a
+peak-ratio ("scalarfield") threshold (confirmed via a real DaVis
+JobHistory.xml). When per_pass_validation is False,
+use_loose_validation() is active instead, and _openpiv_speedups.
+loose_typical_validation flags a vector invalid ONLY when it is literal
+NaN -- replace_outliers is then a pure numerical-stability mechanism
 (preventing a residual-NaN cell from poisoning the NEXT pass's
 RectBivariateSpline deformation -- see _fill_residual_nan below for the
-documented crash this guards against) without ever causing a vector to
-be counted "invalid" mid-calculation. self.val_locations is therefore
-always all-False (all-valid): the ENTIRE final valid/invalid decision is
-made once, downstream, in processing.postprocess, driven by
-PostProcessSettings.
+documented crash this guards against), and no real vector is ever
+replaced mid-calculation. Either way, self.val_locations is always
+all-False (all-valid): a vector replaced here was already fixed up, not
+marked invalid, so the ENTIRE final valid/invalid DECISION is still made
+once, downstream, in processing.postprocess, driven by
+PostProcessSettings -- this engine's replacement pass only changes what
+value reaches that decision, matching how DaVis's own multi-pass
+postprocessing works (its final pass's useScalarfieldThreshold is
+separately false; the threshold only applies mid-calculation there too).
 
 CPUPIVProcess.__init__ also applies the two remaining faithful,
 numerically-verified-equivalent speedups from the same module for
@@ -90,14 +104,16 @@ class CPUPIVProcess:
     directly on in-memory frame arrays. cpu_settings keys are
     `PIVSettings` field names (e.g. windowsizes, overlap, filter_method,
     smoothn, ...) -- see openpiv.settings.PIVSettings for the full list;
-    unknown keys are warned about, not silently dropped. sig2noise_*/
-    validation_first_pass/replace_vectors are accepted if present (for
-    backward compatibility with older settings dicts) but have no effect
-    -- see this module's docstring.
+    unknown keys are warned about, not silently dropped. sig2noise_validate/
+    sig2noise_method/validation_first_pass/replace_vectors are accepted if
+    present in cpu_settings (for backward compatibility with older settings
+    dicts) but are always overridden below, driven by per_pass_validation
+    instead -- see this module's docstring.
 
-    per_pass_validation/per_pass_median_threshold/per_pass_median_size
-    (not PIVSettings fields; popped before the above) opt into openpiv's
-    own real local-median/UOD validation between passes instead of the
+    per_pass_validation/per_pass_median_threshold/per_pass_median_size/
+    per_pass_sig2noise_threshold (not PIVSettings fields; popped before the
+    above) opt into openpiv's own real per-pass local-median (UOD) AND
+    peak2mean signal-to-noise validation between passes instead of the
     NaN-only default -- see config.schema.ValidationSettings' docstring."""
 
     def __init__(self, frame_shape, **cpu_settings):
@@ -114,6 +130,7 @@ class CPUPIVProcess:
         per_pass_validation = cpu_settings.pop("per_pass_validation", False)
         per_pass_median_threshold = cpu_settings.pop("per_pass_median_threshold", 2.0)
         per_pass_median_size = cpu_settings.pop("per_pass_median_size", 1)
+        per_pass_sig2noise_threshold = cpu_settings.pop("per_pass_sig2noise_threshold", 1.0)
 
         settings = PIVSettings()
         valid_fields = {f.name for f in dataclasses.fields(settings)}
@@ -136,25 +153,6 @@ class CPUPIVProcess:
             )
         settings.num_iterations = len(settings.windowsizes)
 
-        # Sig2noise-based rejection is dropped entirely from the
-        # calculation path (validation now lives solely in
-        # processing.postprocess -- see this module's docstring). Forcing
-        # this off also skips the extra correlation peak-search cost
-        # extended_search_area_piv would otherwise pay for computing a
-        # sig2noise ratio nothing here uses (see windef.py's read of this
-        # flag before each pass's correlation call).
-        settings.sig2noise_validate = False
-
-        # windef.multipass_img_deform already nulls sig2noise_method for
-        # passes 1..N-1 when sig2noise_validate is False (see windef.py),
-        # but windef.first_pass has no equivalent guard -- it always
-        # computes a sig2noise ratio using whatever settings.sig2noise_method
-        # is (PIVSettings' default: "peak2mean"), and that value is
-        # discarded (loose_typical_validation's s2n argument is unused).
-        # Null it here too so first_pass skips that wasted computation --
-        # pure waste removal, zero effect on u/v.
-        settings.sig2noise_method = None
-
         # Global module-level toggle, set once per engine construction --
         # safe because this app runs one CPUPIVProcess per project/batch
         # sequentially (never multiple engines with different validation
@@ -164,17 +162,37 @@ class CPUPIVProcess:
             settings.median_normalized = True
             settings.median_threshold = per_pass_median_threshold
             settings.median_size = per_pass_median_size
-            # DaVis's per-pass "multi-pass postprocessing" step is a pure
-            # local-median/UOD test -- no global range or std-dev
-            # criterion -- so widen openpiv's other typical_validation
-            # checks to effectively never trigger, isolating the local
-            # median test as the only one that can actually reject a
-            # vector here.
+            # DaVis's per-pass "multi-pass postprocessing" step pairs a
+            # local-median/UOD test with a peak-ratio ("scalarfield")
+            # threshold -- no global range or std-dev criterion -- so
+            # widen openpiv's other typical_validation checks to
+            # effectively never trigger, isolating the local-median and
+            # sig2noise tests as the only ones that can actually flag (and
+            # get locally-mean-replaced by replace_outliers) a vector here.
             settings.min_max_u_disp = (-1e6, 1e6)
             settings.min_max_v_disp = (-1e6, 1e6)
             settings.std_threshold = 1e6
+            # peak2mean sig2noise, computed cheaply on the fast correlation
+            # path from data it already gathers per window -- see
+            # _openpiv_speedups.py's fast_extended_search_area_piv /
+            # _correlation_to_displacement_flat docstrings for how the
+            # naive version of this (before that module's fast path
+            # accounted for "peak2mean" specifically) used to fall back to
+            # openpiv's slow, unchunked correlation entirely. Bundled with
+            # per_pass_validation rather than a separate flag since a
+            # real sig2noise ratio is only ever produced when
+            # use_real_validation() (below) is also active -- see this
+            # module's top docstring.
+            settings.sig2noise_validate = True
+            settings.sig2noise_method = "peak2mean"
+            settings.sig2noise_threshold = per_pass_sig2noise_threshold
             use_real_validation()
         else:
+            # loose_typical_validation ignores its s2n argument entirely
+            # (see this module's docstring), so there's no reason to pay
+            # for computing one -- keep it off for the loose/NaN-only path.
+            settings.sig2noise_validate = False
+            settings.sig2noise_method = None
             use_loose_validation()
 
         self._settings = settings

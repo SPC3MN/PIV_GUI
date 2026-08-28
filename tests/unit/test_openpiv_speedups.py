@@ -530,7 +530,20 @@ def test_extended_search_area_piv_falls_back_for_extended_search_area():
     assert np.array_equal(v_orig, v_fast, equal_nan=True)
 
 
-def test_extended_search_area_piv_falls_back_for_sig2noise():
+def test_extended_search_area_piv_stays_fast_for_peak2mean_sig2noise():
+    # sig2noise_method="peak2mean" is this app's only real usage (see
+    # cpu_engine.CPUPIVProcess) and, unlike the other fallback cases in
+    # this file, deliberately does NOT fall back to the slow path any
+    # more -- _correlation_to_displacement_flat computes peak2mean from
+    # data the fast path already gathers per window (see that function's
+    # docstring). That means this comparison picks up
+    # fast_fft_correlate_images's documented float64-upcast precision
+    # difference vs. the original's float32 correlation (see this
+    # module's PRECISION-UPGRADE SPEEDUP docstring) -- so, unlike the
+    # OTHER fallback tests below (which stay bit-exact because they
+    # genuinely still call the original), this one uses the same
+    # close-but-not-bit-exact tolerance as
+    # test_fft_correlate_images_matches_float64_numpy_reference.
     rng = np.random.RandomState(34)
     shape = (64, 64)
     image_a = (rng.rand(*shape) * 255).astype(np.float32)
@@ -539,9 +552,14 @@ def test_extended_search_area_piv_falls_back_for_sig2noise():
         image_a.copy(), image_b.copy(), window_size=16, overlap=8, sig2noise_method="peak2mean")
     u_fast, v_fast, s2n_fast = fast_extended_search_area_piv(
         image_a.copy(), image_b.copy(), window_size=16, overlap=8, sig2noise_method="peak2mean")
-    assert np.array_equal(u_orig, u_fast, equal_nan=True)
-    assert np.array_equal(v_orig, v_fast, equal_nan=True)
-    assert np.array_equal(s2n_orig, s2n_fast, equal_nan=True)
+    assert np.allclose(u_orig, u_fast, atol=1e-4, rtol=1e-4, equal_nan=True)
+    assert np.allclose(v_orig, v_fast, atol=1e-4, rtol=1e-4, equal_nan=True)
+    assert np.allclose(s2n_orig, s2n_fast, atol=1e-3, rtol=1e-3, equal_nan=True)
+    # A real, non-degenerate signal-to-noise ratio actually came back --
+    # guards against a silent all-zero/all-NaN regression in the peak2mean
+    # computation itself, which the closeness check above wouldn't catch
+    # if BOTH sides were degenerate the same way.
+    assert np.any(s2n_fast > 0)
 
 
 def test_extended_search_area_piv_falls_back_for_linear_method():

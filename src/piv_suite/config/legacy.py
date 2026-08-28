@@ -89,11 +89,13 @@ def to_cpu_settings(correlation: CorrelationSettings, validation: ValidationSett
     """-> cpu_settings dict, ready for engines.cpu_engine.CPUPIVProcess /
     init_cpu_processor (openpiv.settings.PIVSettings field names).
 
-    No sig2noise_*/validation_first_pass/replace_vectors keys -- those
-    ValidationSettings fields were removed (validation now lives entirely
-    in PostProcessSettings; CPUPIVProcess itself force-disables
-    sig2noise_validate and always runs its NaN-only per-pass fill, see
-    engines/cpu_engine.py)."""
+    No validation_first_pass/replace_vectors keys -- those ValidationSettings
+    fields were removed (the user-facing "remove invalid vectors" step lives
+    in PostProcessSettings). per_pass_sig2noise_threshold IS forwarded,
+    though -- CPUPIVProcess only turns real sig2noise-based rejection on
+    when per_pass_validation is also True, bundling it with the per-pass
+    median test as one "close to DaVis" mode; see engines/cpu_engine.py and
+    ValidationSettings.per_pass_sig2noise_threshold's docstring."""
     windowsizes, overlap = passes_to_cpu(correlation.passes)
     return {
         "windowsizes": windowsizes,
@@ -111,6 +113,7 @@ def to_cpu_settings(correlation: CorrelationSettings, validation: ValidationSett
         "per_pass_validation": validation.per_pass_validation,
         "per_pass_median_threshold": validation.per_pass_median_threshold,
         "per_pass_median_size": validation.per_pass_median_size,
+        "per_pass_sig2noise_threshold": validation.per_pass_sig2noise_threshold,
     }
 
 

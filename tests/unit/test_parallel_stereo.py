@@ -103,8 +103,21 @@ def _serial_reference(cfg, angles, fa0, fb0, fa1, fb1):
     handle_pair_stereo / pipeline_worker._process_set_stereo) computes --
     build cam0/cam1 + dewarp + build engine PER CAMERA (two separate
     instances, matching both serial loops' actual structure) +
-    process_frames x2 + combine_stereo_pair, no parallelism involved at
-    all. The reference every worker-process result must match exactly."""
+    pipeline.process_stereo_pair (both engines -> combine -> validate the
+    combined field once -- see that function's own docstring for why this
+    replaced the earlier process_frames-x2-then-intersect approach), no
+    parallelism involved at all. The reference every worker-process result
+    must match exactly.
+
+    This fixture's own postprocess settings (_fast_stereo_cfg) disable
+    every validation mechanism (range_filter, global_outlier_std,
+    remove_small_groups) and never sets raw_width/raw_height on the
+    synthetic cameras (so raw_domain_valid is a no-op, all-True -- see
+    CameraMapping.raw_domain_valid's own "unknown, no masking" contract)
+    -- so old-vs-new architecture makes no numeric difference here either
+    way; this reference is kept structurally faithful to the real
+    production call sites anyway, not just simplified to whatever
+    matches."""
     cam0 = build_camera_mapping(cfg.stereo.cam0_mapping, cfg.stereo.cam0_mapping_plane2,
                                  cfg.stereo.sheet_z_mm)
     cam1 = build_camera_mapping(cfg.stereo.cam1_mapping, cfg.stereo.cam1_mapping_plane2,
@@ -122,18 +135,14 @@ def _serial_reference(cfg, angles, fa0, fb0, fa1, fb1):
     post = cfg.postprocess.for_pipeline()
 
     engine0, x, y = factory(dw_a0.shape, {"cpu_settings": cpu_settings})
-    u1, v1, valid1, _, r1 = pipeline.process_frames(engine0, dw_a0, dw_b0, post)
     engine1, _, _ = factory(dw_a1.shape, {"cpu_settings": cpu_settings})
-    u2, v2, valid2, _, r2 = pipeline.process_frames(engine1, dw_a1, dw_b1, post)
-    valid = valid1 & valid2
+    y_row_down = cfg.stereo.world_shape[0] - y
+    fov_valid = cam0.raw_domain_valid(x, y_row_down) & cam1.raw_domain_valid(x, y_row_down)
 
-    U, V, W = pipeline.combine_stereo_pair(
-        u1, v1, u2, v2, angles, cfg.stereo.world_scale_px_per_mm, cfg.calibration.frame_dt_s)
-    U = np.where(valid, U, np.nan)
-    V = np.where(valid, V, np.nan)
-    W = np.where(valid, W, np.nan)
-    n_range = r1["range_residual"] + r2["range_residual"]
-    n_std = r1["std_dev"] + r2["std_dev"]
+    U, V, W, valid, _, r = pipeline.process_stereo_pair(
+        engine0, engine1, dw_a0, dw_b0, dw_a1, dw_b1, angles,
+        cfg.stereo.world_scale_px_per_mm, cfg.calibration.frame_dt_s, fov_valid, post, x, y)
+    n_range, n_std = r["range_residual"], r["std_dev"]
     return x, y, U, V, W, valid, n_range, n_std
 
 

@@ -376,30 +376,37 @@ class PipelineWorker(QObject):
                 dw_b1 = cam1.dewarp_image(fb1, cfg.stereo.world_shape, cfg.stereo.dewarp_order)
                 t_pre = time.time() - t_pre0
 
-                t_run0 = time.time()
-                u1, v1, valid1, elapsed1, x, y, r1 = self._run_camera(dw_a0, dw_b0, cfg)
-                u2, v2, valid2, elapsed2, _, _, r2 = self._run_camera(dw_a1, dw_b1, cfg)
+                # process_stereo_pair validates the COMBINED/triangulated
+                # field once (not each camera's raw 2D field independently,
+                # then intersected) -- see its own docstring for the
+                # real-data evidence this replaced the previous approach
+                # with.
+                engine0, x, y = _build_engine(cfg.project.backend, dw_a0.shape, cfg.correlation, cfg.validation)
+                engine1, _, _ = _build_engine(cfg.project.backend, dw_a1.shape, cfg.correlation, cfg.validation)
                 # See preview_panel._compute_stereo's comment on the same
                 # mask: reject a correlation point either camera can't
                 # actually see (world_to_raw outside its real raw sensor).
                 # y is _build_engine's DISPLAY-flipped coordinate -- un-flip
                 # back to world_to_raw's row-down grid convention first.
                 y_row_down = cfg.stereo.world_shape[0] - y
-                valid = (valid1 & valid2 & cam0.raw_domain_valid(x, y_row_down)
-                          & cam1.raw_domain_valid(x, y_row_down))
-                elapsed = elapsed1 + elapsed2
+                fov_valid = (cam0.raw_domain_valid(x, y_row_down) & cam1.raw_domain_valid(x, y_row_down))
+
+                t_run0 = time.time()
+                U, V, W, valid, elapsed, r = pipeline.process_stereo_pair(
+                    engine0, engine1, dw_a0, dw_b0, dw_a1, dw_b1, angles,
+                    cfg.stereo.world_scale_px_per_mm, cfg.calibration.frame_dt_s, fov_valid,
+                    cfg.postprocess.for_pipeline(), x, y, cancel_check=self._cancel_event.is_set)
                 t_post = time.time() - t_run0 - elapsed
+                del engine0, engine1
+                if cfg.project.backend == "gpu":
+                    from piv_suite.engines.gpu_engine import free_gpu_pools
+                    free_gpu_pools()
 
                 if cfg.output.verbose:
                     self.log.emit(f"[timing] {pair_id}: preprocess/dewarp={t_pre:.3f}s "
                                    f"correlation={elapsed:.3f}s postprocess={t_post:.3f}s "
                                    f"total={t_pre + elapsed + t_post:.3f}s")
 
-                U, V, W = pipeline.combine_stereo_pair(
-                    u1, v1, u2, v2, angles, cfg.stereo.world_scale_px_per_mm, cfg.calibration.frame_dt_s)
-                U = np.where(valid, U, np.nan)
-                V = np.where(valid, V, np.nan)
-                W = np.where(valid, W, np.nan)
                 n_valid, n_total = int(valid.sum()), int(valid.size)
 
                 if cfg.output.save_npz:
@@ -411,8 +418,7 @@ class PipelineWorker(QObject):
                                           title=f"Stereo PIV -- {pair_id}",
                                           quiver_scale=cfg.output.quiver_scale, plot_dpi=cfg.output.plot_dpi)
 
-                n_range = r1["range_residual"] + r2["range_residual"]
-                n_std = r1["std_dev"] + r2["std_dev"]
+                n_range, n_std = r["range_residual"], r["std_dev"]
                 row = (pair_id, elapsed, n_valid, n_total, n_range, n_std)
                 summary_rows.append(row)
                 self.pair_finished.emit(pair_id, {
@@ -423,8 +429,8 @@ class PipelineWorker(QObject):
             except EngineCancelled:
                 # See the matching except clause in _process_set_planar --
                 # same contract, fired mid-pair (between passes, from
-                # either camera's _run_camera call) rather than at this
-                # loop's own top-of-iteration check.
+                # either camera's engine call inside process_stereo_pair)
+                # rather than at this loop's own top-of-iteration check.
                 cancelled = True
                 break
             except Exception as e:

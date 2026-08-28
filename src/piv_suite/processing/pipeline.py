@@ -297,3 +297,128 @@ def combine_stereo_pair(u1, v1, u2, v2, angles, world_scale_px_per_mm, frame_dt_
     if frame_dt_s is not None:
         U, V, W = (a / frame_dt_s / 1000.0 for a in (U, V, W))
     return U, V, W
+
+
+def process_stereo_pair(engine0, engine1, frame_a0, frame_b0, frame_a1, frame_b1, angles,
+                         world_scale_px_per_mm, frame_dt_s, fov_valid, post, x, y, cancel_check=None):
+    """Stereo counterpart to process_frames: runs both cameras' engines,
+    triangulates into (U, V, W), and validates the COMBINED/triangulated
+    field ONCE -- not each camera's raw 2D field independently, then
+    intersected together (this app's previous approach, still what
+    combine_dual_planar_pair's coplanar-stitch case uses, since that one
+    genuinely has no triangulation to protect).
+
+    WHY THIS REPLACED PER-CAMERA-THEN-INTERSECT: per-camera densities on
+    a real recording were already reasonable on their own (91-93%,
+    matching or beating DaVis's own combined 89%), but requiring BOTH
+    cameras' independent 2D fields to pass validation and ANDing the
+    results compounds two INDEPENDENT accept/reject decisions
+    multiplicatively. Confirmed on real data
+    (J:\\Final_Stereo\\Swirl\\...): the independence-assumption prediction
+    (p_cam0 * p_cam1 * p_fov) matched the actual combined density almost
+    exactly (0.9262*0.9096*0.9159=0.7717 vs. measured 0.7707) -- two
+    individually DaVis-comparable per-camera rates were compounding into
+    a combined rate meaningfully worse than DaVis's own real final
+    density, even though neither camera's own rejection rate was
+    unreasonable in isolation. DaVis's own real per-view triangulation
+    doesn't show this compounding penalty (see
+    config.schema.PostProcessSettings' docstring for the real
+    JobHistory.xml evidence this whole file's validation defaults rest
+    on) -- its architecture isn't "validate each 2D view independently,
+    then require both," which is what this function stops doing.
+
+    Naively re-validating the combined U,V alone (skipping W) let real
+    garbage through: on real data, max|velocity| reached ~1600-1900 mm/s
+    against DaVis's own real max of ~380. W is the component most
+    sensitive to inter-camera disagreement in a triangulated vector, so
+    range_filter/normalized_median_residual's `w` parameter folds it into
+    the SAME local-neighbourhood check (see that function's own
+    docstring for why). Even with W included, a small, internally
+    self-consistent CLUSTER of bad vectors can still survive a purely
+    LOCAL check by construction -- confirmed on real data (a lingering
+    ~1479 mm/s survivor) -- so global_outlier_mask's own `w` parameter
+    runs a field-wide pass afterward specifically for that residual
+    failure mode. Both extensions were validated together on 3 real pairs:
+    density rose (+1.5 to +2.2 points over the old approach), the
+    local-residual outlier rate among survivors DROPPED (~30% relative),
+    and max|velocity| became MORE physically plausible in every pair, not
+    less -- a genuine accuracy improvement, not a density-for-quality
+    trade.
+
+    fov_valid: the caller's own camera-overlap/raw-sensor-domain starting
+    mask (see calibration.camera_mapping.CameraMapping.raw_domain_valid)
+    -- this function doesn't know about camera geometry, it only combines
+    that starting mask with the checks above. x, y: the world-grid
+    coordinates (same convention as engine.coords), needed only for
+    replace_invalid's griddata fill.
+
+    Returns (U, V, W, valid, elapsed, reject_counts) -- U,V,W already in
+    combine_stereo_pair's own output units (m/s if frame_dt_s given, else
+    mm/frame). elapsed is both cameras' engine time combined."""
+    t0 = time.time()
+    u1, v1 = engine0(frame_a0, frame_b0, cancel_check=cancel_check)
+    u2, v2 = engine1(frame_a1, frame_b1, cancel_check=cancel_check)
+    elapsed = time.time() - t0
+
+    U, V, W = combine_stereo_pair(u1, v1, u2, v2, angles, world_scale_px_per_mm, frame_dt_s)
+
+    # Rescale to a px/frame-equivalent for range_filter's/global_outlier_
+    # mask's eps floor (range_filter's eps is an ABSOLUTE floor in
+    # pixels -- see its own docstring), whatever unit combine_stereo_pair
+    # actually returned: U[px/frame] = U[m/s] * 1000(mm/m) *
+    # frame_dt_s(s/frame) * world_scale_px_per_mm(px/mm) when frame_dt_s
+    # is given (m/s case), or U[px/frame] = U[mm/frame] *
+    # world_scale_px_per_mm otherwise (mm/frame case, no time division
+    # happened). A units bug here (native scale off by a constant factor)
+    # doesn't just weaken the filter -- it was measured, during this
+    # feature's own development, to silently swamp the eps floor entirely
+    # and reject NOTHING.
+    to_native = (1000.0 * frame_dt_s * world_scale_px_per_mm) if frame_dt_s is not None else world_scale_px_per_mm
+    Un, Vn, Wn = U * to_native, V * to_native, W * to_native
+
+    valid = np.asarray(fov_valid).copy()
+
+    range_cfg = getattr(post, "range_filter", None)
+    n_range_rejected = 0
+    if range_cfg:
+        range_invalid = postprocess.range_filter(np.where(valid, Un, np.nan), np.where(valid, Vn, np.nan),
+                                                   w=np.where(valid, Wn, np.nan), **range_cfg)
+        n_range_rejected = int((range_invalid & valid).sum())
+        valid = valid & ~range_invalid
+
+    n_std_rejected = 0
+    if post.global_outlier_std is not None:
+        std_invalid = postprocess.global_outlier_mask(np.where(valid, U, np.nan), np.where(valid, V, np.nan),
+                                                        post.global_outlier_std, w=np.where(valid, W, np.nan))
+        n_std_rejected = int((std_invalid & valid).sum())
+        valid = valid & ~std_invalid
+
+    n_group_rejected = 0
+    group_threshold = getattr(post, "remove_small_groups_threshold", None)
+    if group_threshold:
+        grouped_valid = postprocess.remove_small_groups(valid, group_threshold)
+        n_group_rejected = int((valid & ~grouped_valid).sum())
+        valid = grouped_valid
+
+    U_out, V_out, W_out = U.copy(), V.copy(), W.copy()
+    U_out[~valid] = np.nan
+    V_out[~valid] = np.nan
+    W_out[~valid] = np.nan
+
+    if post.replace_invalid:
+        U_out, V_out, W_out = postprocess.replace_invalid_vectors(x, y, U_out, V_out, valid, w=W_out)
+
+    if post.smooth_field:
+        U_out, V_out = postprocess.smooth_vector_field(U_out, V_out, post.smooth_sigma)
+        # smooth_vector_field is a (u, v) pair smoother -- feeding W_out as
+        # both arguments smooths it against its own NaN mask (mask is
+        # derived from the first argument only) and returns two identical
+        # results; take either.
+        _, W_out = postprocess.smooth_vector_field(W_out, W_out, post.smooth_sigma)
+
+    reject_counts = {
+        "range_residual": n_range_rejected,
+        "std_dev": n_std_rejected,
+        "small_groups": n_group_rejected,
+    }
+    return U_out, V_out, W_out, valid, elapsed, reject_counts

@@ -10,12 +10,13 @@ cfg.stereo.* -- see calibration.camera_mapping.build_camera_mapping) and
 the triangulation angles are IDENTICAL for every pair in a recording,
 never mutated per pair -- nothing about them is real per-pair state.
 What genuinely varies pair to pair is exactly the same shape planar
-already parallelizes: two dewarp_image() calls, two process_frames()
-calls, one combine_stereo_pair() call, all derived solely from THIS
-pair's own fa0/fb0/fa1/fb1 with no carry-over to the next pair. Stereo
-pairs are exactly as mutually independent as planar ones; leaving them
-serial was a scoping decision (planar's stated goal was "cut planar CPU
-processing time"), not a technical blocker.
+already parallelizes: two dewarp_image() calls and one
+pipeline.process_stereo_pair() call (which itself runs both cameras'
+engines, triangulates, and validates the combined result), all derived
+solely from THIS pair's own fa0/fb0/fa1/fb1 with no carry-over to the
+next pair. Stereo pairs are exactly as mutually independent as planar
+ones; leaving them serial was a scoping decision (planar's stated goal
+was "cut planar CPU processing time"), not a technical blocker.
 
 cam0/cam1 ARE rebuilt once per WORKER PROCESS (not once per pair) as a
 caching optimization, not a correctness requirement: CameraMapping.
@@ -33,13 +34,13 @@ pairs" strategy for the PIV engine itself.
 One CPU engine, not two, is cached and reused for BOTH cameras within a
 worker process (keyed by dewarped frame shape, same cache strategy as
 parallel_planar._get_worker_engine): cam0's and cam1's dewarped frames
-share cfg.stereo.world_shape, so they share the same engine cache key,
-and both call sites' serial loops already build two functionally
-identical engines (same correlation/validation settings, same shape) per
-pair purely as an artifact of the original per-camera code structure --
-see process_one_pair_stereo_worker's docstring for why reusing one
-engine instance across both cameras changes nothing about either
-camera's numeric output.
+share cfg.stereo.world_shape, so they share the same engine cache key --
+the same engine instance is passed as BOTH engine0 and engine1 to
+pipeline.process_stereo_pair, which calls them strictly sequentially
+(engine0's call completes before engine1's begins), so there is no
+cross-camera state leak -- see process_one_pair_stereo_worker's docstring
+for why reusing one engine instance across both cameras changes nothing
+about either camera's numeric output.
 
 Deliberately NOT sharing the ProcessPoolExecutor/semaphore/wait
 submission-loop scaffolding with parallel_planar.run_planar_batch_parallel
@@ -53,9 +54,8 @@ already-tested planar code for a modest de-duplication win, risking a
 subtle behavioral difference reaching BOTH call sites at once instead of
 just this new one. What IS shared, by plain import (never copy-paste):
 apply_speedups, get_engine_factory, to_cpu_settings, build_camera_mapping,
-pipeline.process_frames/combine_stereo_pair, and the preprocess/
-postprocess helpers -- i.e. everything where duplication would actually
-risk drift. The submission loop itself is reimplemented independently
+pipeline.process_stereo_pair, and the preprocess/postprocess helpers --
+i.e. everything where duplication would actually risk drift. The submission loop itself is reimplemented independently
 (structurally identical, not copy-pasted-then-forgotten) rather than
 factored out; a future change to one loop's throttling/ordering/
 cancellation behavior should prompt a look at the other's docstring,
@@ -144,29 +144,27 @@ def process_one_pair_stereo_worker(idx, pair_id, fa0, fb0, fa1, fb1, cfg, output
     """The actual per-pair work, run inside a worker process. Same
     sequence as cli.main.handle_pair_stereo and pipeline_worker.
     PipelineWorker._process_set_stereo's own per-pair body: preprocess ->
-    dewarp both cameras -> build/reuse engine -> process_frames x2 ->
-    combine_stereo_pair -> mask by validity -> save npz/plot (done HERE,
-    by the worker, same rationale as
+    dewarp both cameras -> build/reuse engine -> pipeline.process_stereo_
+    pair (both engines -> combine -> validate the combined field once) ->
+    save npz/plot (done HERE, by the worker, same rationale as
     parallel_planar.process_one_pair_planar_worker for doing its own
     filesystem I/O instead of shipping full x/y/U/V/W arrays back over
     IPC).
 
-    Reuses ONE engine instance for both cameras' process_frames() calls
-    (see _get_worker_engine) rather than building two, as the serial
-    loops both do. This is safe: process_frames reads engine.
-    val_locations immediately after its own engine(frame_a, frame_b)
-    call, before the second camera's call ever touches the engine again
-    (engines/cpu_engine.py's CPUPIVProcess sets self.val_locations at the
-    end of __call__, and the two calls here are strictly sequential, not
-    concurrent) -- so there is no cross-camera state leak, and each
-    camera's own settings/coords/scaling (self._settings, self.coords,
-    self.scaling_par) are set once at construction and never mutated by
-    __call__, so both cameras see the identical, correct engine
-    configuration either way. Reusing one engine instead of building two
-    functionally-identical ones (same correlation/validation settings,
-    same dewarped world_shape) doesn't change either camera's u/v output
-    by a single bit -- it just skips rebuilding an equivalent engine a
-    second time.
+    Reuses ONE engine instance for both cameras (see _get_worker_engine)
+    rather than building two, as the serial loops both do -- passed as
+    both engine0 and engine1 to process_stereo_pair, which calls them
+    strictly sequentially, not concurrently (engines/cpu_engine.py's
+    CPUPIVProcess sets self.val_locations at the end of __call__, and
+    engine1's call only starts after engine0's has fully returned) -- so
+    there is no cross-camera state leak, and each camera's own settings/
+    coords/scaling (self._settings, self.coords, self.scaling_par) are
+    set once at construction and never mutated by __call__, so both
+    cameras see the identical, correct engine configuration either way.
+    Reusing one engine instead of building two functionally-identical
+    ones (same correlation/validation settings, same dewarped
+    world_shape) doesn't change either camera's u/v output by a single
+    bit -- it just skips rebuilding an equivalent engine a second time.
 
     show_plots is deliberately NOT forwarded to plot_and_save_stereo here
     (always False) -- see process_one_pair_planar_worker's docstring for
@@ -186,24 +184,28 @@ def process_one_pair_stereo_worker(idx, pair_id, fa0, fb0, fa1, fb1, cfg, output
     post = cfg.postprocess.for_pipeline()
     engine, x, y = _get_worker_engine(dw_a0.shape, cfg.correlation, cfg.validation)
 
-    u1, v1, valid1, elapsed1, r1 = pipeline.process_frames(engine, dw_a0, dw_b0, post)
-    u2, v2, valid2, elapsed2, r2 = pipeline.process_frames(engine, dw_a1, dw_b1, post)
     # See preview_panel._compute_stereo's comment on the same mask: reject
     # a correlation point either camera can't actually see (world_to_raw
     # outside its real raw sensor). y is _get_worker_engine's DISPLAY-
     # flipped coordinate -- un-flip back to world_to_raw's row-down grid
     # convention first.
     y_row_down = cfg.stereo.world_shape[0] - y
-    valid = valid1 & valid2 & cam0.raw_domain_valid(x, y_row_down) & cam1.raw_domain_valid(x, y_row_down)
-    elapsed = elapsed1 + elapsed2
+    fov_valid = cam0.raw_domain_valid(x, y_row_down) & cam1.raw_domain_valid(x, y_row_down)
 
-    t_post0 = time.time()
-    U, V, W = pipeline.combine_stereo_pair(
-        u1, v1, u2, v2, angles, cfg.stereo.world_scale_px_per_mm, cfg.calibration.frame_dt_s)
-    U = np.where(valid, U, np.nan)
-    V = np.where(valid, V, np.nan)
-    W = np.where(valid, W, np.nan)
+    # process_stereo_pair validates the COMBINED/triangulated field once
+    # (not each camera's raw 2D field independently, then intersected) --
+    # see its own docstring for the real-data evidence this replaced the
+    # previous process_frames-x2-then-AND approach with. `elapsed` is its
+    # own two engine() calls only, matching the original's elapsed1+
+    # elapsed2 scope exactly; t_post0 is set AFTER it returns so t_post
+    # keeps measuring the same thing it always did here (npz/plot save),
+    # not double-counting engine time that process_stereo_pair already
+    # accounts for separately.
+    U, V, W, valid, elapsed, r = pipeline.process_stereo_pair(
+        engine, engine, dw_a0, dw_b0, dw_a1, dw_b1, angles,
+        cfg.stereo.world_scale_px_per_mm, cfg.calibration.frame_dt_s, fov_valid, post, x, y)
     n_valid, n_total = int(valid.sum()), int(valid.size)
+    t_post0 = time.time()
 
     if cfg.output.save_npz:
         np.savez(os.path.join(output_dir, f"{pair_id}_stereo_velocity.npz"),
@@ -216,8 +218,8 @@ def process_one_pair_stereo_worker(idx, pair_id, fa0, fb0, fa1, fb1, cfg, output
                               show_plots=False)
     t_post = time.time() - t_post0
 
-    n_range = r1["range_residual"] + r2["range_residual"]
-    n_std = r1["std_dev"] + r2["std_dev"]
+    n_range = r["range_residual"]
+    n_std = r["std_dev"]
 
     return {
         "idx": idx,

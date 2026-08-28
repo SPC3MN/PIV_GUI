@@ -349,31 +349,57 @@ def handle_pair_stereo(pair_id, dw_a0, dw_b0, dw_a1, dw_b1, cfg, angles, output_
     if verbose:
         print(f"Processing {pair_id} ...", end=" ", flush=True)
 
-    u1, v1, valid1, elapsed1, x, y, r1, t_post1 = _run_camera(dw_a0, dw_b0, cfg)
-    u2, v2, valid2, elapsed2, _, _, r2, t_post2 = _run_camera(dw_a1, dw_b1, cfg)
-    # See preview_panel._compute_stereo's comment on the same mask: reject
-    # a correlation point either camera can't actually see (world_to_raw
-    # outside its real raw sensor). cfg.stereo._cam0/_cam1 are the same
-    # CameraMapping instances process_pairs_stereo's caller already built
-    # and used to dewarp dw_a0/dw_b0/dw_a1/dw_b1 above. y is _build_
-    # engine's DISPLAY-flipped coordinate -- un-flip back to world_to_raw's
-    # row-down grid convention first.
-    y_row_down = cfg.stereo.world_shape[0] - y
-    valid = (valid1 & valid2 & cfg.stereo._cam0.raw_domain_valid(x, y_row_down)
-              & cfg.stereo._cam1.raw_domain_valid(x, y_row_down))
-    elapsed = elapsed1 + elapsed2
-
-    U, V, W = pipeline.combine_stereo_pair(
-        u1, v1, u2, v2, angles, cfg.stereo.world_scale_px_per_mm, cfg.calibration.frame_dt_s)
-
-    U = np.where(valid, U, np.nan)
-    V = np.where(valid, V, np.nan)
-    W = np.where(valid, W, np.nan)
+    if cfg.correlation.use_tiling:
+        # Tiled stereo keeps the OLD per-camera-then-intersect approach:
+        # pipeline.process_stereo_pair's combined-field validation
+        # (range_filter/global_outlier_mask with w=...) needs a regular
+        # (ny, nx) grid, which tiled output structurally isn't -- an
+        # unstructured point set stitched from per-tile local grids, same
+        # reason process_frames_tiled already skips range_filter/
+        # remove_small_groups entirely (see its own docstring). Neither
+        # the GUI Preview nor the Tier-3-parallel batch path ever
+        # supported stereo+tiling in the first place (neither calls
+        # _run_camera's tiled branch) -- this CLI path is the only one
+        # that does, so it keeps the pre-existing behavior here rather
+        # than silently losing validation altogether.
+        u1, v1, valid1, elapsed1, x, y, r1, t_post1 = _run_camera(dw_a0, dw_b0, cfg)
+        u2, v2, valid2, elapsed2, _, _, r2, t_post2 = _run_camera(dw_a1, dw_b1, cfg)
+        y_row_down = cfg.stereo.world_shape[0] - y
+        valid = (valid1 & valid2 & cfg.stereo._cam0.raw_domain_valid(x, y_row_down)
+                  & cfg.stereo._cam1.raw_domain_valid(x, y_row_down))
+        elapsed = elapsed1 + elapsed2
+        U, V, W = pipeline.combine_stereo_pair(
+            u1, v1, u2, v2, angles, cfg.stereo.world_scale_px_per_mm, cfg.calibration.frame_dt_s)
+        U = np.where(valid, U, np.nan)
+        V = np.where(valid, V, np.nan)
+        W = np.where(valid, W, np.nan)
+        n_range = r1["range_residual"] + r2["range_residual"]
+        n_std = r1["std_dev"] + r2["std_dev"]
+        t_post = t_post1 + t_post2
+    else:
+        # process_stereo_pair validates the COMBINED/triangulated field
+        # once (not each camera's raw 2D field independently, then
+        # intersected) -- see its own docstring for the real-data
+        # evidence this replaced the previous approach with.
+        engine0, x, y = _build_engine(cfg.project.backend, dw_a0.shape, cfg.correlation, cfg.validation)
+        engine1, _, _ = _build_engine(cfg.project.backend, dw_a1.shape, cfg.correlation, cfg.validation)
+        y_row_down = cfg.stereo.world_shape[0] - y
+        fov_valid = (cfg.stereo._cam0.raw_domain_valid(x, y_row_down)
+                     & cfg.stereo._cam1.raw_domain_valid(x, y_row_down))
+        post = cfg.postprocess.for_pipeline()
+        t_post0 = time.time()
+        U, V, W, valid, elapsed, r = pipeline.process_stereo_pair(
+            engine0, engine1, dw_a0, dw_b0, dw_a1, dw_b1, angles,
+            cfg.stereo.world_scale_px_per_mm, cfg.calibration.frame_dt_s, fov_valid, post, x, y)
+        n_range, n_std = r["range_residual"], r["std_dev"]
+        t_post = time.time() - t_post0 - elapsed
+        del engine0, engine1
+        _free_gpu(cfg.project.backend)
 
     n_valid, n_total = int(valid.sum()), int(valid.size)
     if verbose:
         print(f"{elapsed:.3f} s, {n_valid}/{n_total} valid vectors "
-              f"(postprocess {t_post1 + t_post2:.3f}s)")
+              f"(postprocess {t_post:.3f}s)")
 
     if cfg.output.save_npz:
         np.savez(os.path.join(output_dir, f"{pair_id}_stereo_velocity.npz"),
@@ -385,8 +411,6 @@ def handle_pair_stereo(pair_id, dw_a0, dw_b0, dw_a1, dw_b1, cfg, angles, output_
                               quiver_scale=cfg.output.quiver_scale,
                               plot_dpi=cfg.output.plot_dpi, show_plots=cfg.output.show_plots)
 
-    n_range = r1["range_residual"] + r2["range_residual"]
-    n_std = r1["std_dev"] + r2["std_dev"]
     row = (pair_id, elapsed, n_valid, n_total, n_range, n_std)
     return row, x, y, U, V, W, valid
 

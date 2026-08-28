@@ -112,7 +112,8 @@ def load_vc7_stereo_field(path):
     return x_mm, y_mm, u_mm_s, v_mm_s, w_mm_s
 
 
-def build_stereo_settings_bundle(set_path, multiset_index, angles_deg, sheet_z_mm, dewarp_order):
+def build_stereo_settings_bundle(set_path, multiset_index, angles_deg, sheet_z_mm, dewarp_order,
+                                  min_max_filter_length=0, sig2noise_threshold=None):
     """Returns (project, preprocess, correlation, validation, post,
     calibration, stereo_settings) -- exactly the 7 positional args
     PreviewPanel._compute_stereo expects, built from PLAIN, UNMODIFIED
@@ -136,8 +137,13 @@ def build_stereo_settings_bundle(set_path, multiset_index, angles_deg, sheet_z_m
     project = ProjectSettings(input_mode="set", input_path=set_path, mode="stereo",
                                multiset_index=multiset_index)
     preprocess = PreprocessSettings()
+    if min_max_filter_length > 0:
+        preprocess.min_max_filter_enabled = True
+        preprocess.min_max_filter_length = min_max_filter_length
     correlation = CorrelationSettings()
     validation = ValidationSettings()
+    if sig2noise_threshold is not None:
+        validation.per_pass_sig2noise_threshold = sig2noise_threshold
     post = PostProcessSettings()
 
     calibration = read_calibration_from_set(set_path, multiset_index)
@@ -192,6 +198,18 @@ def main():
     parser.add_argument("--beta2-deg", type=float, default=None)
     parser.add_argument("--sheet-z-mm", type=float, default=None)
     parser.add_argument("--dewarp-order", type=int, default=1)
+    parser.add_argument("--min-max-filter-length", type=int, default=0,
+                         help="0 (default) leaves preprocess.min_max_filter_enabled at this "
+                              "app's plain default (False). >0 enables it at that length -- "
+                              "this dataset's own real DaVis job (JobHistory.xml, "
+                              "imagePreprocessingParameter) used useMinMaxFilter=true, "
+                              "minMaxFilterLength=4.")
+    parser.add_argument("--sig2noise-threshold", type=float, default=None,
+                         help="Override ValidationSettings.per_pass_sig2noise_threshold "
+                              "(default 1.0, openpiv's own default) -- lower is more "
+                              "permissive (fewer mid-calculation replacements, closer to "
+                              "the pre-sig2noise-validation behavior). Omit to use this "
+                              "app's plain default.")
     parser.add_argument("--out-dir", default="piv_comparison_output")
     parser.add_argument("--outlier-threshold", type=float, default=3.0)
     args = parser.parse_args()
@@ -212,7 +230,7 @@ def main():
      stereo_settings) = build_stereo_settings_bundle(
         args.set_file, args.multiset_index,
         (args.alpha1_deg, args.alpha2_deg, args.beta1_deg, args.beta2_deg),
-        args.sheet_z_mm, args.dewarp_order)
+        args.sheet_z_mm, args.dewarp_order, args.min_max_filter_length, args.sig2noise_threshold)
 
     if calibration.frame_dt_s is None:
         raise SystemExit(
@@ -257,6 +275,10 @@ def main():
         pair_id = r["pair_id"]
         print(f"  this-app preview: {r['elapsed']:.3f}s  {r['n_valid']}/{r['n_total']} valid  "
               f"units={r['units']}")
+        print(f"  reject breakdown: range/residual={r['n_range']}  std_dev={r['n_std']}  "
+              f"small_groups={r['n_group']}  "
+              f"(out of {r['n_total']} total grid points, {r['n_total'] - r['n_valid']} rejected total)")
+        print(f"  fov_overlap={r['n_fov']}/{r['n_total']} ({100*r['n_fov']/r['n_total']:.2f}%)")
 
         x_app_mm, y_app_mm = r["x"] / px_per_mm, r["y"] / px_per_mm
         u_app_mm_s, v_app_mm_s = r["u"] * vel_to_mm_s, r["v"] * vel_to_mm_s

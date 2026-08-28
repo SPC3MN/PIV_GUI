@@ -124,6 +124,26 @@ class ValidationSettings:
     per_pass_median_threshold: float = 2.0   # DaVis's default removal factor
     per_pass_median_size: int = 1            # 1 -> 3x3 neighborhood (DaVis's filter length 1)
 
+    # CPU-only; bundled with per_pass_validation (same on/off switch, see
+    # above) rather than a separate toggle -- DaVis itself pairs its own
+    # per-pass median removal with a per-pass "scalarfield" peak-ratio
+    # threshold as one combined multi-pass postprocessing step (confirmed
+    # via a real DaVis JobHistory.xml: useScalarfieldThreshold=true,
+    # peakRatioThreshold=1.5 alongside its median removal factor), so this
+    # app's own "close to DaVis" per-pass mode should reject on both
+    # criteria together, not just one. Rejects a vector whose correlation
+    # peak2mean signal-to-noise ratio falls below this threshold -- a
+    # low-confidence/no-real-peak correlation, distinct from the
+    # local-median (UOD) test above, which only catches a vector that
+    # disagrees with its neighbors. 1.0 is openpiv's own PIVSettings
+    # default. Affordable at negligible extra cost because
+    # engines/_openpiv_speedups.py's fast correlation path now computes
+    # this ratio from data it already gathers per window (previously,
+    # requesting a non-None sig2noise_method fell back to openpiv's slow,
+    # unchunked correlation path entirely -- see that module's
+    # fast_extended_search_area_piv docstring).
+    per_pass_sig2noise_threshold: float = 1.0
+
 
 @dataclass
 class RangeFilterSettings:
@@ -164,15 +184,38 @@ class RangeFilterSettings:
 class PostProcessSettings:
     """The SOLE source of vector validation (see ValidationSettings'
     docstring -- the engines themselves never reject anything). Two
-    detection methods, matching standard LaVision-style post-processing,
-    both ON by default: "remove if difference from the field mean
-    exceeds n_std standard deviations" (global_outlier_std) and "remove
-    if residual [from the local window median] exceeds residual_max"
-    (range_filter, i.e. universal outlier detection, with a window_size
-    control). replace_invalid/smooth_field are a separate, later step
-    (filling gaps in what's left after removal), not a third detection
-    method."""
-    global_outlier_std: Optional[float] = 3.0   # std-dev spurious-vector filter; None disables
+    detection methods, both ON by default: range_filter (local-window
+    universal outlier detection, matching LaVision DaVis's real final-stage
+    local median-UOD check almost exactly -- a real recording's
+    JobHistory.xml `finalPostProcessingParameter` shows
+    medianUniversalOutlierRemovalFactor=2, filterLength=1 -> 3x3, matching
+    range_filter's own default below) and global_outlier_std (a
+    FIELD-WIDE, not local, std-dev cutoff -- see below for why this one's
+    right default turned out to depend on WHERE in the pipeline it runs).
+
+    global_outlier_std's story: DaVis's own real final stage has NO
+    field-wide/global check at all (useAllowedVectorRange=false in that
+    same JobHistory.xml) -- and on this app's PER-CAMERA planar/stereo 2D
+    fields, applying one BEFORE triangulation was measured to reject
+    exactly 0 vectors on a real turbulent "Swirl" stereo recording. That
+    makes physical sense: a bad 2D correlation still returns SOME plausible
+    small displacement within the search window, rarely a true field-wide
+    statistical outlier. But `pipeline.process_stereo_pair` (see its own
+    docstring) validates the COMBINED/TRIANGULATED field instead, and
+    triangulation is exactly where a small per-camera disagreement gets
+    AMPLIFIED into a genuinely extreme value -- confirmed on the same real
+    data: without a global check, max|velocity| reached ~1200-1900 mm/s
+    against DaVis's own real ~320-380 max, surviving even a local (W-aware)
+    range_filter pass because a small, internally self-consistent cluster
+    of bad vectors looks locally fine to itself. Restoring the ON-by-default
+    3.0 threshold at the COMBINED-field stage (where it now runs, for
+    stereo) closed that gap: real max|velocity| dropped to physically
+    plausible levels in every tested pair, alongside a real density and
+    outlier-rate improvement -- see process_stereo_pair's own docstring for
+    the exact numbers. replace_invalid/smooth_field are a separate, later
+    step (filling gaps in what's left after removal), not a third
+    detection method."""
+    global_outlier_std: Optional[float] = 3.0   # std-dev spurious-vector filter; None disables (see docstring)
     range_filter: RangeFilterSettings = field(default_factory=RangeFilterSettings)
     # ON by default, alongside range_filter's corrected (normalized) UOD
     # statistic: that correction rejects substantially MORE vectors than

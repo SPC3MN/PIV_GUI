@@ -35,19 +35,32 @@ fft_correlate_images wiring line for the numbers.
 
 BEHAVIOR-CHANGING PATCH (loose_typical_validation): unlike the two kinds
 above, this one deliberately does NOT reproduce openpiv's own
-validation.typical_validation. Vector validation has been moved
-entirely to processing.postprocess (driven by PostProcessSettings, one
-explicit step after the engine returns) -- see cpu_engine.py's module
-docstring for the full rationale. openpiv's own multi-pass loop
-(windef.multipass_img_deform) still calls `validation.typical_validation`
-unconditionally with no settings flag to disable it, so this patch
-replaces it with a version that flags a vector invalid ONLY when it is
-literal NaN -- never for any global-range/std/median/sig2noise
-criterion. This keeps the per-pass replace_outliers call (also
-unconditional in openpiv) as a pure numerical-stability mechanism (see
-cpu_engine._fill_residual_nan for why residual NaN between passes is
-dangerous, not just a validation artifact) without it ever causing a
-vector to be counted "invalid" in the final output.
+validation.typical_validation. It is the path active when
+per_pass_validation is False (config.schema.ValidationSettings; True by
+default). openpiv's own multi-pass loop (windef.multipass_img_deform)
+still calls `validation.typical_validation` unconditionally with no
+settings flag to disable it, so this patch replaces it with a version
+that flags a vector invalid ONLY when it is literal NaN -- never for any
+global-range/std/median/sig2noise criterion. This keeps the per-pass
+replace_outliers call (also unconditional in openpiv) as a pure
+numerical-stability mechanism (see cpu_engine._fill_residual_nan for why
+residual NaN between passes is dangerous, not just a validation
+artifact) without it ever causing a vector to be counted "invalid" in
+the final output. By default (per_pass_validation=True), use_real_
+validation() is active instead, restoring openpiv's own real
+typical_validation -- see cpu_engine.py's module docstring for the full
+rationale and why that's still consistent with "the final valid/invalid
+DECISION lives in processing.postprocess."
+
+FAITHFUL ADDITION (peak2mean sig2noise in fast_extended_search_area_piv /
+_correlation_to_displacement_flat): computes openpiv's own peak2mean
+formula (peak correlation value / |mean of the correlation plane|,
+zeroed for border/weak peaks -- see openpiv.validation.sig2noise_ratio)
+from data the fast path already gathers per window, so requesting
+sig2noise_method="peak2mean" no longer falls back to openpiv's slow,
+unchunked correlation path the way any non-None sig2noise_method
+originally did. Bit-exact vs. openpiv's own peak2mean output; see
+tests/unit/test_openpiv_speedups.py.
 
 fast_local_median_val exists but is NOT wired into apply_speedups() --
 see its own docstring; nothing calls openpiv.validation.local_median_val
@@ -389,7 +402,12 @@ def fast_correlation_to_displacement(corr, n_rows, n_cols, subpixel_method="gaus
     - no dtype is forced; the input's own float precision is preserved.
     """
     n_rows_arg, n_cols_arg = n_rows, n_cols
-    u, v = _correlation_to_displacement_flat(corr, subpixel_method=subpixel_method)
+    # sig2noise discarded here -- this wrapper matches fast_correlation_
+    # to_displacement's own (u, v)-only contract (its caller, whoever
+    # that is, never asked for a 3rd value); fast_extended_search_area_piv
+    # below is the one caller that actually wants sig2noise, and it calls
+    # _correlation_to_displacement_flat directly, not through here.
+    u, v, _sig2noise = _correlation_to_displacement_flat(corr, subpixel_method=subpixel_method)
     return u.reshape(n_rows_arg, n_cols_arg), v.reshape(n_rows_arg, n_cols_arg)
 
 
@@ -399,7 +417,22 @@ def _correlation_to_displacement_flat(corr, subpixel_method="gaussian"):
     fast_extended_search_area_piv can call it per chunk (a chunk covers a
     subset of the flattened window index range, which doesn't have its
     own meaningful n_rows/n_cols) and reshape the FULL grid only once,
-    after every chunk has been written into it."""
+    after every chunk has been written into it.
+
+    ALSO returns sig2noise (peak2mean) as a 3rd value -- confirmed exact
+    match to openpiv.pyprocess.sig2noise_ratio's own "peak2mean" formula
+    (sig2noise = peak_value / |mean(correlation_plane)|, zeroed wherever
+    the peak sits on the correlation plane's border or is below 1e-3):
+    `flat` (the already-reshaped (n_windows, h*w) correlation data) and
+    the peak location are BOTH already computed just above for the u/v
+    displacement itself -- computing peak2mean here is one more mean()
+    reduction over data already fully in memory, not a second
+    correlation or extra FFT work. This is what makes real sig2noise-
+    based rejection affordable on the fast/chunked path at all (see
+    fast_extended_search_area_piv's docstring for why the ORIGINAL
+    approach -- falling back to openpiv's own slow, unchunked
+    implementation whenever sig2noise was requested -- was a much bigger
+    cost than computing sig2noise itself ever was)."""
     if subpixel_method not in ("gaussian", "centroid", "parabolic"):
         raise ValueError(f"Method not implemented {subpixel_method}")
 
@@ -410,6 +443,22 @@ def _correlation_to_displacement_flat(corr, subpixel_method="gaussian"):
     peak_j = peak_flat % w
 
     on_border = (peak_i == 0) | (peak_i == h - 1) | (peak_j == 0) | (peak_j == w - 1)
+
+    # peak2mean sig2noise -- computed from the RAW peak value (no +eps,
+    # matching sig2noise_ratio's own corr_max1) and flat's own mean, same
+    # array `flat` the displacement math below also uses. corr_max1 is
+    # zeroed (not just left small) for a border peak or one below 1e-3,
+    # exactly mirroring sig2noise_ratio's own `condition` check -- both
+    # mean "no usable signal here", scored as sig2noise=0 either way
+    # (sig2noise_ratio's own final `sig2noise[isnan] = 0.0` line covers
+    # the mean-is-zero case; replicated here via the same nan-out-then-
+    # zero two-step for an identical result, not an approximation of it).
+    raw_peak = flat[np.arange(n_windows), peak_flat]
+    corr_max1 = np.where((raw_peak < 1e-3) | on_border, 0.0, raw_peak)
+    corr_max2 = np.abs(flat.mean(axis=1))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        sig2noise = corr_max1 / corr_max2
+    sig2noise = np.where(np.isnan(sig2noise) | (corr_max2 == 0), 0.0, sig2noise)
 
     # Clamp border windows' indices to something safe (e.g. the center) so
     # the neighbour-index arithmetic below never goes out of bounds; their
@@ -473,7 +522,7 @@ def _correlation_to_displacement_flat(corr, subpixel_method="gaussian"):
     v = subp_i - default_i
     u = subp_j - default_j
 
-    return u, v
+    return u, v, sig2noise
 
 
 def fast_extended_search_area_piv(frame_a, frame_b, window_size, overlap=(0, 0), dt=1.0,
@@ -542,8 +591,19 @@ def fast_extended_search_area_piv(frame_a, frame_b, window_size, overlap=(0, 0),
     elif isinstance(search_area_size, int):
         search_area_size = (search_area_size, search_area_size)
 
-    if (search_area_size != window_size or sig2noise_method is not None
-            or use_vectorized or correlation_method != "circular"):
+    # sig2noise_method == "peak2mean" (this app's only real usage --
+    # cpu_engine.py hard-codes it, PIVSettings' own default too) no
+    # longer forces the slow fallback: _correlation_to_displacement_flat
+    # computes peak2mean sig2noise "for free" from the SAME correlation-
+    # plane data already needed for the displacement itself (see that
+    # function's docstring) -- there's no real extra correlation/peak-
+    # search cost to fall back to the slow path FOR. "peak2peak" still
+    # falls back (needs a genuine second-peak search this fast path
+    # doesn't implement), and so does sig2noise_method=None with
+    # anything ELSE non-default below -- this only narrows the fallback
+    # condition, doesn't remove it.
+    if (search_area_size != window_size or use_vectorized or correlation_method != "circular"
+            or sig2noise_method not in (None, "peak2mean")):
         _orig = _REAL_EXTENDED_SEARCH_AREA_PIV
         if _orig is None:
             from openpiv.pyprocess import extended_search_area_piv as _orig
@@ -584,6 +644,7 @@ def fast_extended_search_area_piv(frame_a, frame_b, window_size, overlap=(0, 0),
 
     u_flat = np.empty(n_windows, dtype=np.float64)
     v_flat = np.empty(n_windows, dtype=np.float64)
+    s2n_flat = np.empty(n_windows, dtype=np.float64)
 
     for row_start in range(0, n_rows, rows_per_chunk):
         row_end = min(row_start + rows_per_chunk, n_rows)
@@ -597,17 +658,23 @@ def fast_extended_search_area_piv(frame_a, frame_b, window_size, overlap=(0, 0),
             a_chunk, b_chunk, correlation_method="circular",
             normalized_correlation=normalized_correlation,
         )
-        u_chunk, v_chunk = _correlation_to_displacement_flat(corr_chunk, subpixel_method=subpixel_method)
+        u_chunk, v_chunk, s2n_chunk = _correlation_to_displacement_flat(
+            corr_chunk, subpixel_method=subpixel_method)
 
         flat_start, flat_end = row_start * n_cols, row_end * n_cols
         u_flat[flat_start:flat_end] = u_chunk
+        s2n_flat[flat_start:flat_end] = s2n_chunk
         v_flat[flat_start:flat_end] = v_chunk
 
     u = u_flat.reshape(n_rows, n_cols)
     v = v_flat.reshape(n_rows, n_cols)
-    # sig2noise_method is None on the fast path (see docstring) --
-    # matches the original's own `np.zeros_like(u) * np.nan` for that case.
-    sig2noise = np.full((n_rows, n_cols), np.nan)
+    # sig2noise_method is None -> the original's own np.nan placeholder
+    # (nothing asked for sig2noise, so nothing was computed above either
+    # -- _correlation_to_displacement_flat always computes it, but this
+    # branch simply isn't the one a None request should surface it from).
+    # "peak2mean" -> the real, cheaply-computed values collected above.
+    sig2noise = s2n_flat.reshape(n_rows, n_cols) if sig2noise_method == "peak2mean" \
+        else np.full((n_rows, n_cols), np.nan)
     return u / dt, v / dt, sig2noise
 
 
@@ -753,10 +820,14 @@ def loose_typical_validation(u, v, s2n, settings):
     `s2n` and `settings` are accepted (matching typical_validation's
     signature, since windef.py calls this by position/keyword) but
     unused -- sig2noise-based rejection is dropped entirely from this
-    path; see cpu_engine.CPUPIVProcess forcing settings.sig2noise_validate
-    = False, which also skips the extra correlation peak-search cost
-    typical_validation's sig2noise branch would otherwise still pay
-    for."""
+    path. This is the path active when per_pass_validation is False; see
+    cpu_engine.CPUPIVProcess forcing settings.sig2noise_validate = False
+    (and settings.sig2noise_method = None) in that case, which also skips
+    the extra correlation peak-search cost a real sig2noise ratio would
+    otherwise pay for. When per_pass_validation is True instead,
+    use_real_validation() (below) is active and DOES use a real sig2noise
+    ratio -- see cpu_engine.CPUPIVProcess's __init__ and this module's top
+    docstring."""
     u_data = np.ma.getdata(u) if np.ma.is_masked(u) else np.asarray(u)
     v_data = np.ma.getdata(v) if np.ma.is_masked(v) else np.asarray(v)
     return np.isnan(u_data) | np.isnan(v_data)

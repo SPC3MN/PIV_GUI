@@ -318,8 +318,15 @@ class SettingsPanel(QWidget):
         self.std_filter_check = QCheckBox("Remove if |value - mean| exceeds:")
         self.std_filter_check.setChecked(True)
         self.std_filter_check.setToolTip(
-            "Reject vectors more than n·σ (n times the standard "
-            "deviation) from the field mean.")
+            "Reject vectors more than n·σ (n times the standard deviation) "
+            "from the FIELD-WIDE mean. For planar/per-camera data this "
+            "rarely fires (a bad 2D correlation still returns some "
+            "plausible small displacement) -- but for stereo, this now "
+            "runs on the COMBINED/triangulated vector, where a small "
+            "per-camera disagreement can amplify into a genuinely extreme "
+            "value; confirmed on real data to catch garbage a local "
+            "universal-outlier-detection check alone misses (see "
+            "config.schema.PostProcessSettings' own docstring).")
         self.std_filter_check.toggled.connect(self._on_std_filter_toggled)
         self.n_std_spin = style_spin(QDoubleSpinBox())
         self.n_std_spin.setRange(0.1, 100.0)

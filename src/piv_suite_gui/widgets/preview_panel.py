@@ -476,9 +476,7 @@ class PreviewPanel(QWidget):
         dw_b1 = cam1.dewarp_image(fb1, stereo_settings.world_shape, stereo_settings.dewarp_order)
 
         engine0, x, y = _build_engine(project.backend, dw_a0.shape, correlation, validation)
-        u1, v1, valid1, elapsed1, r1 = pipeline.process_frames(engine0, dw_a0, dw_b0, post.for_pipeline())
         engine1, _, _ = _build_engine(project.backend, dw_a1.shape, correlation, validation)
-        u2, v2, valid2, elapsed2, r2 = pipeline.process_frames(engine1, dw_a1, dw_b1, post.for_pipeline())
 
         # cam0/cam1 each genuinely see this world-grid point (x, y) --
         # rejects a point that maps (via world_to_raw) outside either
@@ -494,14 +492,19 @@ class PreviewPanel(QWidget):
         # valid needs y un-flipped back first or every point near the
         # canvas's top/bottom edge gets checked against the wrong row.
         y_row_down = stereo_settings.world_shape[0] - y
-        valid = valid1 & valid2 & cam0.raw_domain_valid(x, y_row_down) & cam1.raw_domain_valid(x, y_row_down)
+        fov_valid = cam0.raw_domain_valid(x, y_row_down) & cam1.raw_domain_valid(x, y_row_down)
         angles = (np.deg2rad(stereo_settings.alpha1_deg), np.deg2rad(stereo_settings.alpha2_deg),
                   np.deg2rad(stereo_settings.beta1_deg), np.deg2rad(stereo_settings.beta2_deg))
-        U, V, W = pipeline.combine_stereo_pair(u1, v1, u2, v2, angles, stereo_settings.world_scale_px_per_mm,
-                                                calibration.frame_dt_s)
-        U = np.where(valid, U, np.nan)
-        V = np.where(valid, V, np.nan)
-        W = np.where(valid, W, np.nan)
+        # process_stereo_pair validates the COMBINED/triangulated field
+        # once (not each camera's raw 2D field independently, then
+        # intersected) -- see its own docstring for why: on real data,
+        # per-camera-then-intersect compounded two individually reasonable
+        # per-camera rejection rates into a combined density meaningfully
+        # worse than DaVis's own real final density.
+        U, V, W, valid, elapsed, r = pipeline.process_stereo_pair(
+            engine0, engine1, dw_a0, dw_b0, dw_a1, dw_b1, angles,
+            stereo_settings.world_scale_px_per_mm, calibration.frame_dt_s,
+            fov_valid, post.for_pipeline(), x, y)
         # combine_stereo_pair always converts to mm (dividing by
         # world_scale_px_per_mm happens unconditionally); frame_dt_s=None
         # only means it stops short of the final /1000 divide to m/s,
@@ -511,9 +514,9 @@ class PreviewPanel(QWidget):
         units = "m/s" if calibration.frame_dt_s is not None else "mm/frame"
 
         return dict(kind="stereo", pair_id=pair_id, x=x, y=y, u=U, v=V, w=W, valid=valid,
-                    elapsed=elapsed1 + elapsed2, n_valid=int(valid.sum()), n_total=int(valid.size),
-                    n_range=r1["range_residual"] + r2["range_residual"],
-                    n_std=r1["std_dev"] + r2["std_dev"], units=units)
+                    elapsed=elapsed, n_valid=int(valid.sum()), n_total=int(valid.size),
+                    n_range=r["range_residual"], n_std=r["std_dev"], n_group=r["small_groups"],
+                    n_fov=int(fov_valid.sum()), units=units)
 
     def _compute_range(self, project, preprocess, correlation, validation, post, calibration,
                         stereo_settings, dual_planar_settings, start_index, count, progress_cb):
