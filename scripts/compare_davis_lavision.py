@@ -178,7 +178,16 @@ def compare(name, x_app, y_app, u_app, v_app, x_dv, y_dv, u_dv, v_dv, w_app=None
     y-flip defensive handling already written for U/V, since real
     absolute-origin agreement between this app's dewarped-world grid and
     DaVis's own isn't guaranteed for W's grid either (it's the same x,y
-    grid as U/V, just carrying a 3rd component)."""
+    grid as U/V, just carrying a 3rd component).
+
+    Also returns the same numbers it prints, as a dict -- added for
+    scripts/compare_dataset.py, which needs to accumulate these across
+    hundreds of pairs rather than just print them once. Purely additive:
+    every existing call site invokes this as a bare statement and already
+    discards the return value, so nothing about their behavior changes.
+    W keys are always present (NaN when w_app/w_dv weren't given), so a
+    caller mixing stereo and planar/dual_planar pairs gets a stable key
+    set either way."""
     # Neither source's (x, y) share an absolute origin with the other
     # (DaVis's calibration origin vs this app's raw-pixel-derived mm grid) --
     # re-center both to their own bounding-box middle before resampling, and
@@ -201,7 +210,13 @@ def compare(name, x_app, y_app, u_app, v_app, x_dv, y_dv, u_dv, v_dv, w_app=None
     n = int(both_valid.sum())
     if n == 0:
         print(f"{name}: no overlapping valid vectors to compare")
-        return
+        return {
+            "n_compared": 0, "v_sign_flipped": False,
+            "mean_abs_diff": np.nan, "median_abs_diff": np.nan, "p95_abs_diff": np.nan,
+            "corr_u": np.nan, "corr_v": np.nan,
+            "mean_abs_diff_w": np.nan, "median_abs_diff_w": np.nan,
+            "p95_abs_diff_w": np.nan, "corr_w": np.nan,
+        }
     corr_v = np.corrcoef(v_app[both_valid], v_dv_r[both_valid])[0, 1]
     # V's own SIGN convention can differ between the two sources
     # independently of whether the Y POSITION grid's row-ordering agreed
@@ -230,6 +245,14 @@ def compare(name, x_app, y_app, u_app, v_app, x_dv, y_dv, u_dv, v_dv, w_app=None
           f"median|diff|={np.median(abs_diff):.3f} mm/s  "
           f"p95|diff|={np.percentile(abs_diff, 95):.3f} mm/s  "
           f"corr(U)={corr_u:.4f} corr(V)={corr_v:.4f}{flip_note}")
+    result = {
+        "n_compared": n, "v_sign_flipped": bool(v_flipped),
+        "mean_abs_diff": float(abs_diff.mean()), "median_abs_diff": float(np.median(abs_diff)),
+        "p95_abs_diff": float(np.percentile(abs_diff, 95)),
+        "corr_u": float(corr_u), "corr_v": float(corr_v),
+        "mean_abs_diff_w": np.nan, "median_abs_diff_w": np.nan,
+        "p95_abs_diff_w": np.nan, "corr_w": np.nan,
+    }
     if have_w:
         dw = w_app[both_valid] - w_dv_r[both_valid]
         abs_dw = np.abs(dw)
@@ -238,6 +261,9 @@ def compare(name, x_app, y_app, u_app, v_app, x_dv, y_dv, u_dv, v_dv, w_app=None
               f"median|diff W|={np.median(abs_dw):.3f} mm/s  "
               f"p95|diff W|={np.percentile(abs_dw, 95):.3f} mm/s  "
               f"corr(W)={corr_w:.4f}")
+        result.update(mean_abs_diff_w=float(abs_dw.mean()), median_abs_diff_w=float(np.median(abs_dw)),
+                       p95_abs_diff_w=float(np.percentile(abs_dw, 95)), corr_w=float(corr_w))
+    return result
 
 
 def main():

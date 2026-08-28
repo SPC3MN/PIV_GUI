@@ -513,6 +513,14 @@ def _apply_cli_overrides(cfg: ProjectConfig, args):
         cfg.project.input_path = args.input_path
     if args.output_dir is not None:
         cfg.project.output_dir = args.output_dir
+    if args.alpha1_deg is not None:
+        cfg.stereo.alpha1_deg = args.alpha1_deg
+    if args.alpha2_deg is not None:
+        cfg.stereo.alpha2_deg = args.alpha2_deg
+    if args.beta1_deg is not None:
+        cfg.stereo.beta1_deg = args.beta1_deg
+    if args.beta2_deg is not None:
+        cfg.stereo.beta2_deg = args.beta2_deg
 
 
 def build_arg_parser():
@@ -524,6 +532,22 @@ def build_arg_parser():
     p.add_argument("--mode", choices=["planar", "stereo"], default=None)
     p.add_argument("--input-path", default=None)
     p.add_argument("--output-dir", default=None)
+    p.add_argument("--alpha1-deg", type=float, default=None,
+                    help="Override the saved project's stereo.alpha1_deg (camera 0's "
+                         "triangulation viewing angle) for this run. The GUI calibration "
+                         "panel's own alpha1 field is auto-derived from the calibration's "
+                         "two Z-planes (io.davis_set._estimate_stereo_angles) -- a "
+                         "geometric estimate, not a measured rig value -- and is already "
+                         "freely editable/persisted there; this flag exists for scripted/"
+                         "CI batch runs that never open the GUI. Omit to use whatever the "
+                         "saved project already has.")
+    p.add_argument("--alpha2-deg", type=float, default=None,
+                    help="Override stereo.alpha2_deg (camera 1). See --alpha1-deg.")
+    p.add_argument("--beta1-deg", type=float, default=None,
+                    help="Override stereo.beta1_deg (camera 0's out-of-plane angle). "
+                         "See --alpha1-deg.")
+    p.add_argument("--beta2-deg", type=float, default=None,
+                    help="Override stereo.beta2_deg (camera 1). See --alpha1-deg.")
     return p
 
 
