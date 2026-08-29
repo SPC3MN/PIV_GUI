@@ -573,6 +573,13 @@ def main(argv=None):
     stereo = cfg.project.mode == "stereo"
     dual_planar = cfg.project.mode == "planar" and cfg.project.dual_camera
     if stereo:
+        if cfg.stereo.alpha1_deg is None or cfg.stereo.alpha2_deg is None:
+            sys.exit(
+                "stereo.alpha1_deg/alpha2_deg not set in this project -- no calibration-file-"
+                "only estimate is trustworthy enough to auto-fill this (see StereoSettings."
+                "alpha1_deg's own comment). Pass --alpha1-deg/--alpha2-deg with a real measured "
+                "value (e.g. DaVis's own Calibration report's \"Min/Max angle 1-2\", split "
+                "symmetrically), or set it on the GUI's Calibration panel and save the project.")
         cfg.stereo._cam0 = build_camera_mapping(cfg.stereo.cam0_mapping, cfg.stereo.cam0_mapping_plane2,
                                                  cfg.stereo.sheet_z_mm)
         cfg.stereo._cam1 = build_camera_mapping(cfg.stereo.cam1_mapping, cfg.stereo.cam1_mapping_plane2,

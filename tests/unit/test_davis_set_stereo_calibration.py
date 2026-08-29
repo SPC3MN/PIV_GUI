@@ -514,9 +514,14 @@ def test_estimate_stereo_angles_returns_zeros_for_single_plane():
 
 def test_read_stereo_calibration_from_set_populates_angles_when_two_planes(tmp_path):
     """End-to-end: read_stereo_calibration_from_set's own returned
-    StereoSettings carries non-default angles when the calibration has
-    two Z-planes with a real angular difference between them -- not just
-    _estimate_stereo_angles in isolation."""
+    StereoSettings carries a beta estimate when the calibration has two
+    Z-planes with a real angular difference between them -- not just
+    _estimate_stereo_angles in isolation. alpha1_deg/alpha2_deg are
+    DELIBERATELY left None even though _estimate_stereo_angles computes a
+    value for them internally -- that estimate was confirmed measurably
+    wrong against a real rig (see StereoSettings.alpha1_deg's own
+    comment), so this function no longer auto-applies it; the primary
+    triangulation angle is now a required, manually-entered field."""
     zero = {k: 0.0 for k in COEF_KEYS}
     ppm = 18.0
     # _estimate_stereo_angles divides the raw dx_coefs["1"] (RAW PIXEL
@@ -539,8 +544,8 @@ def test_read_stereo_calibration_from_set_populates_angles_when_two_planes(tmp_p
     recording.write_text("#GROUP Sets\n")
 
     result = read_stereo_calibration_from_set(str(recording))
-    assert result.alpha1_deg == pytest.approx(20.0, abs=1e-6)
-    assert result.alpha2_deg == pytest.approx(20.0, abs=1e-6)
+    assert result.alpha1_deg is None
+    assert result.alpha2_deg is None
     assert result.beta1_deg == pytest.approx(0.0, abs=1e-9)
 
 

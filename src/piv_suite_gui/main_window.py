@@ -241,9 +241,10 @@ class MainWindow(QMainWindow):
                 messages.append(f"Couldn't auto-extract stereo calibration: {e}")
             else:
                 self.calibration_panel.set_settings(stereo)
-                angle_note = (f", angles estimated from calibration "
-                               f"(α₁={stereo.alpha1_deg:.1f}° α₂={stereo.alpha2_deg:.1f}° "
-                               f"β₁={stereo.beta1_deg:.1f}° β₂={stereo.beta2_deg:.1f}°)"
+                angle_note = (f", β₁={stereo.beta1_deg:.1f}° β₂={stereo.beta2_deg:.1f}° estimated "
+                               f"from calibration -- α₁/α₂ (the primary triangulation angle) "
+                               f"must be entered manually on the Calibration panel before "
+                               f"processing (see its tooltip)"
                                if stereo.cam0_mapping_plane2 is not None else "")
                 messages.append(f"Stereo calibration auto-extracted from DaVis .set "
                                  f"({stereo.cam0_mapping.name}){angle_note}.")

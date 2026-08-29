@@ -135,6 +135,13 @@ class PipelineWorker(QObject):
 
             angles = cam0 = cam1 = None
             if stereo:
+                if cfg.stereo.alpha1_deg is None or cfg.stereo.alpha2_deg is None:
+                    raise ValueError(
+                        "Stereo triangulation angle not set -- check 'Angles measured' on the "
+                        "Calibration panel and enter a real measured value (e.g. DaVis's own "
+                        "Calibration report's \"Min/Max angle 1-2\", split symmetrically) before "
+                        "running. No calibration-file-only estimate is trustworthy enough to "
+                        "auto-fill this (see StereoSettings.alpha1_deg's own comment).")
                 cam0 = build_camera_mapping(cfg.stereo.cam0_mapping, cfg.stereo.cam0_mapping_plane2,
                                              cfg.stereo.sheet_z_mm)
                 cam1 = build_camera_mapping(cfg.stereo.cam1_mapping, cfg.stereo.cam1_mapping_plane2,

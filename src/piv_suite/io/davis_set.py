@@ -733,7 +733,18 @@ def read_stereo_calibration_from_set(set_path, multiset_index=0):
     world_shape = (int(np.ceil(max(corrected_wh_0[1], corrected_wh_1[1]))),
                    int(np.ceil(max(corrected_wh_0[0], corrected_wh_1[0]))))
 
-    alpha1_deg, alpha2_deg, beta1_deg, beta2_deg = _estimate_stereo_angles(
+    # alpha1_deg/alpha2_deg (the primary triangulation angle) are
+    # DELIBERATELY NOT taken from _estimate_stereo_angles any more --
+    # confirmed measurably wrong against a real rig (see StereoSettings.
+    # alpha1_deg's own comment for the full story), and there's no general
+    # calibration-file-only fix for it. Left None (required, no default) so
+    # every processing entry point refuses to run until a real measured
+    # value is entered. beta1_deg/beta2_deg use the same estimator (just
+    # projected onto the other axis) and share its theoretical flaw, but
+    # were never observed to be a meaningfully large real-data source of
+    # error (near-zero on the one rig this was validated against) -- kept
+    # as an auto-derived starting point, still freely editable.
+    _, _, beta1_deg, beta2_deg = _estimate_stereo_angles(
         cam0_planes, cam1_planes, px_per_mm_0, world_shape)
 
     return StereoSettings(
@@ -743,7 +754,7 @@ def read_stereo_calibration_from_set(set_path, multiset_index=0):
         cam1_mapping_plane2=cam1_planes[1] if len(cam1_planes) > 1 else None,
         world_shape=world_shape,
         world_scale_px_per_mm=px_per_mm_0,
-        alpha1_deg=alpha1_deg, alpha2_deg=alpha2_deg, beta1_deg=beta1_deg, beta2_deg=beta2_deg,
+        alpha1_deg=None, alpha2_deg=None, beta1_deg=beta1_deg, beta2_deg=beta2_deg,
         sheet_z_mm=None,
     )
 

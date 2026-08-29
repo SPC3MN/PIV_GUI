@@ -335,19 +335,26 @@ class StereoSettings:
     world_shape: Tuple[int, int] = (0, 0)
     world_scale_px_per_mm: float = 1.0
     dewarp_order: int = 1
-    # Defaults match the only real-rig measurement validated so far (DaVis's
-    # own calibration UI reported "Min/Max angle 1-2: 89.53deg" for the
-    # Swirl project, split symmetrically) -- NOT a generally-correct value
-    # for a physically different camera rig. read_stereo_calibration_from_
-    # set's own auto-derive (io.davis_set._estimate_stereo_angles) still
-    # overwrites these for any project with real two-Z-plane calibration
-    # data; this is only what a brand-new project (or one with no such
-    # calibration) starts from, instead of the previous placeholder 0.0/
-    # -45.0/45.0. See _estimate_stereo_angles' own docstring for why a
-    # generally-correct auto-derive isn't achievable from the calibration
-    # file alone (SESSION_HANDOFF.md item 3 has the full investigation).
-    alpha1_deg: float = 44.765
-    alpha2_deg: float = -44.765
+    # REQUIRED, no usable auto-derive: io.davis_set._estimate_stereo_angles
+    # used to compute these from the two-Z-plane calibration's own parallax
+    # (a 2-plane finite-difference / linear-parallax model), but that model
+    # is only correct for an orthographic/infinite-standoff camera -- a real
+    # DaVis calibration's higher-order polynomial terms (genuine finite-
+    # standoff perspective) make it measurably wrong, confirmed against a
+    # real rig: auto-derive gave alpha1=33.3deg/alpha2=-35.9deg (implied
+    # 69.2deg total) against DaVis's own calibration-UI-measured "Min/Max
+    # angle 1-2: 89.53deg" -- a ~20deg error that isn't specific to that one
+    # rig (the model flaw is general; only the magnitude/sign of its bias
+    # varies per rig's real standoff distance, which no calibration file
+    # stores). See SESSION_HANDOFF.md's stereo angle investigation for the
+    # full derivation. None (the default) means "not yet entered" --
+    # read_stereo_calibration_from_set no longer auto-populates these, and
+    # every processing entry point (preview_panel/cli/pipeline_worker)
+    # refuses to run with a clear error until a real measured value (e.g.
+    # DaVis's own "Min/Max angle 1-2", split symmetrically) is entered on
+    # the Calibration panel or via --alpha1-deg/--alpha2-deg.
+    alpha1_deg: Optional[float] = None
+    alpha2_deg: Optional[float] = None
     beta1_deg: float = 0.0
     beta2_deg: float = 0.0
     # Real Z (mm) of the laser sheet for the CURRENT recording -- an

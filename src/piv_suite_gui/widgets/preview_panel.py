@@ -493,6 +493,13 @@ class PreviewPanel(QWidget):
         # canvas's top/bottom edge gets checked against the wrong row.
         y_row_down = stereo_settings.world_shape[0] - y
         fov_valid = cam0.raw_domain_valid(x, y_row_down) & cam1.raw_domain_valid(x, y_row_down)
+        if stereo_settings.alpha1_deg is None or stereo_settings.alpha2_deg is None:
+            raise ValueError(
+                "Stereo triangulation angle not set -- check 'Angles measured' on the "
+                "Calibration panel and enter a real measured value (e.g. DaVis's own "
+                "Calibration report's \"Min/Max angle 1-2\", split symmetrically) before "
+                "previewing. No calibration-file-only estimate is trustworthy enough to "
+                "auto-fill this (see StereoSettings.alpha1_deg's own comment).")
         angles = (np.deg2rad(stereo_settings.alpha1_deg), np.deg2rad(stereo_settings.alpha2_deg),
                   np.deg2rad(stereo_settings.beta1_deg), np.deg2rad(stereo_settings.beta2_deg))
         # process_stereo_pair validates the COMBINED/triangulated field
