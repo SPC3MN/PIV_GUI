@@ -108,17 +108,34 @@ against DaVis's own final `PostProc` output)
 |---|---|---|
 | This app's density (valid %) | 81.85% avg (77.4-89.3%) | 95.44% avg (92.8-97.1%) |
 | DaVis's density (valid %) | 88.90% avg (88.0-89.3%) | 98.11% avg (98.1-98.1%) |
+| This app's mean flow magnitude | 105.8 mm/s avg (≈0.11 m/s) | 58.9 mm/s avg (≈0.06 m/s) |
+| DaVis's mean flow magnitude | 105.2 mm/s avg (≈0.11 m/s) | 55.7 mm/s avg (≈0.06 m/s) |
 | corr(U) | 0.9594 avg (min 0.9101) | 0.9576 avg (min 0.9213) |
 | corr(V) | 0.9639 avg (min 0.9279) | 0.9503 avg (min 0.9183) |
 | corr(W) | 0.9682 avg (min 0.9253) | n/a |
 | mean\|diff\| | 20.2 mm/s avg (max 29.1) | 14.2 mm/s avg (max 18.5) |
+| **mean\|diff\| as % of mean flow magnitude** | **~19%** | **~24-25%** |
 | this app's local-residual outlier rate (>3.0) | 0.56% avg | 0.25% avg |
 | DaVis's local-residual outlier rate (>3.0) | 0.005% avg | 0.000% avg |
+
+Both datasets are low-speed swirl flows (tens to ~100 mm/s mean magnitude,
+**not** m/s-scale — worth stating explicitly since it's easy to misjudge
+`mean|diff|`'s significance without this reference point). Read against the
+correct magnitude, the diff is **not small**: ~19-25% of the mean flow
+magnitude, on both datasets independently.
 
 **Correlation is consistently strong and stable across the entire sampled
 range** (see `correlation_and_outlier_trends.png` for each dataset) — no
 pairs or regions of the dataset show a correlation collapse or drift; U/V/W
-all stay in the 0.91-0.99 band throughout.
+all stay in the 0.91-0.99 band throughout. But correlation is scale-invariant
+— it confirms the two fields track the same spatial pattern, and says
+nothing about whether they agree in absolute magnitude. The ~19-25% relative
+mean\|diff\| above is the number that actually speaks to magnitude
+agreement, and it shows a real, non-trivial gap that high correlation alone
+was masking. This combination (high corr, high relative diff) points at a
+systematic magnitude discrepancy or added noise rather than a structural/
+pattern-matching failure, and is worth a dedicated root-cause investigation
+before trusting this app's absolute velocity values at face value.
 
 **Density is consistently 5-7 points below DaVis's own**, in both modes —
 matches this session's earlier, smaller-scale stereo angle investigation
@@ -201,6 +218,14 @@ against each other.
 
 ## Recommendations
 
+- **Root-cause the ~19-25% mean\|diff\|-relative-to-magnitude gap on stereo
+  and planar** (see Comparison section) — high correlation confirms this
+  isn't a structural/pattern failure, so the likely candidates are (a) the
+  known raw-vs-PostProc pipeline-stage mismatch (comparing pre-fill vectors
+  against DaVis's fully smoothed final output), (b) a correlation/subpixel-fit
+  difference between the two engines, or (c) a real accuracy gap in this
+  app's own processing — needs a fill-stage-matched comparison (this app's
+  output *after* `replace_invalid_vectors`, not before) to isolate which.
 - Fix `recommended_workers()` to hard-cap at 61 on Windows and default
   toward physical core count for this workload (see performance section).
 - Redo the Truck dual-planar batch run with the CURRENT calibration, then
