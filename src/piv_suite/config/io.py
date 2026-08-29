@@ -116,7 +116,18 @@ def load_project(config_path: str, defaults: ProjectConfig = None) -> ProjectCon
 
     if os.path.exists(config_path):
         with open(config_path) as f:
-            user_dict = json.load(f)
+            text = f.read()
+        try:
+            user_dict = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"'{config_path}' isn't valid JSON ({e.msg} at line {e.lineno}, column "
+                f"{e.colno}) -- .pivproj files are meant to be hand-editable, so this is "
+                f"most likely a syntax slip (a trailing comma, an unmatched quote/brace) "
+                f"from a manual edit, or a write that was interrupted mid-save (killed "
+                f"process, disk full, power loss). Fix the file directly, restore it from "
+                f"a backup, or delete it to have a fresh default one written in its place."
+            ) from e
         merged = _deep_merge(default_dict, user_dict)
         print(f"[info] loaded config from '{config_path}'")
     else:
@@ -130,5 +141,26 @@ def load_project(config_path: str, defaults: ProjectConfig = None) -> ProjectCon
 
 
 def save_project(config_path: str, config: ProjectConfig) -> None:
-    with open(config_path, "w") as f:
-        json.dump(to_dict(config), f, indent=2)
+    """Write `config` to `config_path` atomically (write to a temp file in
+    the same directory, then os.replace() it into place) -- this app's own
+    CLI calls save_project() unconditionally on EVERY invocation (to
+    persist CLI overrides back), so a naive direct write left a real
+    corruption window: a process killed mid-write (Ctrl+C, closed
+    terminal, disk full, power loss) would leave a truncated .pivproj file
+    that the next run's load_project() couldn't parse, with no way back
+    except hand-editing or deleting the file -- silently destroying
+    whatever settings were already saved. os.replace() is atomic on both
+    Windows and POSIX (same pattern already used for checkpoint files in
+    scripts/compare_dataset.py), so this can only ever leave either the
+    complete old file or the complete new one, never a partial write."""
+    tmp_path = f"{config_path}.tmp{os.getpid()}"
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(to_dict(config), f, indent=2)
+        os.replace(tmp_path, config_path)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise

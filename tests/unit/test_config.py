@@ -101,6 +101,48 @@ def test_save_then_load_is_stable(tmp_path):
     assert reloaded.project.mode == "stereo"
 
 
+def test_load_project_raises_clear_error_for_malformed_json(tmp_path):
+    # .pivproj files are meant to be hand-edited -- a syntax slip (here: a
+    # trailing comma) is a realistic mistake, and should fail with an
+    # actionable message pointing at the file and the syntax problem, not
+    # a raw json.JSONDecodeError traceback.
+    path = tmp_path / "proj.pivproj"
+    path.write_text('{"project": {"backend": "cpu",}}')  # trailing comma -- invalid JSON
+
+    with pytest.raises(ValueError, match=r"isn't valid JSON"):
+        load_project(str(path))
+
+
+def test_save_project_leaves_no_temp_file_behind(tmp_path):
+    path = tmp_path / "proj.pivproj"
+    save_project(str(path), ProjectConfig())
+    leftover = [p for p in os.listdir(tmp_path) if p != "proj.pivproj"]
+    assert leftover == []
+
+
+def test_save_project_never_truncates_existing_file_on_write_failure(tmp_path, monkeypatch):
+    # A process killed (or a disk that fills up) mid-write must never
+    # leave a partially-written .pivproj in place -- save_project() writes
+    # to a temp file and os.replace()s it into place, so a failure before
+    # that replace can only ever leave the OLD file (if any) untouched.
+    path = tmp_path / "proj.pivproj"
+    original_cfg = ProjectConfig()
+    original_cfg.project.input_path = "/original/data.set"
+    save_project(str(path), original_cfg)
+    original_bytes = path.read_bytes()
+
+    def _boom(*a, **k):
+        raise OSError("simulated disk failure mid-write")
+
+    monkeypatch.setattr(json, "dump", _boom)
+    with pytest.raises(OSError, match="simulated disk failure"):
+        save_project(str(path), ProjectConfig())
+
+    assert path.read_bytes() == original_bytes  # untouched, not truncated/corrupted
+    leftover_tmp = [p for p in os.listdir(tmp_path) if p != "proj.pivproj"]
+    assert leftover_tmp == []  # the failed temp file was not left behind either
+
+
 def test_performance_settings_default_is_auto():
     cfg = ProjectConfig()
     assert cfg.performance.n_workers is None  # None = auto (perf.autotune.recommended_workers())
