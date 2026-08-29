@@ -171,18 +171,34 @@ def npz_path_for_pair(npz_dir, mode, pair_id):
 
 
 def _load_app_field(npz_path, mode, px_per_mm):
-    """Masks u,v,(w) to NaN wherever `valid` is False -- this is this
+    """Returns (x_mm, y_mm, u_raw, v_raw, w_raw, u_filled, v_filled,
+    w_filled) -- both a RAW and a FILLED version of this app's own
+    output, so callers can pick per use (see process_pair()):
+
+    u_raw/v_raw/w_raw are masked to NaN wherever `valid` is False -- this
     app's own RAW validity mask (pre-`replace_invalid_vectors`), which the
     npz's own `valid` array records regardless of whether that later fill
     step ran, since it's returned unchanged for exactly this reason (see
-    pipeline.process_stereo_pair's own return contract). Deliberately does
-    NOT trust the npz's `U`/`V`/`W` (or `u`/`v`) arrays as-is even though
-    they may already be interpolated/filled at rejected cells -- comparing
-    only genuinely-measured vectors against DaVis is a more honest
-    accuracy signal, and matches the "density" convention (n_valid/n_total
-    on the RAW mask) used throughout this app's own stereo-density
-    investigation, not the 100%-covered-by-filling density a naive read
-    of the npz's arrays alone would suggest."""
+    pipeline.process_stereo_pair's own return contract). This is what
+    app_* density/mag/resid stats are ALWAYS computed from (see
+    process_pair) -- comparing only genuinely-measured vectors is the
+    right basis for "how much real data is here", matching the "density"
+    convention (n_valid/n_total on the RAW mask) used throughout this
+    app's own stereo-density investigation.
+
+    u_filled/v_filled/w_filled are the npz's `U`/`V`/`W` (`u`/`v`)
+    arrays completely UNMASKED. When the batch run that produced this npz
+    had `postprocess.replace_invalid=True` (this app's default), these
+    values at originally-invalid cells are `replace_invalid_vectors`'s
+    own local-interpolation fill, not raw measurements -- i.e. this is
+    the FINAL field the app would actually report to a user, directly
+    comparable to DaVis's OWN final (also fully-filled) PostProc output
+    on equal footing. Comparing u_raw (this app's genuinely-measured-only
+    subset) against DaVis's fully-filled PostProc, as this script did
+    exclusively before --app-field existed, mixes two different
+    pipeline stages and inflates the apparent diff by counting every
+    already-known density gap as if it were an accuracy gap too -- see
+    --app-field's own help text."""
     d = np.load(npz_path)
     if mode == "stereo":
         x, y, u, v, w, valid = d["x"], d["y"], d["U"], d["V"], d["W"], d["valid"]
@@ -200,11 +216,15 @@ def _load_app_field(npz_path, mode, px_per_mm):
     # load_vc7_stereo_field always return mm/s -- a raw 1000x mismatch if
     # compared directly (same conversion compare_stereo_preview.py's own
     # vel_to_mm_s does before calling compare()).
-    u = np.where(valid, u * 1000.0, np.nan)
-    v = np.where(valid, v * 1000.0, np.nan)
-    if w is not None:
-        w = np.where(valid, w * 1000.0, np.nan)
-    return x_mm, y_mm, u, v, w
+    u_filled = u * 1000.0
+    v_filled = v * 1000.0
+    w_filled = w * 1000.0 if w is not None else None
+
+    u_raw = np.where(valid, u_filled, np.nan)
+    v_raw = np.where(valid, v_filled, np.nan)
+    w_raw = np.where(valid, w_filled, np.nan) if w_filled is not None else None
+
+    return x_mm, y_mm, u_raw, v_raw, w_raw, u_filled, v_filled, w_filled
 
 
 def _load_reference_field(vc7_path, mode):
@@ -214,11 +234,18 @@ def _load_reference_field(vc7_path, mode):
     return x, y, u, v, None
 
 
-def process_pair(pair_id, npz_dir, vc7_dir, mode, native_scale, px_per_mm):
+def process_pair(pair_id, npz_dir, vc7_dir, mode, native_scale, px_per_mm, app_field_mode="raw"):
     """Never raises. Returns a flat dict with every CSV_FIELDNAMES key
     present regardless of outcome (NaN/blank for whatever wasn't
     computed) -- see module docstring for the app_*/dv_*/cmp_* population
-    rules."""
+    rules.
+
+    app_field_mode selects which of _load_app_field's two versions feeds
+    the cmp_* (compare() vs DaVis) columns -- "raw" (default, matches
+    every checkpoint written before this parameter existed) or "filled".
+    app_* columns are UNAFFECTED by this -- always computed from the raw/
+    genuinely-measured subset regardless, so density/mag/resid trends
+    stay comparable across both modes."""
     result = {"pair_id": pair_id, "pair_index": int(pair_id), "status": "ok", "error_message": ""}
     errors = []
 
@@ -244,9 +271,13 @@ def process_pair(pair_id, npz_dir, vc7_dir, mode, native_scale, px_per_mm):
             errors.append(("vc7_load_error", f"{type(e).__name__}: {e}"))
 
     if app_field is not None:
-        x, y, u, v, w = app_field
-        stats, _ = field_stats("app", u, v, native_scale=native_scale, residual_thresholds=OUTLIER_THRESHOLDS)
+        x, y, u_raw, v_raw, w_raw, u_filled, v_filled, w_filled = app_field
+        stats, _ = field_stats("app", u_raw, v_raw, native_scale=native_scale, residual_thresholds=OUTLIER_THRESHOLDS)
         result.update(_sanitize_field_stats("app", stats))
+        if app_field_mode == "filled":
+            u, v, w = u_filled, v_filled, w_filled
+        else:
+            u, v, w = u_raw, v_raw, w_raw
     else:
         result.update(_sanitize_field_stats("app", {**_NAN_FIELD_STATS, "label": "app"}))
 
@@ -290,11 +321,11 @@ def checkpoint_path(out_dir, pair_id):
     return os.path.join(out_dir, "checkpoint", f"{pair_id}.json")
 
 
-def save_checkpoint(out_dir, pair_id, result, mode):
+def save_checkpoint(out_dir, pair_id, result, mode, app_field_mode="raw"):
     path = checkpoint_path(out_dir, pair_id)
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
-        json.dump({**result, "schema_version": 1, "mode": mode}, f)
+        json.dump({**result, "schema_version": 1, "mode": mode, "app_field_mode": app_field_mode}, f)
     os.replace(tmp, path)  # atomic on Windows/POSIX -- never leaves a
                             # truncated checkpoint if the process is
                             # killed mid-write (this dataset's documented
@@ -474,6 +505,17 @@ def build_arg_parser():
     p.add_argument("--outlier-threshold", type=float, default=3.0, choices=OUTLIER_THRESHOLDS,
                     help="Which of field_stats' own fixed residual thresholds to use for the outlier-rate "
                          "trend plot.")
+    p.add_argument("--app-field", choices=("raw", "filled"), default="raw",
+                    help="Which version of this app's own output feeds the cmp_* (vs DaVis) columns. "
+                         "'raw' (default, matches every checkpoint from before this flag existed): only "
+                         "genuinely-measured vectors, NaN everywhere replace_invalid_vectors filled a "
+                         "rejected cell -- compares this app's raw measurements against DaVis's fully-"
+                         "filled PostProc output, which are two different pipeline stages. 'filled': the "
+                         "npz's own U/V/W (u/v) arrays as-is, i.e. this app's FINAL output (post-fill, "
+                         "same pipeline stage DaVis's PostProc represents) -- use this to check whether a "
+                         "'raw'-mode diff is really an accuracy gap or just an artifact of comparing "
+                         "different stages. app_* density/mag/resid columns are unaffected either way "
+                         "(always computed from the raw/genuinely-measured subset).")
     p.add_argument("--force", action="store_true", help="Recompute every pair, ignoring existing checkpoints.")
     p.add_argument("--summarize-only", action="store_true",
                     help="Skip all npz/vc7 loading; just rebuild summary.csv + plots from existing "
@@ -538,12 +580,24 @@ def main():
             both = both[: args.max_pairs]
 
         n_skipped = 0
+        mode_mismatch_warned = False
         for i, pair_id in enumerate(both):
-            if not args.force and os.path.exists(checkpoint_path(args.out_dir, pair_id)):
+            ckpt_path = checkpoint_path(args.out_dir, pair_id)
+            if not args.force and os.path.exists(ckpt_path):
+                if not mode_mismatch_warned:
+                    with open(ckpt_path) as f:
+                        existing_mode = json.load(f).get("app_field_mode", "raw")
+                    if existing_mode != args.app_field:
+                        print(f"[warn] existing checkpoints under '{args.out_dir}' were computed with "
+                              f"--app-field {existing_mode}, but this run requested --app-field "
+                              f"{args.app_field} -- skipped (non-forced) pairs will keep their OLD "
+                              f"cmp_* values in summary.csv. Use a different --out-dir or pass --force.")
+                        mode_mismatch_warned = True
                 n_skipped += 1
                 continue
-            result = process_pair(pair_id, args.npz_dir, args.vc7_dir, args.mode, native_scale, px_per_mm)
-            save_checkpoint(args.out_dir, pair_id, result, args.mode)
+            result = process_pair(pair_id, args.npz_dir, args.vc7_dir, args.mode, native_scale, px_per_mm,
+                                   app_field_mode=args.app_field)
+            save_checkpoint(args.out_dir, pair_id, result, args.mode, app_field_mode=args.app_field)
             print(f"  [{i + 1}/{len(both)}] pair {pair_id}: status={result['status']}", flush=True)
         if n_skipped:
             print(f"[info] skipped {n_skipped} pair(s) with an existing checkpoint (use --force to redo)")
