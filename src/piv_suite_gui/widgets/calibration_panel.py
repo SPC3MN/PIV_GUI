@@ -46,6 +46,25 @@ class _CameraMappingForm(QWidget):
         super().__init__(parent)
         self._plane2 = None   # a second config.schema.CameraMappingSettings, or None
         self._z_mm = None     # this form's OWN (primary-plane) calibrated Z, or None if manual
+        # This camera's real raw sensor size (DaVis Calibration.xml's
+        # OriginalImageSize), same "extra state alongside the visible
+        # widgets" treatment as _z_mm/_plane2 above -- there's no spin box
+        # for this (nothing to hand-edit; it's a fixed physical constant
+        # of the camera, only ever auto-extracted). REAL BUG this fixes:
+        # get_settings() used to silently drop these on every call by
+        # never reading them back at all, so CameraMapping.raw_domain_
+        # valid's FOV-cropping mask was a permanent no-op the instant this
+        # form's settings were read back for actual Preview/Run processing
+        # -- calibration_panel.get_settings() is what preview_panel.py and
+        # run_panel.py both call to build the settings a real run/preview
+        # actually uses, so the auto-extracted values from set_settings()
+        # never survived past the initial display. Confirmed via a real
+        # GUI test: a fully-uncropped rectangular preview with a HIGHER
+        # valid-vector count than raw_domain_valid's own ceiling allows,
+        # which is only possible if it was returning "no masking" the
+        # whole time.
+        self._raw_width = None
+        self._raw_height = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -157,7 +176,7 @@ class _CameraMappingForm(QWidget):
             x0=self.x0_spin.value(), x_span=self.x_span_spin.value(),
             y0=self.y0_spin.value(), y_span=self.y_span_spin.value(),
             dx_coefs=dx_coefs, dy_coefs=dy_coefs, name=self.name_edit.text(),
-            z_mm=self._z_mm,
+            z_mm=self._z_mm, raw_width=self._raw_width, raw_height=self._raw_height,
         )
 
     @property
@@ -175,6 +194,8 @@ class _CameraMappingForm(QWidget):
             self.coef_table.setItem(i, 1, QTableWidgetItem(f"{settings.dy_coefs.get(k, 0.0):.2f}"))
         self._z_mm = settings.z_mm
         self._plane2 = plane2
+        self._raw_width = settings.raw_width
+        self._raw_height = settings.raw_height
         self._update_davis_label()
 
 

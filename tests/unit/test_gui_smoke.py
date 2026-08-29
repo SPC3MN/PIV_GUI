@@ -794,7 +794,8 @@ def _fake_stereo_settings(z0=1.0, z1=-2.0):
     from piv_suite.config.schema import CameraMappingSettings, StereoSettings
 
     def mapping(z_mm, name):
-        return CameraMappingSettings(x0=1.0, x_span=2.0, y0=3.0, y_span=4.0, name=name, z_mm=z_mm)
+        return CameraMappingSettings(x0=1.0, x_span=2.0, y0=3.0, y_span=4.0, name=name, z_mm=z_mm,
+                                      raw_width=4096, raw_height=3008)
 
     return StereoSettings(
         cam0_mapping=mapping(z0, "cam0 plane1"), cam0_mapping_plane2=mapping(z1, "cam0 plane2"),
@@ -839,6 +840,22 @@ def test_calibration_panel_set_settings_round_trips_two_planes_and_world_grid(qt
     assert result.world_shape == (500, 600)
     assert result.world_scale_px_per_mm == pytest.approx(17.9)
     assert result.sheet_z_mm is None  # not auto-filled by set_settings alone
+    # REAL BUG this guards against: raw_width/raw_height have no spin box
+    # of their own (nothing to hand-edit -- a fixed physical camera
+    # constant, only ever auto-extracted), so _CameraMappingForm.
+    # get_settings() used to silently rebuild CameraMappingSettings
+    # without ever reading them back at all. Since preview_panel.py/
+    # run_panel.py both call THIS get_settings() to build what a real
+    # Preview/Run actually processes with, every auto-extracted value was
+    # discarded before it ever reached CameraMapping.raw_domain_valid,
+    # making the stereo FOV crop a permanent no-op in the real GUI
+    # regardless of how correct that mask's own logic was -- confirmed via
+    # a real GUI test showing an uncropped rectangular preview with MORE
+    # valid vectors than raw_domain_valid's own ceiling allows.
+    assert result.cam0_mapping.raw_width == 4096
+    assert result.cam0_mapping.raw_height == 3008
+    assert result.cam1_mapping.raw_width == 4096
+    assert result.cam1_mapping.raw_height == 3008
 
     cp.sheet_z_mm_check.setChecked(True)
     cp.sheet_z_mm_spin.setValue(-0.5)
