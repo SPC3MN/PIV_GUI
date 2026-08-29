@@ -75,16 +75,26 @@ def find_vc7_for(lavision_dir, im7_path):
 
 
 def load_vc7_field(path):
-    """-> (x_mm, y_mm, u_mm_s, v_mm_s), DaVis's final (active-choice)
-    vector field, already in physical units via the file's own scales."""
+    """-> (x_mm, y_mm, u_mm_s, v_mm_s), DaVis's final vector field, already
+    in physical units via the file's own scales.
+
+    Validity comes from lvpyio's own as_masked_array() (matching
+    load_vc7_stereo_field's already-correct approach), NOT the ACTIVE_
+    CHOICE!=0 heuristic this function used until a real dataset broke it:
+    ACTIVE_CHOICE tracks which PASS "won" in a MULTI-pass job, but is
+    simply never populated (stays 0 everywhere) for a genuinely single-
+    pass job (confirmed on a real "1x32x32" -- one pass -- DaVis project,
+    as opposed to every other dataset checked so far, all "3x32x32" --
+    three passes). Reading ACTIVE_CHOICE!=0 there means EVERY cell reads
+    as invalid regardless of real data underneath (confirmed: U0 had
+    375788 real nonzero values on a file where ACTIVE_CHOICE was 0
+    everywhere) -- as_masked_array's own ENABLED-based validity (confirmed
+    identical count) handles both the multi- and single-pass case
+    correctly without this function needing to know which one it's
+    reading."""
     import lvpyio as lv
 
     frame = lv.read_buffer(path).frames[0]
-    comps = frame.components
-    u_comp, v_comp = comps["U0"], comps["V0"]
-    u_raw = np.asarray(u_comp.planes[0], dtype=np.float64)
-    v_raw = np.asarray(v_comp.planes[0], dtype=np.float64)
-    ny, nx = u_raw.shape
 
     # frame.scales.{x,y} are mm-per-RAW-PIXEL, but adjacent grid cells are
     # frame.grid.{x,y} raw pixels apart (e.g. 8px for a 32px/75%-overlap
@@ -94,24 +104,15 @@ def load_vc7_field(path):
     # instead of the true ~211x156mm full-frame extent).
     scales = frame.scales
     grid = frame.grid
+    arr = frame.as_masked_array(plane=0)
+    ny, nx = arr.shape
     ix, iy = np.meshgrid(np.arange(nx) * grid.x, np.arange(ny) * grid.y)
     x_mm = scales.x.offset + scales.x.slope * ix
     y_mm = scales.y.offset + scales.y.slope * iy
 
-    # Each component carries its own scale (confirmed identical to
-    # frame.scales.i on this dataset, but use the component's own scale
-    # for correctness) -- raw plane value -> m/s -> mm/s.
-    u_mm_s = (u_comp.scale.offset + u_comp.scale.slope * u_raw) * 1000.0
-    v_mm_s = (v_comp.scale.offset + v_comp.scale.slope * v_raw) * 1000.0
-
-    # ACTIVE_CHOICE is 0 where DaVis has no vector (placeholder zero, not
-    # a real measurement) and nonzero (the pass index that "won") where a
-    # vector was retained -- confirmed via inspection: 0 always pairs
-    # with U0/V0 == 0.0, nonzero (e.g. 5) with real nonzero velocities.
-    active = np.asarray(comps["ACTIVE_CHOICE"].planes[0])
-    valid = active != 0
-    u_mm_s = np.where(valid, u_mm_s, np.nan)
-    v_mm_s = np.where(valid, v_mm_s, np.nan)
+    valid = ~np.ma.getmaskarray(arr)["u"]
+    u_mm_s = np.where(valid, arr["u"].filled(np.nan) * 1000.0, np.nan)
+    v_mm_s = np.where(valid, arr["v"].filled(np.nan) * 1000.0, np.nan)
     return x_mm, y_mm, u_mm_s, v_mm_s
 
 
@@ -122,12 +123,25 @@ def resample_onto(x_src, y_src, u_src, v_src, x_dst, y_dst, w_src=None):
     source points/valid mask u_src already defines -- w_src's own NaNs
     are not independently checked, since u_src/v_src/w_src share one
     valid mask by construction in every caller (all three come from the
-    same triangulated/DaVis vector, never valid independently)."""
+    same triangulated/DaVis vector, never valid independently).
+
+    Fewer than 3 valid source points (a genuinely empty/near-empty source
+    field -- confirmed on a real dataset: one DaVis PostProc pair with
+    ZERO valid vectors, likely a dropped/rejected frame in DaVis's own
+    processing) can't form a 2D Delaunay triangulation at all --
+    griddata's LinearNDInterpolator raises `ValueError: No points given`
+    rather than returning an empty/NaN result, which used to propagate
+    uncaught all the way up through compare() and crash an entire batch
+    comparison run over a single bad frame. Returns all-NaN instead,
+    matching what a caller already treats as "no overlap" downstream."""
     from scipy.interpolate import griddata
 
     pts = np.column_stack([x_src.ravel(), y_src.ravel()])
     ok = ~np.isnan(u_src.ravel())
     dst_pts = np.column_stack([x_dst.ravel(), y_dst.ravel()])
+    if ok.sum() < 3:
+        nan_out = np.full(x_dst.shape, np.nan)
+        return (nan_out, nan_out.copy()) if w_src is None else (nan_out, nan_out.copy(), nan_out.copy())
     u_out = griddata(pts[ok], u_src.ravel()[ok], dst_pts, method="linear").reshape(x_dst.shape)
     v_out = griddata(pts[ok], v_src.ravel()[ok], dst_pts, method="linear").reshape(x_dst.shape)
     if w_src is None:

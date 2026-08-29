@@ -258,9 +258,23 @@ def process_pair(pair_id, npz_dir, vc7_dir, mode, native_scale, px_per_mm):
         result.update(_sanitize_field_stats("dv", {**_NAN_FIELD_STATS, "label": "dv"}))
 
     if app_field is not None and dv_field is not None:
-        cmp_ = compare(pair_id, x, y, u, v, x_dv, y_dv, u_dv, v_dv, w_app=w, w_dv=w_dv)
-        result.update({f"cmp_{k}": v for k, v in cmp_.items()})
-        result["status"] = "no_overlap" if cmp_["n_compared"] == 0 else "ok"
+        try:
+            cmp_ = compare(pair_id, x, y, u, v, x_dv, y_dv, u_dv, v_dv, w_app=w, w_dv=w_dv)
+            result.update({f"cmp_{k}": v for k, v in cmp_.items()})
+            result["status"] = "no_overlap" if cmp_["n_compared"] == 0 else "ok"
+        except Exception as e:
+            # Never let a single pair's comparison math crash the whole
+            # run -- both sides loaded fine here, so this is an unexpected
+            # failure in compare() itself (confirmed real: resample_onto
+            # used to raise "No points given" when DaVis's own field had
+            # too few valid vectors to triangulate, before that was fixed
+            # at its source -- kept as defense-in-depth here too, matching
+            # this script's whole "survive a large dataset's inevitable
+            # bad frames" design goal, which the compare() call itself was
+            # never actually covered by until this was caught on real data).
+            errors.append(("compare_error", f"{type(e).__name__}: {e}"))
+            result.update({f"cmp_{k}": v for k, v in _NAN_CMP.items()})
+            result["status"] = "compare_error"
     else:
         result.update({f"cmp_{k}": v for k, v in _NAN_CMP.items()})
         status_priority = ["npz_load_error", "vc7_load_error", "missing_npz", "missing_vc7"]
@@ -450,6 +464,13 @@ def build_arg_parser():
     p.add_argument("--start-index", type=int, default=0)
     p.add_argument("--max-pairs", type=int, default=None, help="Optional cap; default processes every "
                                                                  "pair found on both sides.")
+    p.add_argument("--stride", type=int, default=1, help="Only process every Nth pair (after --start-index, "
+                                                            "before --max-pairs) -- e.g. --stride 10 samples "
+                                                            "every 10th pair instead of every pair, for a much "
+                                                            "cheaper trend estimate on a large dataset where "
+                                                            "per-pair comparison cost (dominated by griddata's "
+                                                            "own per-pair Delaunay triangulation) makes the full "
+                                                            "set impractically slow.")
     p.add_argument("--outlier-threshold", type=float, default=3.0, choices=OUTLIER_THRESHOLDS,
                     help="Which of field_stats' own fixed residual thresholds to use for the outlier-rate "
                          "trend plot.")
@@ -510,6 +531,9 @@ def main():
         print(f"[info] proceeding with {len(both)} pair(s) present on both sides")
 
         both = [p for p in both if int(p) >= args.start_index]
+        if args.stride > 1:
+            both = both[:: args.stride]
+            print(f"[info] --stride {args.stride}: sampling {len(both)} pair(s)")
         if args.max_pairs is not None:
             both = both[: args.max_pairs]
 
