@@ -256,9 +256,15 @@ class CalibrationPanel(QWidget):
         angle_grid = QGridLayout(angle_box)
         angle_grid.setContentsMargins(6, 6, 6, 6)
         angle_grid.setSpacing(4)
-        self.alpha1_spin = self._angle_spin(-45.0)
+        # Placeholders match config.schema.StereoSettings' own defaults --
+        # DaVis's measured "Min/Max angle 1-2: 89.53deg" for the Swirl
+        # project, split symmetrically, NOT a generally-correct value for a
+        # different physical rig (see that field's own comment). Overwritten
+        # by set_settings() the moment any real project loads, same as
+        # before -- this is only what's shown before that happens.
+        self.alpha1_spin = self._angle_spin(44.765)
         self.alpha1_spin.setToolTip("Camera 0's in-plane viewing angle (deg) relative to the world Z-axis, used by reconstruct_stereo to solve for U/V/W. Auto-derived from the calibration's own two Z-planes when you select a .set with Polynomial3rdOrder calibration (see davis_set._estimate_stereo_angles) -- a geometric estimate, not a measured rig value; edit freely if you know the real angle.")
-        self.alpha2_spin = self._angle_spin(45.0)
+        self.alpha2_spin = self._angle_spin(-44.765)
         self.alpha2_spin.setToolTip("Camera 1's in-plane viewing angle (deg) relative to the world Z-axis, used by reconstruct_stereo to solve for U/V/W. Auto-derived -- see α₁'s tooltip.")
         self.beta1_spin = self._angle_spin(0.0)
         self.beta1_spin.setToolTip("Camera 0's out-of-plane viewing angle (deg), used by reconstruct_stereo to solve for U/V/W. Auto-derived -- see α₁'s tooltip.")
