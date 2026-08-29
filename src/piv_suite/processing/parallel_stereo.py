@@ -81,7 +81,7 @@ from concurrent.futures import ProcessPoolExecutor, wait
 
 import numpy as np
 
-from ..calibration.camera_mapping import build_camera_mapping
+from ..calibration.camera_mapping import build_camera_mapping, stereo_fov_valid
 from ..config.legacy import to_cpu_settings
 from ..engines._openpiv_speedups import apply_speedups
 from ..engines.registry import get_engine_factory
@@ -184,13 +184,12 @@ def process_one_pair_stereo_worker(idx, pair_id, fa0, fb0, fa1, fb1, cfg, output
     post = cfg.postprocess.for_pipeline()
     engine, x, y = _get_worker_engine(dw_a0.shape, cfg.correlation, cfg.validation)
 
-    # See preview_panel._compute_stereo's comment on the same mask: reject
-    # a correlation point either camera can't actually see (world_to_raw
-    # outside its real raw sensor). y is _get_worker_engine's DISPLAY-
-    # flipped coordinate -- un-flip back to world_to_raw's row-down grid
-    # convention first.
+    # See preview_panel._compute_stereo's comment on the same mask /
+    # calibration.camera_mapping.stereo_fov_valid's own docstring. y is
+    # _get_worker_engine's DISPLAY-flipped coordinate -- un-flip back to
+    # world_to_raw's row-down grid convention first.
     y_row_down = cfg.stereo.world_shape[0] - y
-    fov_valid = cam0.raw_domain_valid(x, y_row_down) & cam1.raw_domain_valid(x, y_row_down)
+    fov_valid = stereo_fov_valid(cam0, cam1, x, y_row_down)
 
     # process_stereo_pair validates the COMBINED/triangulated field once
     # (not each camera's raw 2D field independently, then intersected) --

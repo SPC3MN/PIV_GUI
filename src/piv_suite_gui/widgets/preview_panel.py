@@ -26,7 +26,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 import matplotlib.pyplot as plt
 import numpy as np
 
-from piv_suite.calibration.camera_mapping import build_camera_mapping
+from piv_suite.calibration.camera_mapping import build_camera_mapping, stereo_fov_valid
 from piv_suite.config.legacy import to_cpu_settings, to_gpu_settings
 from piv_suite.engines.registry import get_engine_factory
 from piv_suite.io.davis_set import (
@@ -478,21 +478,18 @@ class PreviewPanel(QWidget):
         engine0, x, y = _build_engine(project.backend, dw_a0.shape, correlation, validation)
         engine1, _, _ = _build_engine(project.backend, dw_a1.shape, correlation, validation)
 
-        # cam0/cam1 each genuinely see this world-grid point (x, y) --
-        # rejects a point that maps (via world_to_raw) outside either
-        # camera's real raw sensor bounds, which dewarp_image already
-        # zero-fills but a correlation window straddling that zero-padded
-        # region can still return a spurious "valid-looking" vector for.
-        # See CameraMapping.raw_domain_valid's docstring. `y` here is
-        # _build_engine's DISPLAY-flipped ("y increases upward") coordinate
-        # (engines.cpu_engine.init_cpu_processor / gpu_engine.
-        # init_gpu_processor: y = frame_shape[0]*scaling_par - y_raw,
-        # scaling_par==1.0 pre-calibration) -- world_to_raw's own grid
-        # (_ensure_grid's np.mgrid) is row-down/UNflipped, so raw_domain_
-        # valid needs y un-flipped back first or every point near the
-        # canvas's top/bottom edge gets checked against the wrong row.
+        # cam0/cam1 each genuinely see this world-grid point (x, y) AND
+        # have a trustworthy (non-extrapolated) calibration fit there --
+        # see calibration.camera_mapping.stereo_fov_valid's own docstring.
+        # `y` here is _build_engine's DISPLAY-flipped ("y increases
+        # upward") coordinate (engines.cpu_engine.init_cpu_processor /
+        # gpu_engine.init_gpu_processor: y = frame_shape[0]*scaling_par -
+        # y_raw, scaling_par==1.0 pre-calibration) -- world_to_raw's own
+        # grid (_ensure_grid's np.mgrid) is row-down/UNflipped, so this
+        # needs y un-flipped back first or every point near the canvas's
+        # top/bottom edge gets checked against the wrong row.
         y_row_down = stereo_settings.world_shape[0] - y
-        fov_valid = cam0.raw_domain_valid(x, y_row_down) & cam1.raw_domain_valid(x, y_row_down)
+        fov_valid = stereo_fov_valid(cam0, cam1, x, y_row_down)
         if stereo_settings.alpha1_deg is None or stereo_settings.alpha2_deg is None:
             raise ValueError(
                 "Stereo triangulation angle not set -- check 'Angles measured' on the "

@@ -115,6 +115,41 @@ class CameraMapping:
         raw_x, raw_y = self.world_to_raw(x, y)
         return (raw_x >= 0) & (raw_x < self.raw_width) & (raw_y >= 0) & (raw_y < self.raw_height)
 
+def stereo_fov_valid(cam0, cam1, x, y):
+    """The one place stereo's "does either camera actually have usable
+    real data at this world-grid point" mask is computed -- every
+    processing entry point (preview_panel/cli/pipeline_worker/
+    parallel_stereo) should call this instead of hand-rolling the AND of
+    raw_domain_valid across both cameras, so the definition of "valid"
+    can't drift out of sync between them the way the 6-arg CameraMapping()
+    constructor used to before build_camera_mapping existed.
+
+    Requires BOTH cameras to actually see this point on their real raw
+    sensor (raw_domain_valid). world_to_raw's full polynomial transform
+    (not a plain affine one) means this naturally produces a tapered,
+    non-rectangular shape in world-grid space for an angled camera pair --
+    confirmed directly against real DaVis output: DaVis's own valid region
+    is a keystone/hexagon (an 11-cell-wide sliver at the very top row,
+    widening to the full rectangular width by row ~18), and this function
+    already reproduces that shape closely (90.5% cell-for-cell agreement,
+    0% of DaVis's real valid cells excluded, once properly compared on a
+    common physical grid rather than raw array indices, which don't line
+    up between this app's and DaVis's differently-sized grids).
+
+    An earlier version of this ALSO required |s|<=1/|t|<=1 (the
+    calibration polynomial's own normalized fit domain) for both cameras,
+    on the theory that a point outside a calibration target's real
+    footprint is an untrustworthy extrapolation DaVis wouldn't report
+    either. Measured against real data, that check made the match WORSE,
+    not better -- excluding up to 25% of cells DaVis actually shows real
+    data for, at the literal |s|,|t|<=1 bound. The threshold needed for it
+    to stop cutting off real DaVis data (~1.4) turned out to make it a
+    complete no-op for this rig's real calibration (raw_domain_valid was
+    already the more restrictive, binding constraint everywhere), so it
+    was removed rather than kept as dead weight -- see git history if a
+    future rig's calibration ever needs it reconsidered."""
+    return cam0.raw_domain_valid(x, y) & cam1.raw_domain_valid(x, y)
+
 
 COEF_KEYS = ("1", "s", "s2", "s3", "t", "t2", "t3", "st", "s2t", "t2s")
 

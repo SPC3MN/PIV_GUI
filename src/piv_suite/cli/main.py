@@ -18,7 +18,7 @@ import time
 
 import numpy as np
 
-from ..calibration.camera_mapping import build_camera_mapping
+from ..calibration.camera_mapping import build_camera_mapping, stereo_fov_valid
 from ..config.io import ProjectConfig, load_project, save_project
 from ..config.legacy import to_cpu_settings, to_gpu_settings
 from ..engines.registry import get_engine_factory
@@ -365,8 +365,7 @@ def handle_pair_stereo(pair_id, dw_a0, dw_b0, dw_a1, dw_b1, cfg, angles, output_
         u1, v1, valid1, elapsed1, x, y, r1, t_post1 = _run_camera(dw_a0, dw_b0, cfg)
         u2, v2, valid2, elapsed2, _, _, r2, t_post2 = _run_camera(dw_a1, dw_b1, cfg)
         y_row_down = cfg.stereo.world_shape[0] - y
-        valid = (valid1 & valid2 & cfg.stereo._cam0.raw_domain_valid(x, y_row_down)
-                  & cfg.stereo._cam1.raw_domain_valid(x, y_row_down))
+        valid = valid1 & valid2 & stereo_fov_valid(cfg.stereo._cam0, cfg.stereo._cam1, x, y_row_down)
         elapsed = elapsed1 + elapsed2
         U, V, W = pipeline.combine_stereo_pair(
             u1, v1, u2, v2, angles, cfg.stereo.world_scale_px_per_mm, cfg.calibration.frame_dt_s)
@@ -384,8 +383,7 @@ def handle_pair_stereo(pair_id, dw_a0, dw_b0, dw_a1, dw_b1, cfg, angles, output_
         engine0, x, y = _build_engine(cfg.project.backend, dw_a0.shape, cfg.correlation, cfg.validation)
         engine1, _, _ = _build_engine(cfg.project.backend, dw_a1.shape, cfg.correlation, cfg.validation)
         y_row_down = cfg.stereo.world_shape[0] - y
-        fov_valid = (cfg.stereo._cam0.raw_domain_valid(x, y_row_down)
-                     & cfg.stereo._cam1.raw_domain_valid(x, y_row_down))
+        fov_valid = stereo_fov_valid(cfg.stereo._cam0, cfg.stereo._cam1, x, y_row_down)
         post = cfg.postprocess.for_pipeline()
         t_post0 = time.time()
         U, V, W, valid, elapsed, r = pipeline.process_stereo_pair(

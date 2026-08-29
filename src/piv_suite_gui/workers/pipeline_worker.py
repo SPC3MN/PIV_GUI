@@ -15,7 +15,7 @@ import time
 import numpy as np
 from PySide6.QtCore import QObject, Signal
 
-from piv_suite.calibration.camera_mapping import build_camera_mapping
+from piv_suite.calibration.camera_mapping import build_camera_mapping, stereo_fov_valid
 from piv_suite.config.legacy import to_cpu_settings, to_gpu_settings
 from piv_suite.engines.base import EngineCancelled
 from piv_suite.engines.registry import get_engine_factory
@@ -391,12 +391,12 @@ class PipelineWorker(QObject):
                 engine0, x, y = _build_engine(cfg.project.backend, dw_a0.shape, cfg.correlation, cfg.validation)
                 engine1, _, _ = _build_engine(cfg.project.backend, dw_a1.shape, cfg.correlation, cfg.validation)
                 # See preview_panel._compute_stereo's comment on the same
-                # mask: reject a correlation point either camera can't
-                # actually see (world_to_raw outside its real raw sensor).
-                # y is _build_engine's DISPLAY-flipped coordinate -- un-flip
-                # back to world_to_raw's row-down grid convention first.
+                # mask / calibration.camera_mapping.stereo_fov_valid's own
+                # docstring. y is _build_engine's DISPLAY-flipped
+                # coordinate -- un-flip back to world_to_raw's row-down
+                # grid convention first.
                 y_row_down = cfg.stereo.world_shape[0] - y
-                fov_valid = (cam0.raw_domain_valid(x, y_row_down) & cam1.raw_domain_valid(x, y_row_down))
+                fov_valid = stereo_fov_valid(cam0, cam1, x, y_row_down)
 
                 t_run0 = time.time()
                 U, V, W, valid, elapsed, r = pipeline.process_stereo_pair(
