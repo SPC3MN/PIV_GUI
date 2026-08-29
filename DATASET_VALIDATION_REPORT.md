@@ -7,9 +7,18 @@ through this app's own CLI, then a snapshot-by-snapshot comparison against
 DaVis's own final (`PostProc`) output using `scripts/compare_dataset.py`.
 
 **Status: stereo and planar completed the full pipeline end-to-end. The
-dual-planar (Truck) dataset's batch run completed, but its comparison
-surfaced a real calibration bug (below) that invalidates its numeric
-results — skipped for this report rather than reporting wrong numbers.**
+dual-planar (Truck) dataset's batch run completed, but only after an
+investigation script bypassed a calibration safety check that should have
+stopped it (see corrected finding 4 below) — its numeric results are
+invalid and skipped from this report rather than reported as wrong numbers.**
+
+**Post-report addendum**: two real bugs this report flagged as unfixed —
+`recommended_workers()`'s missing Windows 61-worker cap, and a stale
+`fast_replace_nans` numerical patch (see [git log](https://github.com/SPC3MN/PIV_GUI/commits/master)
+for both) — were fixed in a follow-up end-to-end improvement pass after
+this report was first written. Finding 4 below was also corrected after
+further direct verification against the app's real source showed it was
+not an app bug the way it was first described.
 
 ## Datasets
 
@@ -180,26 +189,36 @@ against each other.
    verified to give the identical valid-count on a genuinely multi-pass
    file (191,094 both ways), so this is a pure fix, not a behavior change,
    for every dataset that isn't single-pass.
-4. **The Truck project's calibration-snapshot selection produced
-   incomplete/wrong dual-planar camera placement** — `_select_calibration_
-   snapshot` correctly picked whichever History snapshot preceded the
-   recording (its own documented, principled behavior), but that specific
-   snapshot's `FieldOfView="SameForAllCameras"` turned out to represent an
-   **incomplete/placeholder calibration state**, not a real side-by-side
-   arrangement: both cameras were placed at the *exact same* canvas region
-   (0,0,856×2987 — literally stacked on top of each other), producing a
-   combined canvas only 33mm wide, vs. the CURRENT calibration's genuinely
-   different camera placements and ~319mm-wide combined canvas (matching
-   DaVis's own real output width). This was caught because comparison
-   against DaVis showed near-zero/negative correlation despite superficially
-   similar velocity magnitudes — a real, load-bearing finding that an
-   earlier "these two snapshots are structurally identical" check (which
-   only confirmed both have `CameraIdentifier=1/2` mapper blocks present,
-   not that their region/placement values agree) was insufficient to catch.
-   **The full 1500-pair Truck batch run needs to be redone with the CURRENT
-   calibration before it can be meaningfully compared against DaVis** — not
-   done in this session per your explicit choice to skip it and move on
-   with stereo+planar's results.
+4. **CORRECTION (superseding the original phrasing of this finding):
+   this was NOT an app bug** — re-checked directly against the app's real,
+   unpatched source (`davis_set.py`) rather than trusting the original
+   session's characterization. For the Truck recording, `_select_calibration_
+   snapshot` does pick a History snapshot (`Calibration_260605_160405`)
+   whose `FieldOfView="SameForAllCameras"` is an incomplete/placeholder
+   calibration state (both cameras at the identical canvas region,
+   0,0,856×2987 — stacked, not side-by-side) rather than the CURRENT
+   calibration's genuine ~319mm-wide side-by-side placement. But calling
+   the app's real, unpatched functions on this exact project confirms they
+   already handle this correctly: `detect_dual_planar_from_set` returns
+   `False`, `detect_project_type_from_set` returns `"planar"` (not a wrong
+   positive), and `read_dual_planar_calibration_from_set` **raises**
+   `ValueError: ... FieldOfView is 'SameForAllCameras', not 'SideBySide2D'`
+   rather than silently returning wrong geometry. The garbage 1500-pair
+   Truck output happened only because the original investigation used a
+   throwaway scratchpad script that monkeypatched `_read_field_of_view` to
+   map `"SameForAllCameras"` → `"SideBySide2D"`, specifically to force the
+   pipeline past this exact safety check — the check itself was doing
+   its job. The genuine, narrower gap: `_select_calibration_snapshot`'s
+   strictly-temporal selection has no way to recognize a placeholder
+   snapshot and prefer a nearby valid one instead, so a first-time user of
+   this exact dataset would see it auto-detected as `"planar"` (silently
+   wrong MODE, though non-crashing and correctable via the GUI's own
+   radio button) rather than `"dual_planar"` — a real but narrow limitation
+   of a function that already documents itself as best-effort with
+   user-correctable fallback, not a silent-wrong-output defect. Given the
+   fail-loud behavior already works correctly, redoing the Truck batch
+   with the CURRENT calibration remains a reasonable follow-up (see
+   Recommendations) but is not fixing a bug in the shipped pipeline.
 5. **`detect_project_type_from_set`/`detect_dual_planar_from_set` only read
    the calibration folder's `FieldOfView`**, with no cross-check against the
    specific recording's own real frame-stream count — caught the
@@ -226,15 +245,29 @@ against each other.
   difference between the two engines, or (c) a real accuracy gap in this
   app's own processing — needs a fill-stage-matched comparison (this app's
   output *after* `replace_invalid_vectors`, not before) to isolate which.
-- Fix `recommended_workers()` to hard-cap at 61 on Windows and default
-  toward physical core count for this workload (see performance section).
+- ~~Fix `recommended_workers()` to hard-cap at 61 on Windows~~ — **done**
+  (see [autotune.py](src/piv_suite/perf/autotune.py), commit `3f70f53`);
+  defaulting toward physical core count specifically for this NUMA
+  workload is a separate, smaller follow-up not yet done.
 - Redo the Truck dual-planar batch run with the CURRENT calibration, then
-  re-run its comparison, before drawing any conclusions about dual-planar
-  mode's real-world accuracy.
+  re-run its comparison, to get a real dual-planar accuracy datapoint —
+  the shipped code already refuses to run with the wrong calibration
+  (see corrected finding 4 above), so this is a data-gathering follow-up,
+  not a bug fix.
+- Consider whether `_select_calibration_snapshot` should recognize an
+  obviously-incomplete snapshot (e.g. `FieldOfView="SameForAllCameras"`,
+  or a dual-planar snapshot with identical cam0/cam1 region placement)
+  and prefer a nearby valid one instead of the strictly-latest-preceding
+  one — would upgrade this exact Truck scenario from "auto-detects as
+  the wrong mode, user corrects it" to "auto-detects correctly." Real but
+  narrow value: needs a careful design for which snapshot to prefer
+  instead (skip backward further, or forward to current) without risking
+  silently picking a WRONG snapshot in some other project's history.
 - Consider whether `detect_project_type_from_set` should sample the actual
   frame-stream count (already cheap — just a directory listing) as a
   cross-check against the calibration folder's `FieldOfView`, for projects
-  with a shared/mixed-mode calibration folder.
+  with a shared/mixed-mode calibration folder (the "Final_Planar_Swirl"
+  mislabeling finding above).
 - If `compare_dataset.py` is going to be used routinely on real 1000+ pair
   datasets, its griddata-per-pair cost is worth optimizing directly rather
   than routinely relying on `--stride` to work around it.
