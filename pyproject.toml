@@ -12,6 +12,16 @@ dependencies = [
     "scipy",
     "matplotlib",
     "lvpyio",
+    # io/readers.py imports these directly (TIFF/PNG/BMP/JPG loose-file
+    # pair support) -- currently present anyway as transitive dependencies
+    # of openpiv (openpiv -> imageio directly, openpiv -> scikit-image ->
+    # tifffile), but that's incidental to THIS package's own dependency
+    # graph, not guaranteed by it: a future openpiv release could drop
+    # either one and silently break this documented, user-facing feature
+    # with no signal here explaining why. Declaring them directly is the
+    # correct fix regardless of what else happens to provide them today.
+    "tifffile",
+    "imageio",
     # engines/_openpiv_speedups.py monkeypatches several openpiv internals
     # with "faithful" reimplementations verified bit-exact against this
     # exact version's actual source (a routine 0.25.4->0.25.5 upgrade once
