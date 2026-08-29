@@ -407,26 +407,6 @@ def process_stereo_pair(engine0, engine1, frame_a0, frame_b0, frame_a1, frame_b1
 
     if post.replace_invalid:
         U_out, V_out, W_out = postprocess.replace_invalid_vectors(x, y, U_out, V_out, valid, w=W_out)
-        # replace_invalid_vectors fills EVERY ~valid cell it's given
-        # (griddata interpolates from wherever real data exists elsewhere
-        # on the grid), with no distinction between "rejected by a
-        # quality filter" (a soft call worth smoothing over) and "outside
-        # either camera's real raw sensor" (fov_valid False -- a hard
-        # geometric fact, not a quality judgement -- see that mask's own
-        # docstring). Left unguarded, this fills the whole rectangular
-        # canvas including the camera-overlap region's own zero-padded
-        # corners/edges with fabricated, interpolated-from-far-away
-        # values, silently erasing the very crop fov_valid exists to
-        # apply -- confirmed via real GUI use: the saved/plotted field
-        # showed no visible trim at the edges even though the returned
-        # `valid` mask (unaffected by this fill, used elsewhere for
-        # density/comparison) correctly excluded ~8% of the grid there.
-        # DaVis's own output never shows a vector outside this region at
-        # all; re-null it here so this app's U_out/V_out/W_out match that
-        # shape regardless of whether replace_invalid ran.
-        U_out[~fov_valid] = np.nan
-        V_out[~fov_valid] = np.nan
-        W_out[~fov_valid] = np.nan
 
     if post.smooth_field:
         U_out, V_out = postprocess.smooth_vector_field(U_out, V_out, post.smooth_sigma)
@@ -435,6 +415,31 @@ def process_stereo_pair(engine0, engine1, frame_a0, frame_b0, frame_a1, frame_b1
         # derived from the first argument only) and returns two identical
         # results; take either.
         _, W_out = postprocess.smooth_vector_field(W_out, W_out, post.smooth_sigma)
+
+    # Neither replace_invalid_vectors nor smooth_vector_field respects
+    # fov_valid on their own -- both fill/blend EVERY cell they're given
+    # (griddata interpolates from wherever real data exists elsewhere on
+    # the grid; the Gaussian smoother's weight sum has a 1e-8 floor, so it
+    # never produces a genuine NaN either, just a near-zero real number
+    # far from any data), with no distinction between "rejected by a
+    # quality filter" (a soft call worth smoothing over) and "outside
+    # either camera's real raw sensor" (fov_valid False -- a hard
+    # geometric fact, not a quality judgement -- see that mask's own
+    # docstring). Left unguarded, this fills the whole rectangular canvas
+    # including the camera-overlap region's own zero-padded corners/edges
+    # with fabricated values, silently erasing the very crop fov_valid
+    # exists to apply -- confirmed via real GUI use: the saved/plotted
+    # field showed no visible trim at the edges even though the returned
+    # `valid` mask (unaffected by either step, used elsewhere for
+    # density/comparison) correctly excluded ~8% of the grid there.
+    # DaVis's own output never shows a vector outside this region at all;
+    # re-null it here, unconditionally and after BOTH optional steps
+    # (smoothing can bleed back across a boundary replace_invalid alone
+    # respected), so U_out/V_out/W_out match that shape regardless of
+    # which optional post-processing steps ran.
+    U_out[~fov_valid] = np.nan
+    V_out[~fov_valid] = np.nan
+    W_out[~fov_valid] = np.nan
 
     reject_counts = {
         "range_residual": n_range_rejected,
