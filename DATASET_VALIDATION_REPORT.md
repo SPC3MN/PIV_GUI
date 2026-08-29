@@ -143,8 +143,66 @@ mean\|diff\| above is the number that actually speaks to magnitude
 agreement, and it shows a real, non-trivial gap that high correlation alone
 was masking. This combination (high corr, high relative diff) points at a
 systematic magnitude discrepancy or added noise rather than a structural/
-pattern-matching failure, and is worth a dedicated root-cause investigation
-before trusting this app's absolute velocity values at face value.
+pattern-matching failure.
+
+### Root-cause investigation of the ~19-25% relative diff (2026-08-29 follow-up)
+
+Two hypotheses were tested directly against real data (see `scripts/
+compare_dataset.py`'s new `--app-field raw|filled` option and two one-off
+diagnostic scripts run against real pairs from both datasets):
+
+**Hypothesis 1 — raw-vs-PostProc pipeline-stage mismatch: RULED OUT.**
+The original comparison used this app's RAW (pre-`replace_invalid_vectors`)
+vectors against DaVis's fully-filled PostProc output — two different
+pipeline stages, which could plausibly inflate the apparent diff. Re-ran
+the same 100-pair samples comparing this app's FINAL (post-fill) output
+instead — the same pipeline stage DaVis's PostProc represents:
+
+| | Stereo raw | Stereo filled | Planar raw | Planar filled |
+|---|---|---|---|---|
+| mean\|diff\| | 20.2 mm/s | 21.4 mm/s | 14.2 mm/s | 14.4 mm/s |
+| relative to mean magnitude | ~19% | ~20.4% | ~24-25% | ~24.6% |
+
+The gap did not shrink — if anything it's marginally *worse* under filled
+mode (adding the interpolated-fill cells back in adds slightly more error,
+not less). This cleanly rules out "the app's real measurements already
+agree with DaVis; the density gap was just dragging down the raw-vs-final
+comparison" — the disagreement is present in the genuinely-measured
+vectors themselves, not an artifact of comparing different pipeline stages.
+
+**Hypothesis 2 — spatial-gradient/registration sensitivity: CONFIRMED as a
+real, partial contributor.** A swirl flow has strong local velocity
+gradients near the vortex core; comparing two independently-computed
+grids via resampling (`griddata` linear interpolation) is inherently more
+sensitive to small spatial misregistration exactly where the flow curves
+sharply. Checked directly on one real pair from each dataset: local
+diff magnitude vs. local velocity-gradient magnitude (`np.gradient`) are
+positively correlated, and the field's highest-gradient third shows
+meaningfully more error than its lowest-gradient third:
+
+| | Stereo (pair 0000) | Planar (pair 0000) |
+|---|---|---|
+| corr(\|diff\|, \|local gradient\|) | 0.37 | 0.50 |
+| relative diff, low-gradient third | ~25% | ~14% |
+| relative diff, high-gradient third | ~38% | ~26% |
+| high/low ratio | 1.53x | 1.85x |
+
+This is a real, physically-sensible effect (PIV correlation windows
+spatially average velocity over a finite footprint, so near a sharp local
+gradient even a small registration offset between two independently-
+computed grids shows up as extra apparent diff) — not a bug in either app.
+
+**What remains unexplained**: even in the CALMEST (lowest-gradient) third
+of the flow field, a substantial baseline relative diff persists — ~25%
+for stereo, ~14% for planar. Gradient sensitivity is a real, measurable
+contributor (roughly doubling the error in high-curvature regions) but
+does not account for the full gap; a genuine baseline disagreement between
+this app's and DaVis's correlation engines remains, and pinning that down
+further (a systematic correlation/subpixel-fit difference vs. a
+calibration/scale difference vs. a noise-floor difference) needs either a
+synthetic/known-ground-truth flow field or a much closer comparison of the
+two engines' specific correlation parameters — beyond what a comparison
+against real (ground-truth-unknown) flow data alone can resolve.
 
 **Density is consistently 5-7 points below DaVis's own**, in both modes —
 matches this session's earlier, smaller-scale stereo angle investigation
@@ -237,14 +295,18 @@ against each other.
 
 ## Recommendations
 
-- **Root-cause the ~19-25% mean\|diff\|-relative-to-magnitude gap on stereo
-  and planar** (see Comparison section) — high correlation confirms this
-  isn't a structural/pattern failure, so the likely candidates are (a) the
-  known raw-vs-PostProc pipeline-stage mismatch (comparing pre-fill vectors
-  against DaVis's fully smoothed final output), (b) a correlation/subpixel-fit
-  difference between the two engines, or (c) a real accuracy gap in this
-  app's own processing — needs a fill-stage-matched comparison (this app's
-  output *after* `replace_invalid_vectors`, not before) to isolate which.
+- ~~Root-cause the ~19-25% mean\|diff\|-relative-to-magnitude gap on stereo
+  and planar~~ — **investigated** (see "Root-cause investigation" above):
+  the raw-vs-PostProc pipeline-stage mismatch is ruled out (didn't shrink
+  under `--app-field filled`); spatial-gradient/registration sensitivity is
+  confirmed as a real, partial contributor (~1.5-1.85x more error in
+  high-gradient vs. low-gradient regions); a substantial baseline gap
+  (~14-25%) remains unexplained even in the calmest flow regions. Next
+  step, if pursued further: compare against a synthetic flow field with a
+  known ground truth (removes the "which engine is actually right"
+  ambiguity real flow data can't resolve), or a closer parameter-by-
+  parameter comparison of this app's vs. DaVis's correlation/subpixel-fit
+  settings for this exact job.
 - ~~Fix `recommended_workers()` to hard-cap at 61 on Windows~~ — **done**
   (see [autotune.py](src/piv_suite/perf/autotune.py), commit `3f70f53`);
   defaulting toward physical core count specifically for this NUMA

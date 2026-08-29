@@ -34,18 +34,34 @@ work.
   — a process killed mid-write (Ctrl+C, disk full, power loss) could
   truncate the config file with no recovery path; `save_project` runs on
   every CLI invocation. `aad9971`
+- **Added `--app-field raw|filled` to `compare_dataset.py` and root-caused
+  the mean\|diff\| gap** (see below — moved from HIGH PRIORITY to
+  completed, with a narrower follow-up item in its place). `55677dd`
 
 ## HIGH PRIORITY
 
-- **Root-cause the ~19-25% mean\|diff\|-relative-to-magnitude gap** between
-  this app and DaVis on the stereo/planar swirl datasets (see
-  `DATASET_VALIDATION_REPORT.md`'s Comparison section). High correlation
-  (0.95-0.97) confirms this isn't a structural/pattern failure — likely
-  candidates: the raw-vs-PostProc pipeline-stage mismatch (compare this
-  app's output *after* `replace_invalid_vectors`, not before), a
-  correlation/subpixel-fit difference, or a real accuracy gap. Needs a
-  real dataset re-run to investigate, not a code-only fix — scope
-  accordingly before starting.
+- ~~Root-cause the ~19-25% mean\|diff\|-relative-to-magnitude gap~~ —
+  **investigated 2026-08-29** (see `DATASET_VALIDATION_REPORT.md`'s
+  "Root-cause investigation" section for full numbers). Findings:
+  - Raw-vs-PostProc pipeline-stage mismatch: **ruled out** — re-comparing
+    this app's post-fill (final) output instead of raw measurements
+    (`--app-field filled`) did not shrink the gap (stereo 19%→20.4%,
+    planar ~24-25%→24.6%, both slightly worse, not better).
+  - Spatial-gradient/registration sensitivity: **confirmed as a real,
+    partial contributor** — local diff correlates with local velocity-
+    gradient magnitude (r=0.37 stereo, r=0.50 planar); the highest-
+    gradient third of each field shows 1.5-1.85x more relative error than
+    the lowest-gradient third. Physically sensible for a swirl flow
+    (strong local curvature near the vortex core makes spatial
+    registration between two independently-computed grids more
+    sensitive), not a bug.
+  - **Remaining open item**: even the calmest (lowest-gradient) regions
+    still show a substantial baseline relative diff (~14-25%), unexplained
+    by either hypothesis above. Next step needs either a synthetic flow
+    field with a known ground truth (real swirl data can't establish which
+    engine is "right"), or a closer parameter-by-parameter comparison of
+    this app's vs. DaVis's specific correlation/subpixel-fit settings for
+    this job — a genuinely new investigation, not a quick follow-up.
 
 ## MEDIUM PRIORITY
 
