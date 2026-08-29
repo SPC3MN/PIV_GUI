@@ -113,6 +113,43 @@ def test_low_spec_target_machines_get_safe_values(monkeypatch, name, cpu_count, 
         assert autotune._MIN_CHUNK_WINDOWS <= fft_chunk <= autotune._MAX_CHUNK_WINDOWS
 
 
+def test_recommended_workers_caps_auto_detect_at_windows_limit(monkeypatch):
+    # Real crash reproduced on an actual 72-logical-core dual-socket
+    # Windows machine: os.cpu_count()=72 with abundant RAM made the
+    # auto-detect path return 72, which ProcessPoolExecutor(max_workers=72)
+    # rejects outright on win32 (ValueError: max_workers must be <= 61) --
+    # recommended_workers() must never hand back more than the platform
+    # allows, regardless of how many cores/how much RAM the machine has.
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr("os.cpu_count", lambda: 72)
+    monkeypatch.setattr(autotune, "available_ram_bytes", lambda: 512 * GB)  # rule out the RAM ceiling binding
+    assert autotune.recommended_workers() == 61
+
+
+def test_recommended_workers_caps_explicit_override_at_windows_limit(monkeypatch):
+    # An override is meant to win over the auto-detected value, but not
+    # over a hard platform ceiling -- a user-typed n_workers=72 in a
+    # .pivproj on this same real machine would otherwise crash identically,
+    # just later (mid-batch, inside ProcessPoolExecutor's constructor)
+    # instead of at startup.
+    monkeypatch.setattr("sys.platform", "win32")
+    assert autotune.recommended_workers(n_override=72) == 61
+    assert autotune.recommended_workers(n_override=61) == 61  # right at the limit: untouched
+    assert autotune.recommended_workers(n_override=8) == 8  # well under: untouched
+
+
+def test_recommended_workers_no_windows_cap_off_windows(monkeypatch):
+    # The 61-worker ceiling is a Windows-specific WaitForMultipleObjects
+    # handle limit (see _max_windows_workers's docstring) -- must not
+    # apply on other platforms, where fork-based multiprocessing has no
+    # such constraint.
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr("os.cpu_count", lambda: 128)
+    monkeypatch.setattr(autotune, "available_ram_bytes", lambda: 512 * GB)
+    assert autotune.recommended_workers() == 128
+    assert autotune.recommended_workers(n_override=100) == 100
+
+
 def test_very_low_ram_forces_serial_fallback(monkeypatch):
     # Below this module's _MIN_FREE_RAM_RESERVE_BYTES reserve, workers
     # must clamp to 1 (the CLI/GUI's n_workers<=1 check then routes

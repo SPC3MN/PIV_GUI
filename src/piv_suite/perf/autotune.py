@@ -41,6 +41,7 @@ Three call sites, two different chunk-size questions:
 
 import ctypes
 import os
+import sys
 
 # A chunk's working set (window_a + window_b + rfft2 outputs + the real
 # correlation output, per window, at float64) sized to fit comfortably in
@@ -161,16 +162,49 @@ def recommended_pipeline_chunk_size(window_shape, dtype_itemsize=8, assumed_conc
     return int(max(_MIN_PIPELINE_CHUNK_WINDOWS, min(_MAX_PIPELINE_CHUNK_WINDOWS, windows)))
 
 
+def _max_windows_workers():
+    """Windows' hard ProcessPoolExecutor cap, or None off-Windows. Passing
+    an explicit max_workers above this raises `ValueError: max_workers
+    must be <= N` -- a real WaitForMultipleObjects handle-count limit,
+    confirmed on a real 72-logical-core dual-socket Windows machine
+    (os.cpu_count() there, with abundant RAM, made recommended_workers()
+    auto-detect 72 and crash the first time Tier 3 actually launched).
+    CPython's own ProcessPoolExecutor(max_workers=None) already self-
+    clamps to this silently -- but recommended_workers() always returns
+    an explicit int (from n_override or the auto-detect below), which
+    hits the raising branch instead, so this app must apply the same
+    clamp itself. Reads CPython's own (private, but stable across many
+    versions) constant so this always matches whatever's actually
+    running, falling back to the long-standing value if that name is
+    ever removed."""
+    if sys.platform != "win32":
+        return None
+    try:
+        from concurrent.futures.process import _MAX_WINDOWS_WORKERS
+        return _MAX_WINDOWS_WORKERS
+    except ImportError:
+        return 61
+
+
 def recommended_workers(n_override=None):
     """Worker process count for Tier 3's cross-pair ProcessPoolExecutor.
-    n_override (from config.schema.PerformanceSettings.n_workers) always
-    wins when set -- this function is only the `None` (auto) case."""
+    n_override (from config.schema.PerformanceSettings.n_workers) wins
+    over the auto-detected value -- but NOT over Windows' hard platform
+    ceiling (_max_windows_workers()): a user-typed n_workers=72 on a
+    72-core Windows machine would otherwise crash with the exact same
+    ValueError the auto-detect path used to hit, just later and more
+    confusingly (mid-batch, from inside ProcessPoolExecutor's own
+    constructor) -- silently clamping down is strictly better than that."""
+    win_cap = _max_windows_workers()
+
     if n_override is not None:
-        return max(1, int(n_override))
+        workers = max(1, int(n_override))
+        return workers if win_cap is None else min(workers, win_cap)
 
     cpu_count = os.cpu_count() or 1
     avail = available_ram_bytes()
     usable = max(0, avail - _MIN_FREE_RAM_RESERVE_BYTES)
     ram_workers = max(1, usable // _BYTES_PER_WORKER_ESTIMATE)
 
-    return int(max(1, min(cpu_count, ram_workers)))
+    workers = int(max(1, min(cpu_count, ram_workers)))
+    return workers if win_cap is None else min(workers, win_cap)
