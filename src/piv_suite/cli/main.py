@@ -127,20 +127,30 @@ def process_pairs_planar(pair_source, cfg, output_dir, interactive_preview):
     backend = cfg.project.backend
 
     # Tier 3: process-level parallelism across independent pairs, planar
-    # CPU only, and only for genuine batch runs -- interactive_preview
-    # needs pair 0's actual u/v/x/y back in THIS process to render a
-    # preview, which doesn't fit a fire-and-forget worker pool, and it's
-    # only True for the small (non-batch) single-set case anyway, not the
-    # throughput-sensitive batch scenario Tier 3 targets. n_workers<=1
+    # CPU only. interactive_preview does NOT exclude this any more --
+    # it used to (via `and not interactive_preview` here), which meant a
+    # perfectly ordinary single-.set run (interactive_preview=True
+    # whenever is_batch is False, regardless of how many pairs that one
+    # .set actually contains -- a single .set with 1000 pairs is a normal,
+    # common CLI workflow, not a "small" one) silently ran fully serial no
+    # matter how many cores were available, with no warning. Preview
+    # rendering needs pair 0's actual u/v/x/y back in THIS process, which
+    # doesn't fit the fire-and-forget worker pool below -- so when both
+    # are requested together, parallelism wins and the preview is skipped
+    # (with an explicit printed note) rather than silently downgrading an
+    # entire large batch to single-process for a cosmetic PNG. n_workers<=1
     # always takes the unmodified serial loop below -- see
     # processing.parallel_planar's module docstring for why that's a
     # hard requirement, not just an optimization.
-    if backend == "cpu" and not cfg.correlation.use_tiling and not interactive_preview:
+    if backend == "cpu" and not cfg.correlation.use_tiling:
         n_workers = recommended_workers(cfg.performance.n_workers)
         if cfg.output.verbose:
             auto_note = "auto" if cfg.performance.n_workers is None else "user override"
             print(f"[info] planar CPU batch: {n_workers} worker process(es) ({auto_note})")
         if n_workers > 1:
+            if interactive_preview:
+                print("[info] first-snapshot preview skipped -- "
+                      f"{n_workers}-worker parallelism is active for this run")
             from ..processing.parallel_planar import run_planar_batch_parallel
 
             def _on_finished(pair_id, result):
@@ -256,20 +266,26 @@ def process_pairs_dual_planar(pair_source, cfg, output_dir, interactive_preview)
     backend = cfg.project.backend
 
     # Tier 3: process-level parallelism across independent pairs
-    # (snapshots) within one recording, dual-planar CPU only, and only
-    # for genuine batch runs -- same interactive_preview exclusion as
-    # process_pairs_planar/process_pairs_stereo. n_workers<=1 always
-    # takes the unmodified serial loop below -- see
+    # (snapshots) within one recording, dual-planar CPU only.
+    # interactive_preview does NOT exclude this any more -- see
+    # process_pairs_planar's docstring for why (a single .set with many
+    # pairs is a normal batch workload, not a "small" one just because
+    # is_batch is False); when both are requested together, parallelism
+    # wins and the preview is skipped (with an explicit printed note).
+    # n_workers<=1 always takes the unmodified serial loop below -- see
     # processing.parallel_dual_planar's module docstring for why that's a
     # hard requirement, not just an optimization. This branch was missing
     # entirely until reported directly by the user ("doesn't work for
     # parallel computing when the planar 2 camera setup is used").
-    if backend == "cpu" and not cfg.correlation.use_tiling and not interactive_preview:
+    if backend == "cpu" and not cfg.correlation.use_tiling:
         n_workers = recommended_workers(cfg.performance.n_workers)
         if cfg.output.verbose:
             auto_note = "auto" if cfg.performance.n_workers is None else "user override"
             print(f"[info] dual-planar CPU batch: {n_workers} worker process(es) ({auto_note})")
         if n_workers > 1:
+            if interactive_preview:
+                print("[info] first-snapshot preview skipped -- "
+                      f"{n_workers}-worker parallelism is active for this run")
             from ..processing.parallel_dual_planar import run_dual_planar_batch_parallel
 
             def _on_finished(pair_id, result):
@@ -417,20 +433,26 @@ def process_pairs_stereo(pair_source, cfg, angles, output_dir, interactive_previ
     backend = cfg.project.backend
 
     # Tier 3: process-level parallelism across independent pairs
-    # (snapshots) within one recording, stereo CPU only, and only for
-    # genuine batch runs -- same interactive_preview exclusion as
-    # process_pairs_planar (pair 0's actual x/y/U/V/W are needed back in
-    # THIS process to render a preview, which doesn't fit a fire-and-
-    # forget worker pool). n_workers<=1 always takes the unmodified
-    # serial loop below -- see processing.parallel_stereo's module
-    # docstring for why that's a hard requirement, not just an
-    # optimization.
-    if backend == "cpu" and not cfg.correlation.use_tiling and not interactive_preview:
+    # (snapshots) within one recording, stereo CPU only. interactive_
+    # preview does NOT exclude this any more -- see process_pairs_
+    # planar's docstring for why (a single .set with many pairs is a
+    # normal batch workload, not a "small" one just because is_batch is
+    # False); when both are requested together, parallelism wins and the
+    # preview (pair 0's actual x/y/U/V/W, needed back in THIS process to
+    # render it, which doesn't fit the fire-and-forget worker pool below)
+    # is skipped, with an explicit printed note. n_workers<=1 always
+    # takes the unmodified serial loop below -- see
+    # processing.parallel_stereo's module docstring for why that's a
+    # hard requirement, not just an optimization.
+    if backend == "cpu" and not cfg.correlation.use_tiling:
         n_workers = recommended_workers(cfg.performance.n_workers)
         if cfg.output.verbose:
             auto_note = "auto" if cfg.performance.n_workers is None else "user override"
             print(f"[info] stereo CPU batch: {n_workers} worker process(es) ({auto_note})")
         if n_workers > 1:
+            if interactive_preview:
+                print("[info] first-snapshot preview skipped -- "
+                      f"{n_workers}-worker parallelism is active for this run")
             from ..processing.parallel_stereo import run_stereo_batch_parallel
 
             def _on_finished(pair_id, result):
