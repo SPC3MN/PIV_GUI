@@ -12,10 +12,17 @@ development (see git history / commit message for this file) and is not
 reproduced here, since it requires the reporting user's own real .set
 data outside this repo. What IS reproduced here is every case that
 validation actually caught a bug in: the "distance" method's int-kernel
-truncation quirk, and the replace_nans convergence-check aliasing bug
-that made naive vectorization diverge from real data at max_iter=4 (the
-app's own default) -- both covered below with cases specifically
-engineered to exercise them, not just generic random data.
+truncation quirk, and (as of openpiv 0.25.5) replace_nans's genuine
+per-iteration tolerance check -- both covered below with cases
+specifically engineered to exercise them, not just generic random data.
+
+test_openpiv_version_matches_verified_version below is a version
+tripwire: this whole file's "faithful" guarantee already broke silently
+once (a routine openpiv 0.25.4->0.25.5 upgrade rewrote replace_nans and
+fixed a convergence-check aliasing bug this project's fast_replace_nans
+used to deliberately replicate -- see _openpiv_speedups.py's git history
+and fast_replace_nans's docstring), surfacing only as 6 cryptic numerical
+mismatches here with no obvious cause. Don't let that repeat silently.
 """
 
 import warnings
@@ -56,6 +63,38 @@ def _assert_close(fast, orig, atol=1e-9, rtol=1e-9):
     both_real = ~np.isnan(fast)
     if both_real.any():
         assert np.allclose(fast[both_real], orig[both_real], atol=atol, rtol=rtol)
+
+
+# ============================================================
+# version tripwire
+# ============================================================
+
+def test_openpiv_version_matches_verified_version():
+    """Every fast_* function in _openpiv_speedups.py is a "faithful"
+    reimplementation of openpiv's OWN current internals, not of the PIV
+    algorithm in the abstract -- pyproject.toml pins openpiv to this
+    exact version range for the same reason. This already broke silently
+    once: a routine 0.25.4 -> 0.25.5 upgrade rewrote openpiv.lib.
+    replace_nans and fixed a convergence-check aliasing bug this
+    project's fast_replace_nans used to deliberately replicate, and the
+    only symptom was 6 cryptic numerical-mismatch test failures with no
+    obvious cause (see fast_replace_nans's docstring for the full story).
+    Fail loudly and specifically here instead, so the NEXT version bump
+    gets a clear pointer to what to re-verify rather than a puzzle."""
+    import openpiv
+
+    assert openpiv.__version__ == "0.25.5", (
+        f"openpiv version drifted to {openpiv.__version__!r}. This project's "
+        "fast_* speedups in _openpiv_speedups.py are faithful reimplementations "
+        "verified bit-exact against openpiv 0.25.5's actual internals (see that "
+        "module's top docstring) -- a version bump can silently change the "
+        "functions being patched (this happened once already, see "
+        "fast_replace_nans's docstring). Re-run this entire test file against "
+        "the new version, update whichever fast_* function(s) no longer match "
+        "(diff openpiv's new source against the old, don't just loosen "
+        "tolerances), and only then update this assertion and pyproject.toml's "
+        "openpiv pin together."
+    )
 
 
 # ============================================================
@@ -134,12 +173,10 @@ def test_replace_nans_matches_original_scattered(method, kernel_size, max_iter):
 
 def test_replace_nans_needs_multiple_iterations_to_fully_fill():
     # A dense NaN cluster that CANNOT be fully filled in one iteration
-    # with kernel_size=1 -- this is what exercises the replace_nans
-    # convergence-check aliasing bug (see fast_replace_nans's docstring):
-    # a naive vectorization that tries to replicate `tol` literally
-    # diverges from the real openpiv output specifically once more than
-    # ~2 iterations actually run, which only happens when filling takes
-    # multiple hops like this.
+    # with kernel_size=1 -- exercises genuine multi-hop Jacobi diffusion
+    # (each iteration's fill depends on the previous iteration's partial
+    # fill), which is where a naive vectorization is most likely to
+    # diverge from the real per-iteration openpiv arithmetic.
     rng = np.random.RandomState(7)
     a = rng.rand(15, 15)
     a[5:11, 5:11] = np.nan  # a 6x6 block -- too big for kernel_size=1 to fill in one pass
@@ -155,43 +192,37 @@ def test_replace_nans_needs_multiple_iterations_to_fully_fill():
     assert not np.isnan(orig[7, 7])  # but got filled by iteration 4
 
 
-def test_replace_nans_tol_value_does_not_matter_once_multiple_iterations_are_needed():
-    # Documents (and locks in) the openpiv bug this module's fast version
-    # deliberately replicates rather than "fixes": once a NaN region needs
-    # 2+ iterations to fully fill (this test's 6x6 block -- too big for
-    # kernel_size=1 to resolve in one pass), openpiv.lib.replace_nans's
-    # real stopping rule from iteration 1 onward is "all originally-NaN
-    # cells filled" -- NOT a genuine tolerance comparison -- so any two
-    # positive tol values behave identically. This is DELIBERATELY NOT
-    # true in general: for a NaN pattern shallow enough to fully fill in
-    # a SINGLE iteration (see _scattered_nan_field's 25%-random case,
-    # tested elsewhere), iteration 0's check runs before the aliasing
-    # that causes this bug kicks in, so the tol VALUE genuinely matters
-    # there -- fast_replace_nans handles that iteration separately for
-    # exactly this reason (see its docstring/source).
+def test_replace_nans_tol_genuinely_gates_iteration_even_after_full_fill():
+    # openpiv 0.25.5 FIXED a real convergence-check aliasing bug present
+    # in older openpiv (confirmed for 0.25.4, see fast_replace_nans's
+    # docstring and this module's git history) that made `tol` inert
+    # from iteration 1 onward. This test locks in the CURRENT, real
+    # behavior: give the same 6x6-block pattern (fully fills by iteration
+    # 4) more max_iter than it needs (8) so there's room for the tol
+    # check to matter on the "spare" iterations after full-fill -- an
+    # impossible tol forces every extra iteration to keep refining via
+    # further diffusion, while the real default tol converges and stops
+    # early, giving genuinely different output.
     a = np.random.RandomState(7).rand(15, 15)
     a[5:11, 5:11] = np.nan  # same pattern as test_replace_nans_needs_multiple_iterations_to_fully_fill
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        out_small_tol = orig_replace_nans(a.copy(), max_iter=4, tol=1e-3, kernel_size=1, method="localmean")
-        out_huge_tol = orig_replace_nans(a.copy(), max_iter=4, tol=1e10, kernel_size=1, method="localmean")
-        out_impossible_tol = orig_replace_nans(a.copy(), max_iter=4, tol=-1.0, kernel_size=1, method="localmean")
-    assert np.array_equal(out_small_tol, out_huge_tol, equal_nan=True)
-    # an impossible tol forces every requested iteration to actually run,
-    # which (for a field needing multi-hop diffusion) gives a genuinely
-    # different result -- confirming tol=1e-3 was NOT running all 4
-    # iterations "for real"
-    assert not np.array_equal(out_small_tol, out_impossible_tol, equal_nan=True)
+        out_default_tol = orig_replace_nans(a.copy(), max_iter=8, tol=1e-3, kernel_size=1, method="localmean")
+        out_impossible_tol = orig_replace_nans(a.copy(), max_iter=8, tol=-1.0, kernel_size=1, method="localmean")
+    assert not np.array_equal(out_default_tol, out_impossible_tol, equal_nan=True)
+
+    fast_default_tol = fast_replace_nans(a.copy(), max_iter=8, tol=1e-3, kernel_size=1, method="localmean")
+    fast_impossible_tol = fast_replace_nans(a.copy(), max_iter=8, tol=-1.0, kernel_size=1, method="localmean")
+    _assert_close(fast_default_tol, out_default_tol)
+    _assert_close(fast_impossible_tol, out_impossible_tol)
 
 
 def test_replace_nans_shallow_pattern_iteration_zero_tol_check_is_genuine():
-    # The complementary case to the test above: a NaN pattern shallow
-    # enough that a SINGLE kernel_size=1 iteration fills every cell, so
-    # openpiv's aliasing bug never gets a chance to kick in (it only
-    # first applies to iteration 1's check onward) -- iteration 0's tol
-    # comparison is against the real (not-yet-aliased) all-zeros
-    # replaced_old, so the tol VALUE itself genuinely changes the
-    # outcome here, and fast_replace_nans must still match on this path.
+    # A NaN pattern shallow enough that a SINGLE kernel_size=1 iteration
+    # fills every cell: the very first tol check (replaced_old starts at
+    # all-zeros) is already a genuine, non-degenerate comparison, so the
+    # tol VALUE itself changes the outcome even at max_iter=4, and
+    # fast_replace_nans must still match on this path.
     rng = np.random.RandomState(3)
     a = _scattered_nan_field(rng)
     with warnings.catch_warnings():
@@ -199,9 +230,7 @@ def test_replace_nans_shallow_pattern_iteration_zero_tol_check_is_genuine():
         orig_default = orig_replace_nans(a.copy(), max_iter=4, tol=1e-3, kernel_size=1, method="localmean")
         orig_huge = orig_replace_nans(a.copy(), max_iter=4, tol=1e10, kernel_size=1, method="localmean")
     # confirms this test data actually exercises the claimed scenario:
-    # the huge tol changes the outcome relative to the real default here
-    # (unlike the deep-cluster case above), proving iteration 0 alone
-    # doesn't already decide it regardless of tol.
+    # the huge tol changes the outcome relative to the real default here.
     assert not np.array_equal(orig_default, orig_huge, equal_nan=True)
 
     fast_default = fast_replace_nans(a.copy(), max_iter=4, tol=1e-3, kernel_size=1, method="localmean")
@@ -213,8 +242,11 @@ def test_replace_nans_shallow_pattern_iteration_zero_tol_check_is_genuine():
 def test_replace_nans_distance_method_kernel_truncation_bug():
     # openpiv.lib.get_dist's distance-based weights are assigned into an
     # int-dtype kernel array, silently truncating every weight below 1.0
-    # to zero -- confirmed a real (if obscure) bug in openpiv 0.25.4, not
-    # a misunderstanding on this project's part. fast_replace_nans must
+    # to zero -- confirmed a real (if obscure) bug, present in both
+    # openpiv 0.25.4 and the currently-verified 0.25.5 (unlike the
+    # replace_nans convergence-check bug elsewhere in this file, this one
+    # was NOT fixed upstream), not a misunderstanding on this project's
+    # part. fast_replace_nans must
     # reproduce the truncation, not the "intended" float weighting, or
     # results diverge (this test would have caught the very first,
     # incorrect version of fast_replace_nans written during development).

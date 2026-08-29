@@ -140,33 +140,43 @@ def fast_sliding_window_array(image, window_size=(64, 64), overlap=(32, 32)):
 
 
 def fast_replace_nans(array, max_iter, tol, kernel_size=2, method="disk"):
-    """Faithful vectorized re-implementation of openpiv.lib.replace_nans.
+    """Faithful vectorized re-implementation of openpiv.lib.replace_nans,
+    verified against openpiv 0.25.5 exactly (see this module's top
+    docstring's version-pin note -- openpiv rewrote this function's
+    internals between 0.25.4 and 0.25.5, and this re-implementation was
+    updated to match; re-verify the full test_openpiv_speedups.py suite
+    before trusting this docstring against any other version).
 
-    The original iterates every NaN cell in a Python for-loop, building a
-    fresh np.meshgrid + boundary mask on every single cell on every
-    iteration -- the dominant CPU cost in a validated PIV pass. The
-    replacement performs the exact same Jacobi-style iterative diffusion
-    (each iteration's replacement values are computed from the PREVIOUS
-    iteration's filled array, matching the original's `win = filled[...]`
-    read followed by a single bulk `filled[nan_indices] = replaced_new`
-    write only after the full sweep) via one whole-array convolution per
-    iteration instead of one Python-level window extraction per NaN cell.
+    The original (as of 0.25.5) is already substantially vectorized
+    (sliding_window_view + one np.pad/convolution-shaped reduction per
+    iteration, replacing an older per-NaN-cell Python loop from earlier
+    openpiv releases) but still re-pads and re-extracts a fresh
+    (ny, nx, k, k) window array from scratch every iteration via
+    sliding_window_view. This replacement performs the exact same
+    Jacobi-style iterative diffusion (each iteration's replacement values
+    are computed from the PREVIOUS iteration's filled array, matching the
+    original's per-iteration `full_new` computation followed by a single
+    bulk `filled[nan_indices] = replaced_new` write) via scipy.ndimage.
+    convolve instead of a materialized sliding-window array -- the same
+    weighted-sum-over-valid-neighbours arithmetic, cheaper per iteration.
 
-    THE STOPPING RULE IS NOT WHAT THE DOCSTRING/PARAMETER NAME SAYS.
-    openpiv.lib.replace_nans has a real bug: `replaced_old = replaced_new`
-    (no `.copy()`) aliases the two names to the SAME array object from
-    iteration 2 onward, so `replaced_new - replaced_old` in every later
-    convergence check is an array minus ITSELF -- exactly 0.0 wherever
-    both are real numbers, NaN wherever a cell still has no valid
-    neighbour (NaN - NaN = NaN, and `NaN < tol` is always False). So
-    `tol` does NOT control anything for any positive value: confirmed
-    empirically that tol=1e-3 and tol=1e10 produce byte-identical output
-    on real data, while tol=-1 (never satisfiable) produces a genuinely
-    different result. The ACTUAL rule, from iteration index 1 onward, is
-    "stop as soon as every originally-NaN cell has a non-NaN value this
-    iteration" -- a discrete fill/no-fill condition, not a numerical
-    threshold, which is exactly what's replicated below (deliberately,
-    not "fixed" -- changing this would change every PIV run's output).
+    THE STOPPING RULE: openpiv 0.25.5's real convergence check is a
+    genuine `np.mean((replaced_new - replaced_old) ** 2) < tol`, where
+    `replaced_old` is a plain Python name rebound to the PREVIOUS
+    iteration's `replaced_new` array object (no aliasing bug -- each
+    iteration's `replaced_new` is a freshly divided/indexed array, never
+    the same object read back). Because `replaced_new`/`replaced_old`
+    still contain NaN at any cell with zero valid neighbours so far, this
+    check naturally stays NaN (hence never `< tol`) until every
+    originally-NaN cell has been filled at least once -- that's ordinary
+    NaN propagation through the formula, not a special case needing its
+    own branch, and it only starts behaving as a genuine numerical
+    tolerance check once every cell has a real (non-NaN) value. Older
+    openpiv releases (confirmed for 0.25.4, no longer installable here to
+    re-check) had a real aliasing bug at this exact line that made `tol`
+    inert from iteration 1 onward regardless of its value -- this
+    function no longer replicates that, since it would now be UNfaithful
+    to what's actually installed.
 
     Faithfulness details that matter for exact equivalence, preserved
     here:
@@ -224,9 +234,9 @@ def fast_replace_nans(array, max_iter, tol, kernel_size=2, method="disk"):
         raise ValueError("Known methods are: `localmean`, `disk` or `distance`.")
     kernel = kernel_int.astype(np.float64)
 
-    replaced_old_all_real = np.zeros(n_nans)  # only meaningful for iteration 0's genuine (non-aliased) check
+    replaced_old = np.zeros(n_nans)
 
-    for it in range(max_iter):
+    for _ in range(max_iter):
         valid = ~np.isnan(filled)
         data_for_conv = np.where(valid, filled, 0.0)
         numerator = _ndimage_convolve(data_for_conv, kernel, mode="constant", cval=0.0)
@@ -237,16 +247,11 @@ def fast_replace_nans(array, max_iter, tol, kernel_size=2, method="disk"):
         replaced_new = new_vals[is_original_nan]
         filled = np.where(is_original_nan, new_vals, filled)
 
-        if it == 0:
-            # the one iteration where replaced_old is NOT yet aliased in
-            # the original -- a genuine tol comparison against zeros.
-            if np.mean((replaced_new - replaced_old_all_real) ** 2) < tol:
-                break
-        else:
-            # every later iteration: replaced_old IS replaced_new in the
-            # original (aliased), so the check is exactly "no NaN left".
-            if not np.isnan(replaced_new).any():
-                break
+        # NaN-propagates to False (never breaks) until every originally-
+        # NaN cell has a real value -- see docstring; not a special case.
+        if np.mean((replaced_new - replaced_old) ** 2) < tol:
+            break
+        replaced_old = replaced_new
 
     return filled.astype(array.dtype, copy=False)
 

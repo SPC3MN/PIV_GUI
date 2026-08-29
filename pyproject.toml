@@ -12,7 +12,14 @@ dependencies = [
     "scipy",
     "matplotlib",
     "lvpyio",
-    "openpiv",
+    # engines/_openpiv_speedups.py monkeypatches several openpiv internals
+    # with "faithful" reimplementations verified bit-exact against this
+    # exact version's actual source (a routine 0.25.4->0.25.5 upgrade once
+    # silently broke that guarantee -- see that module's and
+    # tests/unit/test_openpiv_speedups.py's docstrings). Bump this pin and
+    # the version tripwire test together, only after re-verifying the
+    # whole suite against the new version.
+    "openpiv>=0.25.5,<0.26",
 ]
 
 [project.optional-dependencies]
