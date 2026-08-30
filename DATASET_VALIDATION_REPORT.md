@@ -305,6 +305,64 @@ than an interpolated one by construction; this is comparing "real
 measurements" against "smoothed final result," not two final results
 against each other.
 
+### Root cause found and fixed: inter-pass smoothing was never enabled (2026-08-29)
+
+The residual gap left open by the deep dive above turned out to be
+explained by a real, previously-undiscovered default-configuration gap,
+not by anything wrong in the correlation/subpixel/per-pass-validation
+machinery itself (which the deep dive above had already ruled out as the
+cause). This app has always had a working inter-pass smoothing feature
+(`ValidationSettings.smoothn`/`smoothn_p`, wired into `cpu_engine.py` via
+`openpiv.smoothn.smoothn` -- Pierre Garcia's robust smoothing spline,
+applied to the U/V field between passes, before it is used to deform the
+next, finer pass) -- but it defaulted to `smoothn=False` (effectively off)
+in every real `.pivproj` used this session. DaVis's own real `vc7` output
+carries a `MultiPassSmoothingMode=5` attribute (decoded from real
+`JobHistory.xml` earlier this session, but never previously acted on),
+meaning DaVis's real production pipeline always applies real inter-pass
+smoothing -- an ingredient this app's pipeline never replicated.
+
+A strength sweep (`smoothn_p` = 0.05 [old default], 1.0, 5.0, 15.0, 50.0),
+each tested on the same 3 real planar pairs (0000-0002) against the same
+DaVis PostProc reference used throughout this investigation:
+
+| `smoothn_p` | corr(U) range | corr(V) range | mean\|diff\| range (mm/s) | pooled relative diff | Verdict |
+|---|---|---|---|---|---|
+| 0.05 (old default) | 0.963-0.976 | 0.950-0.963 | 12.95-16.03 | ~22.5% | baseline |
+| 1.0 | improved | improved | improved | improving | real, scaling improvement |
+| 5.0 | 0.977-0.987 | 0.971-0.980 | 9.12-11.66 | ~16.2% | substantial improvement |
+| **15.0** | **0.979-0.988** | **0.975-0.981** | **8.83-11.24** | **~16.2%** | **best found -- adopted as new default** |
+| 50.0 | 0.980-0.988 | 0.974-0.981 | 8.85-11.32 | ~16.4% | plateau / earliest sign of over-smoothing reversal |
+
+15.0 sits at (or just past) the peak of the sweep: consistently at or
+better than every other strength tested, with 50.0 showing the trend
+flattening out and beginning to reverse (the expected signature of
+over-smoothing starting to wash out genuine flow structure). This was
+then confirmed at full 20-pair scale (matching this investigation's
+standing methodology) before being adopted as the shipped default:
+
+| | density | corr(U) | corr(V) | relative diff |
+|---|---|---|---|---|
+| Old default (`smoothn=False`) | 95.41% | 0.9570 | 0.9492 | 25.15% |
+| **New default (`smoothn=True, smoothn_p=15.0`)** | **98.66%** | **0.9779** | **0.9738** | **18.26%** |
+
+A ~27% relative reduction in the DaVis disagreement, density now matching
+DaVis's own ~98% almost exactly, and every metric (density, corr(U),
+corr(V), mean/median/p95 diff) moving together in DaVis's favor -- the
+first and only hypothesis across this whole investigation (deep-dive
+sweep above, plus the earlier root-cause investigation) with this
+signature. **Fixed**: `ValidationSettings.smoothn` now defaults to `True`
+and `smoothn_p` to `15.0` (`src/piv_suite/config/schema.py`), applied on
+both backends since it is a shared schema field (only verified against
+real data on the CPU backend this session, the only backend this
+investigation's real datasets were run through).
+
+Scale/calibration mismatch (checked via linear regression of pooled real
+app-vs-DaVis U/V/magnitude: slope=1.0, intercepts=0) and
+`normalized_correlation` (tested, found slightly worse) were also
+checked and ruled out along the way as part of narrowing down to this
+finding.
+
 ## Bugs found and fixed this session
 
 1. **`resample_onto` crashed (`ValueError: No points given`) on a
@@ -378,27 +436,32 @@ against each other.
 ## Recommendations
 
 - ~~Root-cause the ~19-25% mean\|diff\|-relative-to-magnitude gap on stereo
-  and planar~~ — **investigated in depth, twice** (see "Root-cause
-  investigation" and "Deep dive into the correlation pipeline itself"
-  above): raw-vs-PostProc pipeline-stage mismatch ruled out; spatial-
-  gradient/registration sensitivity confirmed as a real, partial
-  contributor (~1.5-1.85x more error in high-gradient regions);
-  per_pass_validation off, correlation_method=linear, subpixel parabolic/
-  centroid, min_max_filter preprocessing, and a custom DaVis-matching
-  peak-ratio+correlation-floor per-pass scheme were ALL tested on real
-  data and made things worse or had no effect — the app's original
-  defaults are already the best-performing configuration found. A
-  substantial baseline gap (~14-25%) remains fully unexplained even in
-  the calmest flow regions. Two real, unrelated bugs were found and fixed
-  along the way (`use_vectorized` never being forced False; `_fill_
-  residual_nan` unable to recover an all-rejected pass) — both real
-  improvements, neither closes the gap. Next step, if pursued further:
-  (a) properly recalibrate the peak-ratio exclusion width/threshold
-  against this app's own real correlation-peak-width distribution rather
-  than reusing DaVis's numbers unmodified (see the reverted attempt's
-  full diagnosis above), or (b) a synthetic flow field with a known
-  ground truth (removes the "which engine is actually right" ambiguity
-  real flow data can't resolve).
+  and planar~~ — **investigated in depth, three times, and substantially
+  fixed on planar** (see "Root-cause investigation", "Deep dive into the
+  correlation pipeline itself", and "Root cause found and fixed:
+  inter-pass smoothing was never enabled" above). The first two rounds
+  ruled out raw-vs-PostProc pipeline-stage mismatch, confirmed spatial-
+  gradient/registration sensitivity as a real but partial contributor
+  (~1.5-1.85x more error in high-gradient regions), and tested/refuted
+  every correlation-method/subpixel-fit/per-pass-validation-scheme
+  hypothesis (per_pass_validation off, correlation_method=linear,
+  subpixel parabolic/centroid, min_max_filter preprocessing, a custom
+  DaVis-matching peak-ratio+correlation-floor scheme, normalized_correlation)
+  plus scale/calibration mismatch (ruled out via regression, slope=1.0).
+  The actual root cause turned out to be a default-configuration gap, not
+  a correlation-pipeline bug: this app's existing inter-pass smoothing
+  feature (`smoothn`/`smoothn_p`) defaulted to effectively off, unlike
+  DaVis's real pipeline (`MultiPassSmoothingMode=5`). **Fixed**: new
+  defaults `smoothn=True, smoothn_p=15.0`, confirmed at 20-pair scale to
+  cut the planar relative-diff from 25.15% to 18.26% and raise density
+  from 95.41% to 98.66% (matching DaVis's own). Two further real,
+  unrelated bugs were found and fixed along the way (`use_vectorized`
+  never being forced False; `_fill_residual_nan` unable to recover an
+  all-rejected pass). The remaining ~18% planar gap (stereo not
+  re-verified with the new smoothing default) is smaller but not zero;
+  a synthetic flow field with known ground truth remains the cleanest way
+  to fully resolve whatever's left (removes the "which engine is actually
+  right" ambiguity real flow data can't resolve).
 - ~~Fix `recommended_workers()` to hard-cap at 61 on Windows~~ — **done**
   (see [autotune.py](src/piv_suite/perf/autotune.py), commit `3f70f53`);
   defaulting toward physical core count specifically for this NUMA

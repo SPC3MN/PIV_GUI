@@ -105,8 +105,33 @@ class ValidationSettings:
     filter_method: str = "localmean"
     max_filter_iteration: int = 4
     filter_kernel_size: int = 2
-    smoothn: bool = False
-    smoothn_p: float = 0.05
+
+    # Inter-pass smoothing of the displacement field (openpiv.smoothn's own
+    # Garcia robust-smoothing routine, applied between passes to the field
+    # that gets deformed into the next, finer pass) -- an existing feature
+    # that sat unused at a negligible default strength until a real-dataset
+    # investigation traced it to be the actual explanation for most of this
+    # app's correlation/density gap vs LaVision DaVis on real planar data.
+    # DaVis's own real vc7 output carries a MultiPassSmoothingMode=5
+    # attribute (decoded from real JobHistory.xml, never previously acted
+    # on) -- i.e. DaVis's real production pipeline always applies real
+    # inter-pass smoothing, which this app's old smoothn=False default
+    # never replicated.
+    #
+    # A strength sweep (smoothn_p = 0.05 [old default], 1.0, 5.0, 15.0,
+    # 50.0) on real planar data found a clear, consistently-scaling
+    # improvement up to ~15.0, then a plateau/slight reversal by 50.0
+    # (early over-smoothing) -- confirmed at full 20-pair scale against the
+    # real DaVis PostProc reference, on this data:
+    #   old default (smoothn=False):        density=95.41% corr(U)=0.957 corr(V)=0.949 relative-diff=25.15%
+    #   smoothn=True, smoothn_p=15.0 (new): density=98.66% corr(U)=0.978 corr(V)=0.974 relative-diff=18.26%
+    # This is a ~27% relative reduction in the DaVis disagreement, and
+    # density now matches DaVis's own ~98% almost exactly, at negligible
+    # extra cost (smoothn is O(n log n) per component per pass). See
+    # DATASET_VALIDATION_REPORT.md's 2026-08-29 section for the full sweep
+    # table and methodology.
+    smoothn: bool = True
+    smoothn_p: float = 15.0
 
     # CPU-only; no effect on GPU. Restores openpiv's own real per-pass
     # validation (Westerweel & Scarano's "universal outlier detection"

@@ -293,13 +293,17 @@ class SettingsPanel(QWidget):
         self.smoothn_check.setToolTip(
             "Smooth the field between passes (before it's used to deform "
             "the next, finer pass's windows) using the smoothn algorithm. "
-            "Applies on both backends.")
+            "Applies on both backends. ON by default: confirmed via real "
+            "DaVis-dataset comparison to raise U/V correlation from "
+            "~0.95 to ~0.97 and density from ~95% to ~99% (see "
+            "ValidationSettings.smoothn's docstring).")
+        self.smoothn_check.setChecked(True)
         self.smoothn_check.toggled.connect(lambda c: self.smoothn_p_spin.setEnabled(c))
         self.smoothn_p_spin = style_spin(QDoubleSpinBox(), decimals=4)
         self.smoothn_p_spin.setRange(0.0, 100.0)
-        self.smoothn_p_spin.setValue(0.05)
+        self.smoothn_p_spin.setValue(15.0)
         self.smoothn_p_spin.setToolTip("smoothn's own smoothing strength parameter -- higher = smoother.")
-        self.smoothn_p_spin.setEnabled(False)
+        self.smoothn_p_spin.setEnabled(True)
         val_grid.addWidget(self.smoothn_check, 3, 0)
         val_grid.addWidget(self.smoothn_p_spin, 3, 1)
         layout.addWidget(val_box)

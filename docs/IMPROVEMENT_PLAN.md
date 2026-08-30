@@ -59,13 +59,30 @@ work.
   from corr~0.95 to corr~0.36. Reverted to the proven-safe `peak2mean`
   default; the tested infrastructure remains available for a properly
   recalibrated future attempt. `9e475af`
+- **Root-caused and fixed most of the residual DaVis accuracy gap on
+  planar data: inter-pass smoothing was never enabled.** This app's
+  existing `smoothn`/`smoothn_p` feature (openpiv's own Garcia robust
+  smoothing, applied between passes) defaulted to effectively off, unlike
+  DaVis's real pipeline (`MultiPassSmoothingMode=5`, decoded from real
+  `JobHistory.xml` earlier this session but not previously acted on). A
+  strength sweep (0.05/1.0/5.0/15.0/50.0) on real planar data found a
+  clear, consistently-scaling improvement peaking around `smoothn_p=15.0`
+  (50.0 showed the trend plateauing/reversing — early over-smoothing).
+  Confirmed at full 20-pair scale: relative diff 25.15%→18.26%, density
+  95.41%→98.66% (now matching DaVis's own), corr(U) 0.9570→0.9779, corr(V)
+  0.9492→0.9738. New defaults: `smoothn=True, smoothn_p=15.0` (`src/
+  piv_suite/config/schema.py`). See `DATASET_VALIDATION_REPORT.md`'s "Root
+  cause found and fixed: inter-pass smoothing was never enabled" section
+  for the full sweep table.
 
 ## HIGH PRIORITY
 
 - ~~Root-cause the ~19-25% mean\|diff\|-relative-to-magnitude gap~~ —
-  **investigated in depth, twice** (2026-08-29; see `DATASET_VALIDATION_
-  REPORT.md`'s "Root-cause investigation" and "Deep dive into the
-  correlation pipeline itself" sections for full numbers). Findings:
+  **investigated in depth, and substantially fixed on planar** (2026-08-29;
+  see `DATASET_VALIDATION_REPORT.md`'s "Root-cause investigation", "Deep
+  dive into the correlation pipeline itself", and "Root cause found and
+  fixed: inter-pass smoothing was never enabled" sections for full
+  numbers). Findings:
   - Raw-vs-PostProc pipeline-stage mismatch: **ruled out** — re-comparing
     this app's post-fill (final) output instead of raw measurements
     (`--app-field filled`) did not shrink the gap (stereo 19%→20.4%,
@@ -84,16 +101,20 @@ work.
     scheme above): **all made agreement with DaVis worse or unchanged,
     never better** — the app's original defaults are already the best-
     performing configuration found across every real-data test run.
-  - **Remaining open item**: even the calmest (lowest-gradient) regions
-    still show a substantial baseline relative diff (~14-25%), unexplained
-    by anything tested so far. Next step needs either (a) a properly
-    recalibrated peak-ratio per-pass scheme (a wider exclusion zone and/or
-    a threshold derived from this app's own real peak-ratio distribution,
-    not DaVis's number copied unmodified — see the reverted `davis_
-    combined` attempt above for the exact diagnosis), or (b) a synthetic
-    flow field with a known ground truth (real swirl data can't establish
-    which engine is "right") — either is a genuinely new investigation,
-    not a quick follow-up.
+  - **Root cause found and fixed**: this app's inter-pass smoothing
+    feature (`smoothn`/`smoothn_p`) defaulted to effectively off, unlike
+    DaVis's real pipeline (`MultiPassSmoothingMode=5`). New defaults
+    (`smoothn=True, smoothn_p=15.0`, found via a real-data strength sweep)
+    cut the planar relative diff from 25.15% to 18.26% (20-pair confirmed)
+    and raised density from 95.41% to 98.66%, matching DaVis's own. See
+    `DATASET_VALIDATION_REPORT.md`'s "Root cause found and fixed" section.
+  - **Remaining open item**: the fix and its confirmation were planar-only
+    (scoped this way deliberately, to save time); stereo has not been
+    re-verified with the new smoothing default and may see a similar or
+    different improvement. The ~18% residual planar gap is smaller but not
+    zero — a synthetic flow field with a known ground truth remains the
+    cleanest way to fully resolve whatever's left (real swirl data can't
+    establish which engine is "right" for the remainder).
 
 ## MEDIUM PRIORITY
 
