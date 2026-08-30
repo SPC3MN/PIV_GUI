@@ -36,6 +36,18 @@ def _fast_cfg():
     cfg.postprocess.range_filter.enabled = False  # keep post-processing minimal/fast
     cfg.postprocess.global_outlier_std = None
     cfg.postprocess.remove_small_groups_threshold = None
+    # per_pass_validation=False (NOT the class default) is deliberate: this
+    # module's own tests are explicitly about process-count equivalence and
+    # plumbing, NOT PIV numerics (see this file's own docstring) -- but
+    # _make_pair's tiny, plain-random-noise "images" (not realistic PIV
+    # particle images) don't give a per-pass peak-ratio test (davis_
+    # combined, see engines/_openpiv_speedups.py) a genuinely sharp,
+    # well-isolated correlation peak to find at this small a window size,
+    # so it legitimately rejects every window -- openpiv's own windef.
+    # multipass_img_deform then hard-fails on an all-rejected pass. Keeping
+    # per-pass validation off here sidesteps that (real, but orthogonal to
+    # what this file tests) incompatibility entirely.
+    cfg.validation.per_pass_validation = False
     return cfg
 
 

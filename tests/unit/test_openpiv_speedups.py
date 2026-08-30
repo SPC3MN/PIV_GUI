@@ -356,6 +356,163 @@ def test_correlation_to_displacement_unknown_method_raises():
 
 
 # ============================================================
+# _fast_peak2peak_sig2noise / sig2noise_method="peak2peak"/"davis_combined"
+#
+# davis_combined is a genuinely CUSTOM per-pass rejection criterion (not a
+# reproduction of any single openpiv formula) -- see _correlation_to_
+# displacement_flat's own docstring for the full rationale: it was built
+# to match a real gap found comparing this app's output against real
+# LaVision DaVis reference data, which pairs a peak-ratio (peak2peak)
+# threshold WITH an independent minimum-correlation-value floor that
+# plain peak2peak alone doesn't express. peak2peak itself IS a faithful
+# reproduction of openpiv's own formula and is tested for bit-exactness
+# below; davis_combined's own tests check the ADDITIONAL forced-rejection
+# behavior on top of a genuine (and separately verified) peak2peak ratio.
+# ============================================================
+
+def _gaussian_bump_corr_with_second_peak(rng, n_windows, size, second_peak_amp,
+                                           second_peak_offset=(6, 6)):
+    """Correlation maps with a real primary peak plus a controllable
+    SECOND peak far enough away to sit outside the default width=2
+    exclusion zone -- lets peak2peak's ratio be tuned deliberately (a
+    low second_peak_amp -> high ratio/unambiguous; a second_peak_amp near
+    1.0 -> ratio near 1.0/ambiguous), rather than leaving it to chance."""
+    yy, xx = np.mgrid[0:size, 0:size]
+    corr = np.empty((n_windows, size, size), dtype=np.float64)
+    cy1, cx1 = size // 2, size // 2
+    for i in range(n_windows):
+        corr[i] = np.exp(-((yy - cy1) ** 2 + (xx - cx1) ** 2) / (2 * 2.0 ** 2))
+        cy2 = min(size - 3, cy1 + second_peak_offset[0])
+        cx2 = min(size - 3, cx1 + second_peak_offset[1])
+        corr[i] += second_peak_amp * np.exp(-((yy - cy2) ** 2 + (xx - cx2) ** 2) / (2 * 2.0 ** 2))
+    corr += rng.rand(n_windows, size, size) * 0.01
+    return np.clip(corr, 0, 1)
+
+
+@pytest.mark.parametrize("case", [
+    "clean_single_peaks", "ambiguous_double_peak", "border_peaks", "near_zero_no_signal", "realistic_32x32",
+])
+def test_peak2peak_sig2noise_matches_original(case):
+    from openpiv.pyprocess import sig2noise_ratio as orig_sig2noise_ratio
+
+    from piv_suite.engines._openpiv_speedups import _correlation_to_displacement_flat
+
+    rng = np.random.RandomState({"clean_single_peaks": 0, "ambiguous_double_peak": 1,
+                                  "border_peaks": 2, "near_zero_no_signal": 3, "realistic_32x32": 4}[case])
+    if case == "clean_single_peaks":
+        size = 16
+        yy, xx = np.mgrid[0:size, 0:size]
+        corr = np.empty((50, size, size))
+        for i in range(50):
+            cy, cx = rng.uniform(4, 12, 2)
+            corr[i] = np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * 2.0 ** 2))
+        corr += rng.rand(50, size, size) * 0.02
+    elif case == "ambiguous_double_peak":
+        size = 16
+        yy, xx = np.mgrid[0:size, 0:size]
+        corr = np.empty((30, size, size))
+        for i in range(30):
+            cy1, cx1 = rng.uniform(4, 12, 2)
+            cy2, cx2 = rng.uniform(4, 12, 2)
+            amp2 = rng.uniform(0.5, 0.95)
+            corr[i] = np.exp(-((yy - cy1) ** 2 + (xx - cx1) ** 2) / (2 * 2.0 ** 2))
+            corr[i] += amp2 * np.exp(-((yy - cy2) ** 2 + (xx - cx2) ** 2) / (2 * 2.0 ** 2))
+    elif case == "border_peaks":
+        size = 8
+        yy, xx = np.mgrid[0:size, 0:size]
+        corr = np.zeros((10, size, size))
+        corr[0, 0, 3] = 1.0
+        corr[1, 7, 3] = 1.0
+        corr[2, 3, 0] = 1.0
+        corr[3, 3, 7] = 1.0
+        for i in range(4, 10):
+            cy, cx = rng.uniform(2, 5, 2)
+            corr[i] = np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * 1.5 ** 2))
+    elif case == "near_zero_no_signal":
+        corr = rng.rand(10, 12, 12) * 1e-4
+    else:  # realistic_32x32
+        size = 32
+        yy, xx = np.mgrid[0:size, 0:size]
+        corr = np.empty((100, size, size))
+        for i in range(100):
+            cy, cx = rng.uniform(10, 22, 2)
+            corr[i] = np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * 3.0 ** 2))
+        corr += rng.rand(100, size, size) * 0.05
+        corr = np.clip(corr, 0, 1)
+
+    orig = orig_sig2noise_ratio(corr.copy(), sig2noise_method="peak2peak", width=2)
+    _u, _v, fast = _correlation_to_displacement_flat(corr.copy(), sig2noise_method="peak2peak")
+    _assert_close(fast, orig)
+
+
+def test_davis_combined_matches_peak2peak_when_correlation_is_above_the_floor():
+    from piv_suite.engines._openpiv_speedups import _correlation_to_displacement_flat, set_davis_correlation_threshold
+
+    rng = np.random.RandomState(5)
+    corr = _gaussian_bump_corr_with_second_peak(rng, n_windows=20, size=32, second_peak_amp=0.3)
+    set_davis_correlation_threshold(0.0)  # floor that can never trigger -- pure peak2peak passthrough
+    _u, _v, peak2peak = _correlation_to_displacement_flat(corr.copy(), sig2noise_method="peak2peak")
+    _u, _v, davis = _correlation_to_displacement_flat(corr.copy(), sig2noise_method="davis_combined")
+    _assert_close(davis, peak2peak)
+
+
+def test_davis_combined_forces_rejection_below_the_correlation_floor_even_with_a_good_ratio():
+    # The whole point of davis_combined (see its docstring): a window can
+    # have a perfectly fine peak1/peak2 RATIO while both peaks are
+    # individually weak -- plain peak2peak alone would pass it, but DaVis's
+    # own scheme (and this one) rejects it anyway via the independent
+    # minimum-correlation-value floor.
+    from piv_suite.engines._openpiv_speedups import _correlation_to_displacement_flat, set_davis_correlation_threshold
+
+    rng = np.random.RandomState(6)
+    # second_peak_amp=0.1 -> a strong ratio (~10:1), but scale the WHOLE
+    # correlation plane down so the raw peak value itself is weak.
+    corr = _gaussian_bump_corr_with_second_peak(rng, n_windows=15, size=32, second_peak_amp=0.1) * 0.3
+
+    set_davis_correlation_threshold(0.0)
+    _u, _v, peak2peak = _correlation_to_displacement_flat(corr.copy(), sig2noise_method="peak2peak")
+    assert (peak2peak > 1.5).all()  # confirms the ratio alone would pass a DaVis-style 1.5 threshold
+
+    set_davis_correlation_threshold(0.5)  # matches DaVis's own real correlationThreshold default
+    _u, _v, davis = _correlation_to_displacement_flat(corr.copy(), sig2noise_method="davis_combined")
+    assert (davis == 0.0).all()  # forced to 0 (guaranteed sig2noise_val() rejection) by the floor
+
+    set_davis_correlation_threshold(0.5)  # restore the module default other tests may assume
+
+
+def test_davis_combined_below_threshold_reaches_typical_validation_as_a_rejection():
+    # End-to-end (not just the raw sig2noise number): confirms
+    # openpiv.validation.sig2noise_val actually treats a floor-forced 0.0
+    # as a rejection, the same way it would treat a genuinely low ratio.
+    from openpiv.validation import sig2noise_val
+
+    flagged = sig2noise_val(np.array([0.0, 2.0, 1.2]), threshold=1.5)
+    assert list(flagged) == [True, False, True]
+
+
+def test_correlation_to_displacement_flat_rejects_unknown_sig2noise_method():
+    from piv_suite.engines._openpiv_speedups import _correlation_to_displacement_flat
+
+    corr = np.zeros((2, 8, 8))
+    with pytest.raises(ValueError, match="sig2noise_method"):
+        _correlation_to_displacement_flat(corr, sig2noise_method="bogus")
+
+
+def test_extended_search_area_piv_fast_paths_peak2peak_and_davis_combined():
+    # Confirms the fallback condition was genuinely widened -- these two
+    # methods must NOT trigger the slow fallback the way an unsupported
+    # method still does (see the unchanged-fallback test elsewhere in this
+    # file for that side of the contract).
+    rng = np.random.RandomState(7)
+    image_a = (rng.rand(64, 64) * 255).astype(np.float32)
+    image_b = (rng.rand(64, 64) * 255).astype(np.float32)
+    for method in ("peak2peak", "davis_combined"):
+        u, v, s2n = fast_extended_search_area_piv(
+            image_a.copy(), image_b.copy(), window_size=16, overlap=8, sig2noise_method=method)
+        assert not np.all(np.isnan(s2n))  # a real value was surfaced, not the None-request NaN placeholder
+
+
+# ============================================================
 # fast_fft_correlate_images
 #
 # Unlike the faithful speedups above, this one is NOT bit-exact vs. the

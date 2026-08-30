@@ -15,12 +15,20 @@ unconditionally every pass -- openpiv gives no flag to disable that --
 and _openpiv_speedups.apply_speedups()/use_real_validation() (see
 __init__) swaps typical_validation for openpiv's OWN real
 implementation when per_pass_validation is True, so a vector failing
-either the per-pass local-median (UOD) test OR a per-pass correlation
-peak2mean signal-to-noise threshold gets locally-mean-replaced by
-replace_outliers right there, before deformation -- matching DaVis's own
-multi-pass postprocessing, which pairs a median removal factor with a
-peak-ratio ("scalarfield") threshold (confirmed via a real DaVis
-JobHistory.xml). When per_pass_validation is False,
+ANY of three per-pass criteria gets locally-mean-replaced by
+replace_outliers right there, before deformation: the local-median (UOD)
+test, a peak-ratio (peak2peak) threshold, and a minimum-raw-correlation-
+value floor -- matching DaVis's own real multi-pass postprocessing scheme
+exactly (confirmed via a real DaVis JobHistory.xml: a median removal
+factor paired with an independent peakRatioThreshold AND
+correlationThreshold). The latter two are computed together as
+sig2noise_method="davis_combined" -- see _openpiv_speedups.py's own
+docstring for exactly how a single existing sig2noise threshold check
+ends up enforcing two independent criteria, and for the real-dataset
+comparison (DATASET_VALIDATION_REPORT.md, docs/IMPROVEMENT_PLAN.md) that
+found the OLDER plain-peak2mean version of this left a real gap: DaVis's
+own peak-ratio+correlation-floor scheme is not the same test as peak2mean,
+mathematically or in practice. When per_pass_validation is False,
 use_loose_validation() is active instead, and _openpiv_speedups.
 loose_typical_validation flags a vector invalid ONLY when it is literal
 NaN -- replace_outliers is then a pure numerical-stability mechanism
@@ -77,15 +85,39 @@ def _fill_residual_nan(u, v):
     stand-in -- these cells are already reflected as invalid in the
     flags/val_locations mask this function's caller already tracks, so
     filling here only prevents literal NaN from reaching the next pass,
-    it doesn't change what counts as a valid vector in the output."""
+    it doesn't change what counts as a valid vector in the output.
+
+    A WHOLE PASS CAN COME BACK ENTIRELY NaN -- confirmed for real: a
+    stricter per-pass rejection criterion (davis_combined's peak-ratio
+    test, see _openpiv_speedups.py) correctly flags every window on
+    genuinely uncorrelated/no-signal image data (e.g. two independent
+    random-noise frames -- there IS no real correlation peak anywhere to
+    find), and np.nanmedian of an ALL-NaN array is itself NaN (with a
+    RuntimeWarning, not an exception) -- silently leaving every cell NaN
+    right where this function's whole job is to prevent that. Falls back
+    to a literal 0.0 (zero displacement) whenever the median itself comes
+    back NaN -- the same benign fallback CPUPIVProcess.__call__ already
+    uses for masked regions at the very end of a call (`np.ma.filled(u,
+    0.0)`) -- rather than leaving NaN to reach the next pass's spline
+    deformation and hit the exact fatal Windows access violation this
+    function exists to prevent."""
+    import warnings
+
     u_data = np.ma.getdata(u) if isinstance(u, np.ma.MaskedArray) else u
     v_data = np.ma.getdata(v) if isinstance(v, np.ma.MaskedArray) else v
     nan_u = np.isnan(u_data)
     nan_v = np.isnan(v_data)
-    if nan_u.any():
-        u_data[nan_u] = np.nanmedian(u_data)
-    if nan_v.any():
-        v_data[nan_v] = np.nanmedian(v_data)
+    with warnings.catch_warnings():
+        # nanmedian's own "All-NaN slice encountered" warning is expected
+        # and handled immediately below (median_* is checked for NaN) --
+        # not a signal anything went wrong.
+        warnings.filterwarnings("ignore", message="All-NaN slice encountered")
+        if nan_u.any():
+            median_u = np.nanmedian(u_data)
+            u_data[nan_u] = median_u if not np.isnan(median_u) else 0.0
+        if nan_v.any():
+            median_v = np.nanmedian(v_data)
+            v_data[nan_v] = median_v if not np.isnan(median_v) else 0.0
     return u, v
 
 
@@ -111,16 +143,20 @@ class CPUPIVProcess:
     instead -- see this module's docstring.
 
     per_pass_validation/per_pass_median_threshold/per_pass_median_size/
-    per_pass_sig2noise_threshold (not PIVSettings fields; popped before the
-    above) opt into openpiv's own real per-pass local-median (UOD) AND
-    peak2mean signal-to-noise validation between passes instead of the
-    NaN-only default -- see config.schema.ValidationSettings' docstring."""
+    per_pass_sig2noise_threshold/per_pass_correlation_threshold (not
+    PIVSettings fields; popped before the above) opt into openpiv's own
+    real per-pass local-median (UOD) test AND a peak-ratio+correlation-
+    floor combined criterion ("davis_combined", see _openpiv_speedups.py)
+    between passes instead of the NaN-only default -- see
+    config.schema.ValidationSettings' docstring."""
 
     def __init__(self, frame_shape, **cpu_settings):
         from openpiv.settings import PIVSettings
         from openpiv.pyprocess import get_rect_coordinates
 
-        from ._openpiv_speedups import apply_speedups, use_loose_validation, use_real_validation
+        from ._openpiv_speedups import (
+            apply_speedups, set_davis_correlation_threshold, use_loose_validation, use_real_validation,
+        )
         apply_speedups()
 
         # Opt-in per-pass validation (see config.schema.ValidationSettings'
@@ -130,7 +166,8 @@ class CPUPIVProcess:
         per_pass_validation = cpu_settings.pop("per_pass_validation", False)
         per_pass_median_threshold = cpu_settings.pop("per_pass_median_threshold", 2.0)
         per_pass_median_size = cpu_settings.pop("per_pass_median_size", 1)
-        per_pass_sig2noise_threshold = cpu_settings.pop("per_pass_sig2noise_threshold", 1.0)
+        per_pass_sig2noise_threshold = cpu_settings.pop("per_pass_sig2noise_threshold", 1.5)
+        per_pass_correlation_threshold = cpu_settings.pop("per_pass_correlation_threshold", 0.5)
 
         settings = PIVSettings()
         valid_fields = {f.name for f in dataclasses.fields(settings)}
@@ -142,6 +179,30 @@ class CPUPIVProcess:
         for key, val in cpu_settings.items():
             if key in valid_fields:
                 setattr(settings, key, val)
+
+        # REAL BUG, found and fixed here: openpiv.settings.PIVSettings's
+        # OWN default is use_vectorized=True, and nothing in this app ever
+        # overrode it -- meaning windef.first_pass/multipass_img_deform
+        # have ALWAYS called fast_extended_search_area_piv with
+        # use_vectorized=True, which is exactly the condition that
+        # function's own fallback logic treats as "not what this app
+        # verified" and routes to the REAL, unpatched openpiv
+        # extended_search_area_piv -- which, given use_vectorized=True
+        # ITSELF, then uses openpiv's own vectorized_correlation_to_
+        # displacements/vectorized_sig2noise_ratio internally. Those are
+        # exactly the "openpiv's own alternate vectorized_* functions"
+        # this module's top docstring documents as having been CHECKED
+        # and found to differ subtly (a `<=0` vs `<0` gaussian-fallback
+        # threshold, and a forced float32 cast) and DELIBERATELY NOT USED
+        # -- meaning every real correlation this app has ever run used the
+        # explicitly-rejected path instead of the carefully verified
+        # faithful one, silently, because nothing ever set this flag.
+        # Forced False here, unconditionally (after any cpu_settings
+        # override above, so a stray "use_vectorized" key can't quietly
+        # re-enable this) -- this is the setting the rest of
+        # _openpiv_speedups.py has always assumed and been verified
+        # against.
+        settings.use_vectorized = False
 
         settings.windowsizes = tuple(settings.windowsizes)
         settings.overlap = tuple(settings.overlap)
@@ -172,19 +233,25 @@ class CPUPIVProcess:
             settings.min_max_u_disp = (-1e6, 1e6)
             settings.min_max_v_disp = (-1e6, 1e6)
             settings.std_threshold = 1e6
-            # peak2mean sig2noise, computed cheaply on the fast correlation
-            # path from data it already gathers per window -- see
-            # _openpiv_speedups.py's fast_extended_search_area_piv /
-            # _correlation_to_displacement_flat docstrings for how the
-            # naive version of this (before that module's fast path
-            # accounted for "peak2mean" specifically) used to fall back to
-            # openpiv's slow, unchunked correlation entirely. Bundled with
-            # per_pass_validation rather than a separate flag since a
-            # real sig2noise ratio is only ever produced when
-            # use_real_validation() (below) is also active -- see this
-            # module's top docstring.
+            # "davis_combined" sig2noise: a genuinely custom criterion
+            # (NOT a reproduction of any single openpiv formula) built to
+            # match DaVis's own real per-pass rejection scheme, which
+            # pairs a peak-ratio (peak2peak) threshold WITH an independent
+            # minimum-raw-correlation-value floor -- confirmed via a real
+            # DaVis JobHistory.xml (peakRatioThreshold/correlationThreshold)
+            # and via real-dataset comparison that plain peak2mean alone
+            # left a real accuracy/density gap vs DaVis (see DATASET_
+            # VALIDATION_REPORT.md, docs/IMPROVEMENT_PLAN.md). Computed
+            # cheaply on the fast correlation path from data it already
+            # gathers per window -- see _openpiv_speedups.py's
+            # fast_extended_search_area_piv / _correlation_to_displacement_
+            # flat / _fast_peak2peak_sig2noise docstrings. Bundled with
+            # per_pass_validation rather than a separate flag since this is
+            # only ever meaningful when use_real_validation() (below) is
+            # also active -- see this module's top docstring.
+            set_davis_correlation_threshold(per_pass_correlation_threshold)
             settings.sig2noise_validate = True
-            settings.sig2noise_method = "peak2mean"
+            settings.sig2noise_method = "davis_combined"
             settings.sig2noise_threshold = per_pass_sig2noise_threshold
             use_real_validation()
         else:

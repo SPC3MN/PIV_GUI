@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 
 from piv_suite.engines.cpu_engine import CPUPIVProcess, _fill_residual_nan
@@ -36,6 +38,65 @@ def test_fill_residual_nan_no_op_when_no_nan():
     filled_u, filled_v = _fill_residual_nan(u, v)
     assert np.array_equal(filled_u, u)
     assert np.array_equal(filled_v, v)
+
+
+def test_fill_residual_nan_falls_back_to_zero_when_entire_field_is_nan():
+    # A WHOLE pass can come back entirely NaN -- confirmed for real once
+    # davis_combined's peak-ratio test was wired in (see engines/
+    # _openpiv_speedups.py): on genuinely uncorrelated/no-signal image
+    # data, EVERY window can legitimately fail. np.nanmedian of an
+    # all-NaN array is itself NaN (with a RuntimeWarning, not an
+    # exception) -- this used to leave the field entirely NaN right where
+    # this function's whole job is to prevent that, which then reached
+    # the NEXT pass's spline deformation and crashed with a real Windows
+    # access violation (see this function's own docstring). Must fall
+    # back to a benign literal 0.0 instead, with no warning surfacing to
+    # the caller.
+    u = np.full((3, 3), np.nan)
+    v = np.full((3, 3), np.nan)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any warning here fails the test
+        filled_u, filled_v = _fill_residual_nan(u, v)
+
+    assert not np.isnan(filled_u).any()
+    assert not np.isnan(filled_v).any()
+    assert (filled_u == 0.0).all()
+    assert (filled_v == 0.0).all()
+
+
+def test_fill_residual_nan_zero_fallback_is_per_component_independent():
+    # Only the array that's ENTIRELY NaN falls back to 0.0 -- the other
+    # component's own genuine median is used if it has any real data,
+    # confirming the two components are handled independently, not
+    # coupled through a single shared fallback decision.
+    u = np.full((2, 2), np.nan)
+    v = np.array([[1.0, np.nan], [3.0, 5.0]])
+
+    filled_u, filled_v = _fill_residual_nan(u, v)
+
+    assert (filled_u == 0.0).all()
+    assert filled_v[0, 1] == np.nanmedian(v)
+    assert filled_v[0, 0] == 1.0 and filled_v[1, 0] == 3.0 and filled_v[1, 1] == 5.0
+
+
+def test_cpu_engine_always_forces_use_vectorized_false():
+    # REAL BUG, found and fixed: openpiv.settings.PIVSettings' own default
+    # is use_vectorized=True, which nothing in this app ever overrode --
+    # meaning every real correlation this app ever ran silently used
+    # openpiv's own "vectorized_*" functions (checked and found to differ
+    # subtly from this app's carefully verified fast_* reimplementations
+    # -- see _openpiv_speedups.py's top docstring) instead of the
+    # faithful fast path the rest of this module assumes is active.
+    # CPUPIVProcess must force this False unconditionally, including
+    # against a caller that tries to pass it through cpu_settings
+    # (confirming the force happens AFTER the general cpu_settings
+    # override loop, not before it).
+    default_engine = CPUPIVProcess((64, 64), windowsizes=[32], overlap=[16])
+    assert default_engine._settings.use_vectorized is False
+
+    overridden_engine = CPUPIVProcess((64, 64), windowsizes=[32], overlap=[16], use_vectorized=True)
+    assert overridden_engine._settings.use_vectorized is False
 
 
 def test_fill_residual_nan_handles_masked_arrays():

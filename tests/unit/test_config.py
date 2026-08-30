@@ -168,6 +168,39 @@ def test_performance_settings_missing_from_older_pivproj_file_falls_back_to_auto
     assert cfg.performance.n_workers is None
 
 
+def test_per_pass_validation_thresholds_default_to_davis_combined_values_and_roundtrip(tmp_path):
+    # per_pass_sig2noise_threshold's MEANING changed (peak-ratio, not
+    # peak2mean -- see ValidationSettings' own docstring for the real-
+    # dataset evidence) alongside its default value (1.0 -> 1.5, matching
+    # DaVis's own peakRatioThreshold), and per_pass_correlation_threshold
+    # is a new field (0.5, matching DaVis's own correlationThreshold).
+    cfg = ProjectConfig()
+    assert cfg.validation.per_pass_sig2noise_threshold == 1.5
+    assert cfg.validation.per_pass_correlation_threshold == 0.5
+
+    path = tmp_path / "proj.pivproj"
+    cfg.validation.per_pass_sig2noise_threshold = 2.0
+    cfg.validation.per_pass_correlation_threshold = 0.6
+    save_project(str(path), cfg)
+
+    reloaded = load_project(str(path))
+    assert reloaded.validation.per_pass_sig2noise_threshold == 2.0
+    assert reloaded.validation.per_pass_correlation_threshold == 0.6
+
+
+def test_per_pass_correlation_threshold_missing_from_older_pivproj_file_falls_back_to_default(tmp_path):
+    # An older .pivproj saved before this field existed has no
+    # "per_pass_correlation_threshold" key at all -- from_dict must not
+    # choke on that (matches the existing pattern for every other field
+    # added to this schema after its own initial release).
+    path = tmp_path / "proj.pivproj"
+    with open(path, "w") as f:
+        json.dump({"project": {"backend": "cpu"}, "validation": {"per_pass_median_threshold": 3.0}}, f)
+    cfg = load_project(str(path))
+    assert cfg.validation.per_pass_median_threshold == 3.0
+    assert cfg.validation.per_pass_correlation_threshold == 0.5
+
+
 # ---- legacy adapter <-> exact original defaults ----
 
 def test_passes_to_cpu_matches_original_default():
@@ -205,6 +238,11 @@ def test_to_cpu_settings_maps_validation_fields():
     assert settings["windowsizes"] == [64, 32, 32, 32]
     assert "sig2noise_threshold" not in settings
     assert "sig2noise_validate" not in settings
+    # per_pass_sig2noise_threshold/per_pass_correlation_threshold ARE
+    # forwarded, though (popped by CPUPIVProcess itself, not PIVSettings
+    # fields) -- see this function's own docstring.
+    assert settings["per_pass_sig2noise_threshold"] == 1.5
+    assert settings["per_pass_correlation_threshold"] == 0.5
 
 
 def test_to_gpu_settings_maps_validation_fields():

@@ -52,15 +52,38 @@ typical_validation -- see cpu_engine.py's module docstring for the full
 rationale and why that's still consistent with "the final valid/invalid
 DECISION lives in processing.postprocess."
 
-FAITHFUL ADDITION (peak2mean sig2noise in fast_extended_search_area_piv /
-_correlation_to_displacement_flat): computes openpiv's own peak2mean
-formula (peak correlation value / |mean of the correlation plane|,
-zeroed for border/weak peaks -- see openpiv.validation.sig2noise_ratio)
-from data the fast path already gathers per window, so requesting
-sig2noise_method="peak2mean" no longer falls back to openpiv's slow,
-unchunked correlation path the way any non-None sig2noise_method
-originally did. Bit-exact vs. openpiv's own peak2mean output; see
-tests/unit/test_openpiv_speedups.py.
+FAITHFUL ADDITION (peak2mean AND peak2peak sig2noise in fast_extended_
+search_area_piv / _correlation_to_displacement_flat / _fast_peak2peak_
+sig2noise): computes openpiv's own peak2mean and peak2peak formulas
+(peak2mean: peak correlation value / |mean of the correlation plane|;
+peak2peak: peak1 / peak2, peak2 being the highest value outside a
+window around peak1 -- see openpiv.pyprocess.sig2noise_ratio) from data
+the fast path already gathers per window, so requesting either as
+sig2noise_method no longer falls back to openpiv's slow, unchunked
+correlation path the way any other sig2noise_method still does. Both
+bit-exact vs. openpiv's own output; see tests/unit/test_openpiv_speedups.py.
+
+BEHAVIOR-CHANGING ADDITION (sig2noise_method="davis_combined" in the same
+two functions, plus set_davis_correlation_threshold): a genuinely custom
+per-pass rejection criterion, not a reproduction of any openpiv formula --
+built to match a real gap found comparing this app's output against real
+LaVision DaVis reference data on real datasets (see DATASET_VALIDATION_
+REPORT.md and docs/IMPROVEMENT_PLAN.md): DaVis's own per-pass "multi-pass
+postprocessing" (confirmed via a real JobHistory.xml) pairs a peak-ratio
+threshold WITH an independent minimum-correlation-value floor, which
+plain peak2peak alone doesn't express (a window can have a fine peak1/
+peak2 ratio while both peaks are individually weak). Computes the genuine
+peak2peak ratio, then forces it to 0.0 (guaranteed rejection via
+sig2noise_val()'s existing `< threshold` check, regardless of the
+threshold's own value) wherever the raw peak value itself is below
+_DAVIS_CORRELATION_THRESHOLD -- see _correlation_to_displacement_flat's
+own docstring for why this needs no changes to openpiv's own
+typical_validation/windef call signatures. Wired in by cpu_engine.py when
+per_pass_validation is True (replacing the plain peak2mean criterion
+used previously) -- see that module's docstring for the real-data
+evidence and config.schema.ValidationSettings for the two threshold
+fields (per_pass_sig2noise_threshold now means the PEAK-RATIO threshold;
+per_pass_correlation_threshold is the new raw-value floor).
 
 fast_local_median_val exists but is NOT wired into apply_speedups() --
 see its own docstring; nothing calls openpiv.validation.local_median_val
@@ -416,7 +439,7 @@ def fast_correlation_to_displacement(corr, n_rows, n_cols, subpixel_method="gaus
     return u.reshape(n_rows_arg, n_cols_arg), v.reshape(n_rows_arg, n_cols_arg)
 
 
-def _correlation_to_displacement_flat(corr, subpixel_method="gaussian"):
+def _correlation_to_displacement_flat(corr, subpixel_method="gaussian", sig2noise_method="peak2mean"):
     """The same per-window math as fast_correlation_to_displacement, minus
     the final reshape to (n_rows, n_cols) -- factored out so
     fast_extended_search_area_piv can call it per chunk (a chunk covers a
@@ -424,22 +447,57 @@ def _correlation_to_displacement_flat(corr, subpixel_method="gaussian"):
     own meaningful n_rows/n_cols) and reshape the FULL grid only once,
     after every chunk has been written into it.
 
-    ALSO returns sig2noise (peak2mean) as a 3rd value -- confirmed exact
-    match to openpiv.pyprocess.sig2noise_ratio's own "peak2mean" formula
-    (sig2noise = peak_value / |mean(correlation_plane)|, zeroed wherever
-    the peak sits on the correlation plane's border or is below 1e-3):
-    `flat` (the already-reshaped (n_windows, h*w) correlation data) and
-    the peak location are BOTH already computed just above for the u/v
-    displacement itself -- computing peak2mean here is one more mean()
-    reduction over data already fully in memory, not a second
-    correlation or extra FFT work. This is what makes real sig2noise-
-    based rejection affordable on the fast/chunked path at all (see
+    ALSO returns sig2noise as a 3rd value, one of three faithful (or, for
+    "davis_combined", deliberately custom) formulas selected by
+    sig2noise_method -- `flat`/the peak location are BOTH already computed
+    just above for the u/v displacement itself, so any of these costs one
+    more reduction over data already fully in memory, not a second
+    correlation or extra FFT work. This is what makes real sig2noise-based
+    rejection affordable on the fast/chunked path at all (see
     fast_extended_search_area_piv's docstring for why the ORIGINAL
     approach -- falling back to openpiv's own slow, unchunked
     implementation whenever sig2noise was requested -- was a much bigger
-    cost than computing sig2noise itself ever was)."""
+    cost than computing sig2noise itself ever was).
+
+    "peak2mean": confirmed exact match to openpiv.pyprocess.
+    sig2noise_ratio's own "peak2mean" formula (sig2noise = peak_value /
+    |mean(correlation_plane)|, zeroed wherever the peak sits on the
+    correlation plane's border or is below 1e-3).
+
+    "peak2peak": confirmed exact match to openpiv.pyprocess.
+    sig2noise_ratio's own "peak2peak" formula (sig2noise = peak1 / peak2,
+    peak2 being the highest value outside a (2*width+1)^2 box around
+    peak1) -- see _fast_peak2peak_sig2noise's own docstring for the exact
+    faithfulness details verified.
+
+    "davis_combined": NOT a faithful reproduction of any single openpiv
+    formula -- a deliberately custom criterion built to match DaVis's own
+    real per-pass "multi-pass postprocessing" scheme, confirmed via a real
+    DaVis JobHistory.xml to pair a peak-ratio ("scalarfield") threshold
+    WITH an independent minimum-correlation-value floor
+    (useScalarfieldThreshold/peakRatioThreshold/correlationThreshold),
+    which plain "peak2peak" alone does not express (a window could have a
+    perfectly fine peak1/peak2 RATIO while both peaks are individually
+    weak/noisy). Computed as the genuine peak2peak ratio, then forced to
+    0.0 (guaranteed sig2noise_val() rejection, regardless of whatever
+    sig2noise_threshold a caller passes) wherever the RAW peak value
+    itself falls below module-level _DAVIS_CORRELATION_THRESHOLD (set via
+    set_davis_correlation_threshold(), see cpu_engine.py) -- this lets
+    typical_validation's existing single-threshold sig2noise_val() hook
+    enforce BOTH DaVis criteria (peak-ratio < threshold OR raw correlation
+    < floor -> reject) without needing to change openpiv's own
+    typical_validation/windef call signatures at all."""
     if subpixel_method not in ("gaussian", "centroid", "parabolic"):
         raise ValueError(f"Method not implemented {subpixel_method}")
+    if sig2noise_method not in (None, "peak2mean", "peak2peak", "davis_combined"):
+        raise ValueError(f"sig2noise_method not implemented for the fast path: {sig2noise_method}")
+    # None (nothing asked for sig2noise) still computes peak2mean
+    # internally -- cheap/free either way (see module docstring), and
+    # this matches the ORIGINAL always-peak2mean-internally behavior;
+    # the caller (fast_extended_search_area_piv) is the one that decides
+    # whether to actually surface it or discard it as NaN.
+    if sig2noise_method is None:
+        sig2noise_method = "peak2mean"
 
     n_windows, h, w = corr.shape
     flat = corr.reshape(n_windows, -1)
@@ -449,21 +507,22 @@ def _correlation_to_displacement_flat(corr, subpixel_method="gaussian"):
 
     on_border = (peak_i == 0) | (peak_i == h - 1) | (peak_j == 0) | (peak_j == w - 1)
 
-    # peak2mean sig2noise -- computed from the RAW peak value (no +eps,
-    # matching sig2noise_ratio's own corr_max1) and flat's own mean, same
-    # array `flat` the displacement math below also uses. corr_max1 is
-    # zeroed (not just left small) for a border peak or one below 1e-3,
-    # exactly mirroring sig2noise_ratio's own `condition` check -- both
-    # mean "no usable signal here", scored as sig2noise=0 either way
-    # (sig2noise_ratio's own final `sig2noise[isnan] = 0.0` line covers
-    # the mean-is-zero case; replicated here via the same nan-out-then-
-    # zero two-step for an identical result, not an approximation of it).
+    # corr_max1 (the raw peak value, zeroed for a border/near-zero peak)
+    # is shared by every sig2noise formula below -- computed once here,
+    # matching sig2noise_ratio's own corr_max1 exactly regardless of which
+    # method is requested.
     raw_peak = flat[np.arange(n_windows), peak_flat]
     corr_max1 = np.where((raw_peak < 1e-3) | on_border, 0.0, raw_peak)
-    corr_max2 = np.abs(flat.mean(axis=1))
-    with np.errstate(invalid="ignore", divide="ignore"):
-        sig2noise = corr_max1 / corr_max2
-    sig2noise = np.where(np.isnan(sig2noise) | (corr_max2 == 0), 0.0, sig2noise)
+
+    if sig2noise_method == "peak2mean":
+        corr_max2 = np.abs(flat.mean(axis=1))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            sig2noise = corr_max1 / corr_max2
+        sig2noise = np.where(np.isnan(sig2noise) | (corr_max2 == 0), 0.0, sig2noise)
+    else:
+        sig2noise = _fast_peak2peak_sig2noise(corr, peak_i, peak_j, corr_max1)
+        if sig2noise_method == "davis_combined":
+            sig2noise = np.where(corr_max1 < _DAVIS_CORRELATION_THRESHOLD, 0.0, sig2noise)
 
     # Clamp border windows' indices to something safe (e.g. the center) so
     # the neighbour-index arithmetic below never goes out of bounds; their
@@ -528,6 +587,78 @@ def _correlation_to_displacement_flat(corr, subpixel_method="gaussian"):
     u = subp_j - default_j
 
     return u, v, sig2noise
+
+
+# Raw-correlation-value floor for sig2noise_method="davis_combined" (see
+# _correlation_to_displacement_flat's docstring) -- global, set once per
+# CPUPIVProcess construction via set_davis_correlation_threshold(), same
+# "safe because this app runs one CPUPIVProcess per project/batch
+# sequentially, never multiple engines with different settings
+# concurrently in the same process" pattern already used for apply_
+# speedups()'s own _PATCHED/_REAL_* globals (see that function's
+# docstring). 0.5 is a fallback only reached if set_davis_correlation_
+# threshold() is never called at all (should not happen in practice --
+# cpu_engine.py always calls it before "davis_combined" can be reached).
+_DAVIS_CORRELATION_THRESHOLD = 0.5
+
+
+def set_davis_correlation_threshold(value):
+    """Sets the module-level floor sig2noise_method="davis_combined" uses
+    -- call once per CPUPIVProcess construction, before any correlation
+    happens (see cpu_engine.py)."""
+    global _DAVIS_CORRELATION_THRESHOLD
+    _DAVIS_CORRELATION_THRESHOLD = value
+
+
+def _fast_peak2peak_sig2noise(corr, peak_i, peak_j, corr_max1, width=2):
+    """Faithful vectorized re-implementation of openpiv.pyprocess.
+    sig2noise_ratio's "peak2peak" branch (openpiv.pyprocess.
+    find_second_peak): for each window, mask a (2*width+1)x(2*width+1)
+    box centered on the already-known primary peak (peak_i, peak_j) --
+    openpiv's own find_second_peak does this via a numpy MaskedArray;
+    here every window's own box is masked at once via broadcasting
+    against per-window index grids, using -inf in place of ma.masked
+    (numpy's own argmax/max on a MaskedArray already treat masked
+    entries as impossible-to-win, exactly what -inf does unmasked) --
+    then finds the highest value OUTSIDE that box (peak2) and returns
+    corr_max1/corr_max2.
+
+    Faithfulness details verified (bit-exact against openpiv.pyprocess.
+    sig2noise_ratio(corr, "peak2peak", width=2) across clean single
+    peaks, genuinely ambiguous double peaks, border-peak degenerate
+    cases, near-zero/no-signal correlation planes, and realistic 32x32
+    windows -- see tests/unit/test_openpiv_speedups.py):
+    - peak2's own border check (peak2_i/j on the correlation plane's
+      edge) combined with `corr_max2 > 0.5*corr_max1` is treated as a
+      failed second peak (sig2noise forced to 0), matching the
+      original's exact `border_condition and corr_max2 > 0.5*corr_max1`
+      check -- a real peak sitting right at the edge, if it's not
+      trivially small, is itself a bad sign (see the original's own
+      comment), not scored as a genuine peak-ratio number.
+    - `corr_max2 <= 0` (nothing but masked/-inf remained, or every
+      remaining value was non-positive) is also a failed second peak,
+      matching the original's `corr_max2 == 0` check.
+    - corr_max1 is ALREADY zeroed by the caller for a border/near-zero
+      primary peak (see _correlation_to_displacement_flat) -- 0 divided
+      by anything is 0, matching the original's own early-exit
+      `sig2noise[i] = 0.0` shortcut for that same case without needing a
+      separate branch here."""
+    n_windows, h, w = corr.shape
+    ii, jj = np.indices((h, w))
+    excl = ((np.abs(ii[None, :, :] - peak_i[:, None, None]) <= width) &
+            (np.abs(jj[None, :, :] - peak_j[:, None, None]) <= width))
+    masked = np.where(excl, -np.inf, corr)
+    masked_flat = masked.reshape(n_windows, -1)
+    peak2_flat = np.argmax(masked_flat, axis=1)
+    corr_max2 = masked_flat[np.arange(n_windows), peak2_flat]
+    peak2_i = peak2_flat // w
+    peak2_j = peak2_flat % w
+
+    border2 = (peak2_i == 0) | (peak2_i == h - 1) | (peak2_j == 0) | (peak2_j == w - 1)
+    failed2 = (corr_max2 <= 0) | (border2 & (corr_max2 > 0.5 * corr_max1))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        sig2noise = np.where(failed2, 0.0, corr_max1 / corr_max2)
+    return np.where(np.isnan(sig2noise), 0.0, sig2noise)
 
 
 def fast_extended_search_area_piv(frame_a, frame_b, window_size, overlap=(0, 0), dt=1.0,
@@ -596,19 +727,20 @@ def fast_extended_search_area_piv(frame_a, frame_b, window_size, overlap=(0, 0),
     elif isinstance(search_area_size, int):
         search_area_size = (search_area_size, search_area_size)
 
-    # sig2noise_method == "peak2mean" (this app's only real usage --
-    # cpu_engine.py hard-codes it, PIVSettings' own default too) no
-    # longer forces the slow fallback: _correlation_to_displacement_flat
-    # computes peak2mean sig2noise "for free" from the SAME correlation-
-    # plane data already needed for the displacement itself (see that
-    # function's docstring) -- there's no real extra correlation/peak-
-    # search cost to fall back to the slow path FOR. "peak2peak" still
-    # falls back (needs a genuine second-peak search this fast path
-    # doesn't implement), and so does sig2noise_method=None with
-    # anything ELSE non-default below -- this only narrows the fallback
+    # sig2noise_method in (None, "peak2mean", "peak2peak", "davis_combined")
+    # no longer forces the slow fallback: _correlation_to_displacement_flat
+    # computes all three "for free" from the SAME correlation-plane data
+    # already needed for the displacement itself (see that function's and
+    # _fast_peak2peak_sig2noise's own docstrings for the exact-match
+    # verification each formula has) -- there's no real extra correlation/
+    # peak-search cost to fall back to the slow path for any of them
+    # (initially only "peak2mean" was fast-pathed here; "peak2peak" was
+    # added once its own genuine second-peak search was verified faithful,
+    # and "davis_combined" reuses that same peak2peak search). Anything
+    # ELSE non-default still falls back -- this only narrows the fallback
     # condition, doesn't remove it.
     if (search_area_size != window_size or use_vectorized or correlation_method != "circular"
-            or sig2noise_method not in (None, "peak2mean")):
+            or sig2noise_method not in (None, "peak2mean", "peak2peak", "davis_combined")):
         _orig = _REAL_EXTENDED_SEARCH_AREA_PIV
         if _orig is None:
             from openpiv.pyprocess import extended_search_area_piv as _orig
@@ -664,7 +796,7 @@ def fast_extended_search_area_piv(frame_a, frame_b, window_size, overlap=(0, 0),
             normalized_correlation=normalized_correlation,
         )
         u_chunk, v_chunk, s2n_chunk = _correlation_to_displacement_flat(
-            corr_chunk, subpixel_method=subpixel_method)
+            corr_chunk, subpixel_method=subpixel_method, sig2noise_method=sig2noise_method)
 
         flat_start, flat_end = row_start * n_cols, row_end * n_cols
         u_flat[flat_start:flat_end] = u_chunk
@@ -675,10 +807,12 @@ def fast_extended_search_area_piv(frame_a, frame_b, window_size, overlap=(0, 0),
     v = v_flat.reshape(n_rows, n_cols)
     # sig2noise_method is None -> the original's own np.nan placeholder
     # (nothing asked for sig2noise, so nothing was computed above either
-    # -- _correlation_to_displacement_flat always computes it, but this
-    # branch simply isn't the one a None request should surface it from).
-    # "peak2mean" -> the real, cheaply-computed values collected above.
-    sig2noise = s2n_flat.reshape(n_rows, n_cols) if sig2noise_method == "peak2mean" \
+    # -- _correlation_to_displacement_flat always computes SOMETHING
+    # internally regardless, but this branch simply isn't the one a None
+    # request should surface it from). Any of "peak2mean"/"peak2peak"/
+    # "davis_combined" -> the real, cheaply-computed values collected above.
+    sig2noise = s2n_flat.reshape(n_rows, n_cols) \
+        if sig2noise_method in ("peak2mean", "peak2peak", "davis_combined") \
         else np.full((n_rows, n_cols), np.nan)
     return u / dt, v / dt, sig2noise
 

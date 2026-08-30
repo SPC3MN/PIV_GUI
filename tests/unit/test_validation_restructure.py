@@ -28,7 +28,19 @@ def _noisy_pair(seed_a, seed_b):
 def test_process_frames_valid_is_all_true_with_postprocess_disabled_cpu():
     frame_a, frame_b = _noisy_pair(1, 2)
     correlation = CorrelationSettings()
-    validation = ValidationSettings()
+    # per_pass_validation=False (NOT the class default) is deliberate here,
+    # not an oversight: this test's two frames are independently random --
+    # genuinely uncorrelated, by construction, with no real correlation
+    # peak anywhere to find. A correctly-discriminating per-pass rejection
+    # scheme (davis_combined's peak-ratio test) legitimately flags EVERY
+    # window on data this ambiguous, which openpiv's own windef.
+    # multipass_img_deform then hard-fails on (`if np.all(flags): raise
+    # ValueError(...)`) -- real, correct openpiv behavior, not a bug, but
+    # incompatible with what THIS test actually needs to exercise (whether
+    # the engine's own val_locations output reflects PostProcessSettings
+    # only, per this module's docstring) regardless of whatever per-pass
+    # scheme happens to be active.
+    validation = ValidationSettings(per_pass_validation=False)
     cpu_settings = to_cpu_settings(correlation, validation)
     engine, x, y = init_cpu_processor(frame_a.shape, cpu_settings)
 
@@ -94,7 +106,8 @@ def test_per_pass_validation_enabled_switches_to_real_validation_with_tuned_thre
 
     correlation = CorrelationSettings()
     validation = ValidationSettings(per_pass_validation=True, per_pass_median_threshold=2.0,
-                                     per_pass_median_size=1)
+                                     per_pass_median_size=1, per_pass_sig2noise_threshold=1.5,
+                                     per_pass_correlation_threshold=0.5)
     cpu_settings = to_cpu_settings(correlation, validation)
     engine, x, y = init_cpu_processor((64, 64), cpu_settings)
 
@@ -102,6 +115,12 @@ def test_per_pass_validation_enabled_switches_to_real_validation_with_tuned_thre
     assert engine._settings.median_normalized is True
     assert engine._settings.median_threshold == 2.0
     assert engine._settings.median_size == 1
+    # davis_combined (peak-ratio + correlation-floor), not plain
+    # peak2mean -- see engines/cpu_engine.py's docstring for why this
+    # replaced peak2mean as the per-pass sig2noise scheme.
+    assert engine._settings.sig2noise_method == "davis_combined"
+    assert engine._settings.sig2noise_threshold == 1.5
+    assert _openpiv_speedups._DAVIS_CORRELATION_THRESHOLD == 0.5
 
     # Explicitly disabling it must restore the loose patch -- confirms the
     # toggle is live, not sticky.
