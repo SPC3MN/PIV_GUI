@@ -37,12 +37,35 @@ work.
 - **Added `--app-field raw|filled` to `compare_dataset.py` and root-caused
   the mean\|diff\| gap** (see below — moved from HIGH PRIORITY to
   completed, with a narrower follow-up item in its place). `55677dd`
+- **Fixed `use_vectorized` never being forced False** — `PIVSettings`'s own
+  default (`True`) meant every real CPU-backend correlation silently used
+  openpiv's own alternate `vectorized_*` functions, never the carefully
+  faithful-verified `fast_*` path this app's whole `_openpiv_speedups.py`
+  module is built around. Verified safe on real data (identical results to
+  baseline, zero practical accuracy impact) — a real correctness fix,
+  restoring this app's own intended code path for the first time. `d9f5b19`
+- **Fixed a latent `_fill_residual_nan` crash risk** — `np.nanmedian` of an
+  entirely-NaN pass (a real, reachable case: a genuinely-uncorrelated or
+  fully-rejected pass) is itself NaN, silently leaving the field NaN right
+  where this function's job is to prevent that, reaching the next pass's
+  spline deformation and crashing with a real, uncatchable Windows access
+  violation. Falls back to 0.0 when the median itself is NaN. `d9f5b19`
+- **Attempted and reverted a custom DaVis-matching per-pass validation
+  scheme** (`sig2noise_method="davis_combined"`, peak-ratio + correlation-
+  floor) — built from real DaVis settings, bit-exact-verified on synthetic
+  data, but real-data testing found it rejects 99.16% of real first-pass
+  windows (openpiv's own default peak-ratio exclusion width is too narrow
+  for this app's real, wide correlation peaks), collapsing DaVis-agreement
+  from corr~0.95 to corr~0.36. Reverted to the proven-safe `peak2mean`
+  default; the tested infrastructure remains available for a properly
+  recalibrated future attempt. `9e475af`
 
 ## HIGH PRIORITY
 
 - ~~Root-cause the ~19-25% mean\|diff\|-relative-to-magnitude gap~~ —
-  **investigated 2026-08-29** (see `DATASET_VALIDATION_REPORT.md`'s
-  "Root-cause investigation" section for full numbers). Findings:
+  **investigated in depth, twice** (2026-08-29; see `DATASET_VALIDATION_
+  REPORT.md`'s "Root-cause investigation" and "Deep dive into the
+  correlation pipeline itself" sections for full numbers). Findings:
   - Raw-vs-PostProc pipeline-stage mismatch: **ruled out** — re-comparing
     this app's post-fill (final) output instead of raw measurements
     (`--app-field filled`) did not shrink the gap (stereo 19%→20.4%,
@@ -55,13 +78,22 @@ work.
     (strong local curvature near the vortex core makes spatial
     registration between two independently-computed grids more
     sensitive), not a bug.
+  - Every correlation-pipeline knob tested (`per_pass_validation=False`,
+    `correlation_method=linear`, `subpixel_method=parabolic/centroid`,
+    `min_max_filter` preprocessing, the custom `davis_combined` per-pass
+    scheme above): **all made agreement with DaVis worse or unchanged,
+    never better** — the app's original defaults are already the best-
+    performing configuration found across every real-data test run.
   - **Remaining open item**: even the calmest (lowest-gradient) regions
     still show a substantial baseline relative diff (~14-25%), unexplained
-    by either hypothesis above. Next step needs either a synthetic flow
-    field with a known ground truth (real swirl data can't establish which
-    engine is "right"), or a closer parameter-by-parameter comparison of
-    this app's vs. DaVis's specific correlation/subpixel-fit settings for
-    this job — a genuinely new investigation, not a quick follow-up.
+    by anything tested so far. Next step needs either (a) a properly
+    recalibrated peak-ratio per-pass scheme (a wider exclusion zone and/or
+    a threshold derived from this app's own real peak-ratio distribution,
+    not DaVis's number copied unmodified — see the reverted `davis_
+    combined` attempt above for the exact diagnosis), or (b) a synthetic
+    flow field with a known ground truth (real swirl data can't establish
+    which engine is "right") — either is a genuinely new investigation,
+    not a quick follow-up.
 
 ## MEDIUM PRIORITY
 

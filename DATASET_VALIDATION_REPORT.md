@@ -204,6 +204,88 @@ synthetic/known-ground-truth flow field or a much closer comparison of the
 two engines' specific correlation parameters — beyond what a comparison
 against real (ground-truth-unknown) flow data alone can resolve.
 
+### Deep dive into the correlation pipeline itself (2026-08-29, follow-up)
+
+A further, deeper investigation specifically targeted the correlation
+method, subpixel-fitting method, and per-pass replacement scheme (as
+opposed to post-processing, already ruled out above). This surfaced two
+real, unrelated bugs — one fixed and shipped, one attempted and reverted
+after real-data testing — plus a systematic sweep of every remaining
+correlation-side hypothesis, none of which closed the residual gap.
+
+**Bug found and fixed: `use_vectorized` was silently active in every real
+run.** `openpiv.settings.PIVSettings`'s own default is `use_vectorized=
+True`, and nothing in this app ever overrode it — meaning every real
+correlation this app has ever run silently used openpiv's own alternate
+`vectorized_*` correlation/subpixel functions, not the carefully
+faithful-verified `fast_*` reimplementations `_openpiv_speedups.py`'s own
+docstring describes at length (and explicitly says were "checked and
+found to differ subtly... not acceptable here, hence writing faithful
+equivalents"). Now forced `False` unconditionally in `CPUPIVProcess`.
+**Verified on real data to be safe with zero practical accuracy impact**:
+reprocessing 20 planar pairs with only this fix applied reproduced the
+baseline numbers essentially exactly (density 95.41% vs 95.41%, relative
+diff 25.15% vs 25.15%, corr(U) 0.9571 vs 0.9570, corr(V) 0.9492 vs
+0.9492) — a real correctness fix (this app's own documented, intended
+code path is now actually exercised for the first time), but it does not
+explain or close the DaVis gap.
+
+**Attempted and reverted: a custom "davis_combined" per-pass validation
+scheme.** DaVis's real `JobHistory.xml` shows its per-pass rejection
+pairs a local-median test (already matched) with an INDEPENDENT
+peak-ratio threshold (`peakRatioThreshold=1.5`) and a minimum-
+correlation-value floor (`correlationThreshold=0.5`) — a combination this
+app's existing `peak2mean`-based criterion never implemented. Built a
+faithful, bit-exact-verified (against openpiv's own `peak2peak` formula,
+5 synthetic test cases) vectorized peak-ratio computation and wired it in
+as the new per-pass default, combined with the correlation floor.
+**Real-data testing found a severe, disqualifying regression**: on the
+same 20 planar pairs, corr(U)/corr(V) vs DaVis collapsed from ~0.95 to
+~0.36 — worse than every other hypothesis tested this session, including
+deliberately bad ones (centroid subpixel, linear correlation). Root-
+caused by direct inspection of one real first-pass correlation (64px
+window, 11,811 windows): **99.16% of ALL windows failed the peak-ratio
+test** at DaVis's own threshold. openpiv's own default second-peak
+exclusion width (`width=2`, a 5×5 box) is too narrow for this app's real,
+wide correlation peaks at real window sizes — a first-pass 64px window's
+genuine peak footprint can exceed a 5×5 box, so the "second peak" found
+is often just the shoulder of the SAME peak, not a real competing match,
+giving a near-1.0 ratio for nearly everything regardless of true match
+quality. The underlying formula itself is correct (bit-exact vs. openpiv);
+the miscalibration was in copying DaVis's threshold/exclusion-width
+numbers unmodified onto a different real peak-width regime. **Reverted**
+to the original, real-data-proven `peak2mean` default; the tested
+`peak2peak`/`davis_combined` infrastructure remains in
+`_openpiv_speedups.py` for whoever picks this up after fixing the
+exclusion-width calibration (a wider zone, and/or a threshold derived
+from this app's own real peak-ratio distribution rather than DaVis's
+number copied unmodified).
+
+**Every other correlation-side hypothesis tested and ruled out** (same
+20-pair planar methodology throughout, `--app-field filled`):
+
+| Hypothesis | Relative diff | corr(U) | corr(V) | Verdict |
+|---|---|---|---|---|
+| Baseline (peak2mean, gaussian, circular) | 25.15% | 0.9570 | 0.9492 | — |
+| `per_pass_validation=False` | much worse | ~0.6-0.78 | ~0.6-0.75 | Refuted |
+| `correlation_method=linear` | 31.86% | — | — | Refuted |
+| `subpixel_method=parabolic` | 25.06% | 0.9574 | 0.9495 | No effect |
+| `subpixel_method=centroid` | 49.21% | 0.8940 | 0.8705 | Refuted |
+| `min_max_filter` preprocessing | 51.28% | 0.6820 | 0.6425 | Refuted |
+| `davis_combined` per-pass validation | 171.55% | 0.3577 | 0.3693 | Refuted (severe) |
+
+**Conclusion**: every parameter variation tested makes agreement with
+DaVis worse or unchanged, never better — the app's original defaults
+(gaussian subpixel, circular correlation, peak2mean per-pass validation)
+were already the best-performing configuration found. The residual
+~25% (planar) / ~20% (stereo) relative-diff gap remains open. A
+background research subagent additionally audited every setting in a
+real DaVis `JobHistory.xml` against this app's code (see docs/
+IMPROVEMENT_PLAN.md for the full ranked list) — the one other concrete,
+actionable lead it found (the min/max preprocessing filter) was tested
+above and refuted; the rest either already matched DaVis or couldn't be
+verified without LaVision's own proprietary documentation.
+
 **Density is consistently 5-7 points below DaVis's own**, in both modes —
 matches this session's earlier, smaller-scale stereo angle investigation
 almost exactly (77-81% vs DaVis's 89%), now confirmed as a stable,
@@ -296,17 +378,27 @@ against each other.
 ## Recommendations
 
 - ~~Root-cause the ~19-25% mean\|diff\|-relative-to-magnitude gap on stereo
-  and planar~~ — **investigated** (see "Root-cause investigation" above):
-  the raw-vs-PostProc pipeline-stage mismatch is ruled out (didn't shrink
-  under `--app-field filled`); spatial-gradient/registration sensitivity is
-  confirmed as a real, partial contributor (~1.5-1.85x more error in
-  high-gradient vs. low-gradient regions); a substantial baseline gap
-  (~14-25%) remains unexplained even in the calmest flow regions. Next
-  step, if pursued further: compare against a synthetic flow field with a
-  known ground truth (removes the "which engine is actually right"
-  ambiguity real flow data can't resolve), or a closer parameter-by-
-  parameter comparison of this app's vs. DaVis's correlation/subpixel-fit
-  settings for this exact job.
+  and planar~~ — **investigated in depth, twice** (see "Root-cause
+  investigation" and "Deep dive into the correlation pipeline itself"
+  above): raw-vs-PostProc pipeline-stage mismatch ruled out; spatial-
+  gradient/registration sensitivity confirmed as a real, partial
+  contributor (~1.5-1.85x more error in high-gradient regions);
+  per_pass_validation off, correlation_method=linear, subpixel parabolic/
+  centroid, min_max_filter preprocessing, and a custom DaVis-matching
+  peak-ratio+correlation-floor per-pass scheme were ALL tested on real
+  data and made things worse or had no effect — the app's original
+  defaults are already the best-performing configuration found. A
+  substantial baseline gap (~14-25%) remains fully unexplained even in
+  the calmest flow regions. Two real, unrelated bugs were found and fixed
+  along the way (`use_vectorized` never being forced False; `_fill_
+  residual_nan` unable to recover an all-rejected pass) — both real
+  improvements, neither closes the gap. Next step, if pursued further:
+  (a) properly recalibrate the peak-ratio exclusion width/threshold
+  against this app's own real correlation-peak-width distribution rather
+  than reusing DaVis's numbers unmodified (see the reverted attempt's
+  full diagnosis above), or (b) a synthetic flow field with a known
+  ground truth (removes the "which engine is actually right" ambiguity
+  real flow data can't resolve).
 - ~~Fix `recommended_workers()` to hard-cap at 61 on Windows~~ — **done**
   (see [autotune.py](src/piv_suite/perf/autotune.py), commit `3f70f53`);
   defaulting toward physical core count specifically for this NUMA
