@@ -109,59 +109,52 @@ class ValidationSettings:
     smoothn_p: float = 0.05
 
     # CPU-only; no effect on GPU. Restores openpiv's own real per-pass
-    # validation between each window-deformation pass, rejecting and
-    # locally-mean-replacing a spurious vector BEFORE it gets deformed into
-    # the next, finer pass -- matching LaVision DaVis's per-pass "multi-pass
-    # postprocessing" scheme, which combines THREE independent criteria
-    # (confirmed via a real DaVis JobHistory.xml): a local-median (UOD)
-    # test, a peak-ratio ("scalarfield") threshold, and a minimum-
-    # correlation-value floor. ON by default: turning it on AT ALL
-    # (median-only, the first version of this) was confirmed via real
-    # DaVis-dataset comparison to raise U/V correlation from ~0.6 to ~0.8
-    # and drop spurious-vector rejections from ~30% to ~3%. All three
-    # criteria are affordable at negligible extra cost (each is fast-pathed
-    # -- see engines/_openpiv_speedups.fast_local_norm_median_val and
-    # sig2noise_method="davis_combined"). See engines/cpu_engine.py's
-    # CPUPIVProcess for how this is wired in.
+    # validation (Westerweel & Scarano's "universal outlier detection"
+    # local-median test) between each window-deformation pass, rejecting
+    # and locally-mean-replacing a spurious vector BEFORE it gets deformed
+    # into the next, finer pass -- matching LaVision DaVis's per-pass
+    # "multi-pass postprocessing" scheme (its median-based removal
+    # factor). ON by default: confirmed via real DaVis-dataset comparison
+    # to raise U/V correlation from ~0.6 to ~0.8 and drop spurious-vector
+    # rejections from ~30% to ~3%, at negligible extra cost (its
+    # generic_filter-based cost is fast-pathed -- see
+    # engines/_openpiv_speedups.fast_local_norm_median_val). See
+    # engines/cpu_engine.py's CPUPIVProcess for how this is wired in.
     per_pass_validation: bool = True
     per_pass_median_threshold: float = 2.0   # DaVis's default removal factor
     per_pass_median_size: int = 1            # 1 -> 3x3 neighborhood (DaVis's filter length 1)
 
     # CPU-only; bundled with per_pass_validation (same on/off switch, see
-    # above) rather than a separate toggle -- DaVis itself pairs its own
-    # per-pass median removal with an independent peak-ratio ("scalarfield")
-    # threshold AND a minimum-correlation-value floor, as one combined
-    # multi-pass postprocessing step (confirmed via a real DaVis
-    # JobHistory.xml: useScalarfieldThreshold=true, peakRatioThreshold=1.5,
-    # correlationThreshold=0.5, alongside its median removal factor). This
-    # app's per-pass mode now genuinely implements all three together (see
-    # engines._openpiv_speedups.py's sig2noise_method="davis_combined" and
-    # cpu_engine.py's wiring) -- a real gap found and closed after real-
-    # dataset comparison against DaVis (see DATASET_VALIDATION_REPORT.md
-    # and docs/IMPROVEMENT_PLAN.md): this field previously only drove a
-    # PLAIN peak2mean signal-to-noise threshold (a mathematically different
-    # quantity from DaVis's own peak-RATIO test), leaving the correlation-
-    # value floor unimplemented entirely.
+    # above) rather than a separate toggle -- rejects a vector whose
+    # correlation peak2mean signal-to-noise ratio falls below this
+    # threshold -- a low-confidence/no-real-peak correlation, distinct
+    # from the local-median (UOD) test above, which only catches a vector
+    # that disagrees with its neighbors. 1.0 is openpiv's own PIVSettings
+    # default. Affordable at negligible extra cost because
+    # engines/_openpiv_speedups.py's fast correlation path computes this
+    # ratio from data it already gathers per window.
     #
-    # per_pass_sig2noise_threshold is now the PEAK-RATIO threshold (peak1 /
-    # peak2, peak2 being the next-highest LOCAL correlation peak outside a
-    # small window around peak1) -- rejects an AMBIGUOUS match (multiple
-    # comparably-strong candidate peaks), distinct from the local-median
-    # (UOD) test above (which only catches a vector that disagrees with its
-    # neighbors) and from per_pass_correlation_threshold below (which
-    # catches a WEAK match even when it's unambiguous). 1.5 matches DaVis's
-    # own peakRatioThreshold for the reference dataset. Affordable at
-    # negligible extra cost because engines/_openpiv_speedups.py's fast
-    # correlation path computes peak2peak from data it already gathers per
-    # window (previously, requesting a non-peak2mean sig2noise_method fell
-    # back to openpiv's slow, unchunked correlation path entirely -- see
-    # that module's fast_extended_search_area_piv docstring).
-    per_pass_sig2noise_threshold: float = 1.5
-    # Rejects a vector whose RAW correlation peak value itself falls below
-    # this floor, regardless of how it compares to any other peak --
-    # matches DaVis's own correlationThreshold. 0.5 is DaVis's own default
-    # for the reference dataset.
-    per_pass_correlation_threshold: float = 0.5
+    # A REAL ATTEMPT WAS MADE (and reverted) to replace this with DaVis's
+    # own real per-pass scheme instead, confirmed via a real JobHistory.xml
+    # to pair a peak-RATIO (peak2peak) threshold with an independent
+    # minimum-correlation-value floor (useScalarfieldThreshold=true,
+    # peakRatioThreshold=1.5, correlationThreshold=0.5) -- see
+    # engines._openpiv_speedups.py's sig2noise_method="davis_combined" and
+    # _fast_peak2peak_sig2noise (both still present, still bit-exact-
+    # verified against openpiv's own peak2peak formula on synthetic data)
+    # for the implementation. It is NOT wired in as this app's default:
+    # real-dataset verification found peak2peak's `width=2` exclusion zone
+    # (openpiv's own default, used unmodified) is too narrow for this
+    # app's real, wide correlation peaks at real window sizes -- confirmed
+    # 99.16% of ALL first-pass (64px) windows on a real image rejected the
+    # peak-ratio test at threshold 1.5, collapsing DaVis-agreement from
+    # corr~0.95 to corr~0.36 on real data despite passing every synthetic
+    # unit test. See docs/IMPROVEMENT_PLAN.md for the full finding and
+    # what would need to change (a wider exclusion zone, and/or deriving
+    # the threshold from THIS app's own real peak-ratio distribution
+    # rather than copying DaVis's number unmodified) before this could be
+    # tried again.
+    per_pass_sig2noise_threshold: float = 1.0
 
 
 @dataclass

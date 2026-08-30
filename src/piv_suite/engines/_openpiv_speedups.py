@@ -63,27 +63,38 @@ sig2noise_method no longer falls back to openpiv's slow, unchunked
 correlation path the way any other sig2noise_method still does. Both
 bit-exact vs. openpiv's own output; see tests/unit/test_openpiv_speedups.py.
 
-BEHAVIOR-CHANGING ADDITION (sig2noise_method="davis_combined" in the same
-two functions, plus set_davis_correlation_threshold): a genuinely custom
-per-pass rejection criterion, not a reproduction of any openpiv formula --
-built to match a real gap found comparing this app's output against real
-LaVision DaVis reference data on real datasets (see DATASET_VALIDATION_
-REPORT.md and docs/IMPROVEMENT_PLAN.md): DaVis's own per-pass "multi-pass
-postprocessing" (confirmed via a real JobHistory.xml) pairs a peak-ratio
-threshold WITH an independent minimum-correlation-value floor, which
-plain peak2peak alone doesn't express (a window can have a fine peak1/
-peak2 ratio while both peaks are individually weak). Computes the genuine
-peak2peak ratio, then forces it to 0.0 (guaranteed rejection via
+EXPERIMENTAL, NOT WIRED IN BY DEFAULT (sig2noise_method="davis_combined"
+in the same two functions, plus set_davis_correlation_threshold): a
+genuinely custom per-pass rejection criterion, not a reproduction of any
+openpiv formula -- built to match a real gap found comparing this app's
+output against real LaVision DaVis reference data (see DATASET_
+VALIDATION_REPORT.md and docs/IMPROVEMENT_PLAN.md): DaVis's own per-pass
+"multi-pass postprocessing" (confirmed via a real JobHistory.xml) pairs a
+peak-ratio threshold WITH an independent minimum-correlation-value floor,
+which plain peak2peak alone doesn't express (a window can have a fine
+peak1/peak2 ratio while both peaks are individually weak). Computes the
+genuine peak2peak ratio, then forces it to 0.0 (guaranteed rejection via
 sig2noise_val()'s existing `< threshold` check, regardless of the
 threshold's own value) wherever the raw peak value itself is below
-_DAVIS_CORRELATION_THRESHOLD -- see _correlation_to_displacement_flat's
-own docstring for why this needs no changes to openpiv's own
-typical_validation/windef call signatures. Wired in by cpu_engine.py when
-per_pass_validation is True (replacing the plain peak2mean criterion
-used previously) -- see that module's docstring for the real-data
-evidence and config.schema.ValidationSettings for the two threshold
-fields (per_pass_sig2noise_threshold now means the PEAK-RATIO threshold;
-per_pass_correlation_threshold is the new raw-value floor).
+_DAVIS_CORRELATION_THRESHOLD.
+
+REVERTED AFTER REAL-DATA VERIFICATION, KEPT AS TESTED INFRASTRUCTURE:
+cpu_engine.py briefly wired this in as the per_pass_validation default,
+replacing plain peak2mean -- and real-dataset comparison found openpiv's
+own default peak2peak exclusion width (width=2, a 5x5 box) is too narrow
+for this app's real, WIDE correlation peaks at real window sizes (a
+first-pass 64px window's genuine peak footprint can easily exceed a 5x5
+box, so the "second peak" found is often just the shoulder of the SAME
+peak, not a real competing match): 99.16% of ALL first-pass windows on a
+real image failed the peak-ratio test at DaVis's own threshold (1.5),
+collapsing DaVis-agreement from corr~0.95 to corr~0.36 despite every
+synthetic unit test passing bit-exact. The formula itself is correct
+(verified against openpiv's own peak2peak); the miscalibration was in
+copying DaVis's threshold/exclusion-width numbers unmodified onto a
+different correlation-peak-width regime. cpu_engine.py reverted to plain
+peak2mean as the real, working default -- see that module's own docstring
+and config.schema.ValidationSettings.per_pass_sig2noise_threshold's for
+the full account and what would need to change before trying this again.
 
 fast_local_median_val exists but is NOT wired into apply_speedups() --
 see its own docstring; nothing calls openpiv.validation.local_median_val
@@ -486,7 +497,17 @@ def _correlation_to_displacement_flat(corr, subpixel_method="gaussian", sig2nois
     typical_validation's existing single-threshold sig2noise_val() hook
     enforce BOTH DaVis criteria (peak-ratio < threshold OR raw correlation
     < floor -> reject) without needing to change openpiv's own
-    typical_validation/windef call signatures at all."""
+    typical_validation/windef call signatures at all.
+
+    NOT wired in as cpu_engine.py's default (see this module's top
+    docstring's own EXPERIMENTAL/REVERTED section for the full account):
+    real-dataset verification found the peak-ratio side of this rejects
+    ~99% of real first-pass windows, because openpiv's own default
+    exclusion width (width=2) is too narrow for this app's real, wide
+    correlation peaks -- the formula itself is correct (bit-exact vs
+    openpiv's own peak2peak), the miscalibration is in the width/
+    threshold values, copied from DaVis's own numbers without adjusting
+    for a different peak-width regime."""
     if subpixel_method not in ("gaussian", "centroid", "parabolic"):
         raise ValueError(f"Method not implemented {subpixel_method}")
     if sig2noise_method not in (None, "peak2mean", "peak2peak", "davis_combined"):
@@ -603,9 +624,14 @@ _DAVIS_CORRELATION_THRESHOLD = 0.5
 
 
 def set_davis_correlation_threshold(value):
-    """Sets the module-level floor sig2noise_method="davis_combined" uses
-    -- call once per CPUPIVProcess construction, before any correlation
-    happens (see cpu_engine.py)."""
+    """Sets the module-level floor sig2noise_method="davis_combined" uses.
+    NOT currently called by cpu_engine.py -- davis_combined was reverted
+    as the per_pass_validation default after real-dataset verification
+    found it rejects ~99% of real first-pass windows (see this module's
+    top docstring's EXPERIMENTAL/REVERTED section); kept for whoever picks
+    this back up after fixing the underlying peak-ratio exclusion-width
+    miscalibration. Call once per CPUPIVProcess construction, before any
+    correlation happens, if/when "davis_combined" is wired back in."""
     global _DAVIS_CORRELATION_THRESHOLD
     _DAVIS_CORRELATION_THRESHOLD = value
 

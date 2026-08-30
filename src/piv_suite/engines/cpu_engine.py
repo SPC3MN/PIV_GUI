@@ -15,20 +15,26 @@ unconditionally every pass -- openpiv gives no flag to disable that --
 and _openpiv_speedups.apply_speedups()/use_real_validation() (see
 __init__) swaps typical_validation for openpiv's OWN real
 implementation when per_pass_validation is True, so a vector failing
-ANY of three per-pass criteria gets locally-mean-replaced by
-replace_outliers right there, before deformation: the local-median (UOD)
-test, a peak-ratio (peak2peak) threshold, and a minimum-raw-correlation-
-value floor -- matching DaVis's own real multi-pass postprocessing scheme
-exactly (confirmed via a real DaVis JobHistory.xml: a median removal
-factor paired with an independent peakRatioThreshold AND
-correlationThreshold). The latter two are computed together as
-sig2noise_method="davis_combined" -- see _openpiv_speedups.py's own
-docstring for exactly how a single existing sig2noise threshold check
-ends up enforcing two independent criteria, and for the real-dataset
-comparison (DATASET_VALIDATION_REPORT.md, docs/IMPROVEMENT_PLAN.md) that
-found the OLDER plain-peak2mean version of this left a real gap: DaVis's
-own peak-ratio+correlation-floor scheme is not the same test as peak2mean,
-mathematically or in practice. When per_pass_validation is False,
+either the per-pass local-median (UOD) test OR a per-pass correlation
+peak2mean signal-to-noise threshold gets locally-mean-replaced by
+replace_outliers right there, before deformation -- matching DaVis's own
+multi-pass postprocessing, which pairs a median removal factor with a
+peak-ratio ("scalarfield") threshold (confirmed via a real DaVis
+JobHistory.xml).
+
+A REAL ATTEMPT WAS MADE (and reverted) to replace peak2mean with DaVis's
+own real peak-ratio+correlation-floor scheme instead (sig2noise_method=
+"davis_combined", still present in _openpiv_speedups.py, still bit-exact
+-verified against openpiv's own peak2peak formula on synthetic data) --
+real-dataset verification found openpiv's own default peak2peak exclusion
+zone (width=2) is too narrow for this app's real, wide correlation peaks
+at real window sizes: 99.16% of ALL first-pass windows on a real image
+failed the peak-ratio test at DaVis's own threshold (1.5), collapsing
+DaVis-agreement from corr~0.95 to corr~0.36 despite passing every
+synthetic unit test. See config.schema.ValidationSettings.per_pass_
+sig2noise_threshold's docstring and docs/IMPROVEMENT_PLAN.md for the
+full finding -- peak2mean remains this engine's real, working default.
+When per_pass_validation is False,
 use_loose_validation() is active instead, and _openpiv_speedups.
 loose_typical_validation flags a vector invalid ONLY when it is literal
 NaN -- replace_outliers is then a pure numerical-stability mechanism
@@ -143,20 +149,17 @@ class CPUPIVProcess:
     instead -- see this module's docstring.
 
     per_pass_validation/per_pass_median_threshold/per_pass_median_size/
-    per_pass_sig2noise_threshold/per_pass_correlation_threshold (not
-    PIVSettings fields; popped before the above) opt into openpiv's own
-    real per-pass local-median (UOD) test AND a peak-ratio+correlation-
-    floor combined criterion ("davis_combined", see _openpiv_speedups.py)
-    between passes instead of the NaN-only default -- see
-    config.schema.ValidationSettings' docstring."""
+    per_pass_sig2noise_threshold (not PIVSettings fields; popped before
+    the above) opt into openpiv's own real per-pass local-median (UOD)
+    AND peak2mean signal-to-noise validation between passes instead of
+    the NaN-only default -- see config.schema.ValidationSettings'
+    docstring."""
 
     def __init__(self, frame_shape, **cpu_settings):
         from openpiv.settings import PIVSettings
         from openpiv.pyprocess import get_rect_coordinates
 
-        from ._openpiv_speedups import (
-            apply_speedups, set_davis_correlation_threshold, use_loose_validation, use_real_validation,
-        )
+        from ._openpiv_speedups import apply_speedups, use_loose_validation, use_real_validation
         apply_speedups()
 
         # Opt-in per-pass validation (see config.schema.ValidationSettings'
@@ -166,8 +169,7 @@ class CPUPIVProcess:
         per_pass_validation = cpu_settings.pop("per_pass_validation", False)
         per_pass_median_threshold = cpu_settings.pop("per_pass_median_threshold", 2.0)
         per_pass_median_size = cpu_settings.pop("per_pass_median_size", 1)
-        per_pass_sig2noise_threshold = cpu_settings.pop("per_pass_sig2noise_threshold", 1.5)
-        per_pass_correlation_threshold = cpu_settings.pop("per_pass_correlation_threshold", 0.5)
+        per_pass_sig2noise_threshold = cpu_settings.pop("per_pass_sig2noise_threshold", 1.0)
 
         settings = PIVSettings()
         valid_fields = {f.name for f in dataclasses.fields(settings)}
@@ -233,25 +235,22 @@ class CPUPIVProcess:
             settings.min_max_u_disp = (-1e6, 1e6)
             settings.min_max_v_disp = (-1e6, 1e6)
             settings.std_threshold = 1e6
-            # "davis_combined" sig2noise: a genuinely custom criterion
-            # (NOT a reproduction of any single openpiv formula) built to
-            # match DaVis's own real per-pass rejection scheme, which
-            # pairs a peak-ratio (peak2peak) threshold WITH an independent
-            # minimum-raw-correlation-value floor -- confirmed via a real
-            # DaVis JobHistory.xml (peakRatioThreshold/correlationThreshold)
-            # and via real-dataset comparison that plain peak2mean alone
-            # left a real accuracy/density gap vs DaVis (see DATASET_
-            # VALIDATION_REPORT.md, docs/IMPROVEMENT_PLAN.md). Computed
-            # cheaply on the fast correlation path from data it already
-            # gathers per window -- see _openpiv_speedups.py's
-            # fast_extended_search_area_piv / _correlation_to_displacement_
-            # flat / _fast_peak2peak_sig2noise docstrings. Bundled with
-            # per_pass_validation rather than a separate flag since this is
-            # only ever meaningful when use_real_validation() (below) is
-            # also active -- see this module's top docstring.
-            set_davis_correlation_threshold(per_pass_correlation_threshold)
+            # peak2mean sig2noise -- see this module's top docstring and
+            # _openpiv_speedups.py's for why this stays the ACTIVE default
+            # rather than the "davis_combined" peak-ratio+correlation-
+            # floor scheme that infrastructure also supports:
+            # davis_combined was built (from a real DaVis JobHistory.xml)
+            # and unit-tested bit-exact against openpiv's own peak2peak
+            # formula on synthetic data, but real-data verification found
+            # a severe, disqualifying problem before it shipped as a
+            # default -- see set_davis_correlation_threshold's own
+            # docstring and _correlation_to_displacement_flat's for the
+            # exact numbers. peak2mean has no such known issue; it is the
+            # long-standing, real-dataset-verified default (see this
+            # class's own docstring for the corr 0.6->0.8 evidence that
+            # motivated per_pass_validation existing at all).
             settings.sig2noise_validate = True
-            settings.sig2noise_method = "davis_combined"
+            settings.sig2noise_method = "peak2mean"
             settings.sig2noise_threshold = per_pass_sig2noise_threshold
             use_real_validation()
         else:

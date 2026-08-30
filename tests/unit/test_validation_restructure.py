@@ -106,8 +106,7 @@ def test_per_pass_validation_enabled_switches_to_real_validation_with_tuned_thre
 
     correlation = CorrelationSettings()
     validation = ValidationSettings(per_pass_validation=True, per_pass_median_threshold=2.0,
-                                     per_pass_median_size=1, per_pass_sig2noise_threshold=1.5,
-                                     per_pass_correlation_threshold=0.5)
+                                     per_pass_median_size=1, per_pass_sig2noise_threshold=1.0)
     cpu_settings = to_cpu_settings(correlation, validation)
     engine, x, y = init_cpu_processor((64, 64), cpu_settings)
 
@@ -115,12 +114,11 @@ def test_per_pass_validation_enabled_switches_to_real_validation_with_tuned_thre
     assert engine._settings.median_normalized is True
     assert engine._settings.median_threshold == 2.0
     assert engine._settings.median_size == 1
-    # davis_combined (peak-ratio + correlation-floor), not plain
-    # peak2mean -- see engines/cpu_engine.py's docstring for why this
-    # replaced peak2mean as the per-pass sig2noise scheme.
-    assert engine._settings.sig2noise_method == "davis_combined"
-    assert engine._settings.sig2noise_threshold == 1.5
-    assert _openpiv_speedups._DAVIS_CORRELATION_THRESHOLD == 0.5
+    # plain peak2mean -- see engines/cpu_engine.py's docstring for why a
+    # real attempt to replace this with "davis_combined" (peak-ratio +
+    # correlation-floor) was reverted after real-dataset verification.
+    assert engine._settings.sig2noise_method == "peak2mean"
+    assert engine._settings.sig2noise_threshold == 1.0
 
     # Explicitly disabling it must restore the loose patch -- confirms the
     # toggle is live, not sticky.
