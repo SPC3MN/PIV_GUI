@@ -72,6 +72,13 @@ class JobModel(QAbstractTableModel):
         return None
 
     def data(self, index, role=Qt.DisplayRole):
+        # A failed pair's status is the whole exception text, and the real ones
+        # from this project's own calibration errors run 200-700 characters.
+        # Shown in the cell that is a table with one readable column; the full
+        # text belongs in a tooltip.
+        if role == Qt.ToolTipRole and index.isValid():
+            status = self._rows[index.row()].get("status", "")
+            return status if status.startswith("error:") else None
         if role != Qt.DisplayRole or not index.isValid():
             return None
         row = self._rows[index.row()]

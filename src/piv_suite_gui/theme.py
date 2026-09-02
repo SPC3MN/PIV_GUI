@@ -28,7 +28,7 @@ a future palette swap only touches this one block):
     INK       -- primary text
     ACCENT    -- emphasis fill: checked controls, primary buttons, active tab,
                  focus rings. ACCENT_HOVER/ACCENT_PRESSED are its button
-                 states; ACCENT_WASH is a tint for selected rows.
+                 states; ACCENT_WASH tints a selected table row.
     INK_SOFT  -- secondary text (field labels, unselected tabs)
     INK_FAINT -- disabled text, status-bar text
     LINE      -- borders and hairlines
@@ -58,6 +58,12 @@ INK_FAINT = "#93A0A7"
 LINE = "#D3D9DC"
 INK_ON_ACCENT = "#FFFFFF"
 OK = "#2E7D51"
+# Blocking-problem surface (calibration_panel's problem label). Tokens, not
+# literals in the stylesheet, so the docstring's promise that a palette swap
+# only touches this block stays true.
+PROBLEM_BG = "#FBF3F2"
+PROBLEM_LINE = "#E4C3BF"
+PROBLEM_INK = "#8A2F26"
 
 _MONO_FONTS = '"Consolas", "Cascadia Mono", "Courier New", monospace'
 _UI_FONTS = '"Segoe UI", "Helvetica Neue", Arial, sans-serif'
@@ -143,11 +149,14 @@ QGroupBox::title {{
     left: 3px;
     top: 1px;
     padding: 0 3px 0 0;
-    /* Muted, NOT the accent. Section titles are structure, and there are a
+    /* Muted, NOT the accent: section titles are structure, and there are a
        dozen of them -- colouring every one spends the accent on the frame
-       instead of on what the user should act on. The accent stays for the
-       primary action, focus, selection and the active tab. */
-    color: {INK_FAINT};
+       instead of on what the user should act on. INK_SOFT and not INK_FAINT,
+       though: INK_FAINT exists to make DISABLED things look disabled (2.2:1
+       on this ground), and using it here put every structural label in the
+       app below the WCAG AA floor. INK_SOFT is 4.9:1 -- still clearly
+       secondary, still readable. */
+    color: {INK_SOFT};
     font-weight: 700;
 }}
 
@@ -233,12 +242,17 @@ QTabBar::tab {{
 QTabBar::tab:selected {{ color: {INK}; border-bottom: 2px solid {ACCENT}; }}
 QTabBar::tab:hover {{ color: {INK}; }}
 
+QTableView {{ alternate-background-color: {PAPER}; }}
+QTableView::item:selected {{ background-color: {ACCENT_WASH}; color: {INK}; }}
+
 /* Inline header for a control group that no longer owns a titled card --
    see widgets/_util.section_label. Same weight as a QGroupBox title so a
    folded section still reads as a section. */
 QLabel#inlineSectionLabel {{
-    color: {INK_FAINT};
-    font-size: 7pt;
+    /* Same reasoning as QGroupBox::title above -- and these are the smallest
+       text in the app, so they can least afford low contrast. */
+    color: {INK_SOFT};
+    font-size: 7.5pt;
     font-weight: 600;
     letter-spacing: 1px;
 }}
@@ -264,16 +278,18 @@ QFrame#plotArea {{
     border: 1px solid {LINE};
     border-radius: 3px;
 }}
-QLabel#plotPlaceholder {{ color: {INK_FAINT}; }}
+/* Instructional, not decorative -- it tells a new user what to do next, so it
+   has to be readable rather than merely present. */
+QLabel#plotPlaceholder {{ color: {INK_SOFT}; }}
 
 /* A blocking problem the user has to act on -- readable and persistent,
    unlike the transient status bar it used to be squeezed into. */
 QLabel#problemLabel {{
-    background-color: #FBF3F2;
-    border: 1px solid #E4C3BF;
+    background-color: {PROBLEM_BG};
+    border: 1px solid {PROBLEM_LINE};
     border-radius: 3px;
     padding: 8px 10px;
-    color: #8A2F26;
+    color: {PROBLEM_INK};
 }}
 
 QProgressBar {{

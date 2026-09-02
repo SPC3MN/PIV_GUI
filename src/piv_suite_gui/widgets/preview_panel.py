@@ -43,7 +43,7 @@ from piv_suite.processing import pipeline
 from piv_suite.processing.postprocess import apply_calibration
 from piv_suite.processing.preprocess import apply_preprocess_pair
 
-from ._util import style_spin
+from ._util import ElidingLabel, style_spin
 
 
 def _average_results(results):
@@ -196,8 +196,12 @@ class PreviewPanel(QWidget):
         # checkbox -- an entire card of chrome for one control.
         status_row = QHBoxLayout()
         status_row.setSpacing(8)
-        self.status_label = QLabel("No preview yet.")
-        status_row.addWidget(self.status_label)
+        self.status_label = ElidingLabel("No preview yet.")
+        # The stretch goes to the STATUS LABEL, not to a bare spacer. An
+        # eliding label declares an Ignored width policy (that is how it agrees
+        # to shrink), so a spacer taking the slack instead leaves it at zero
+        # width and it elides away to nothing.
+        status_row.addWidget(self.status_label, 1)
 
         # Indeterminate ("busy") by default -- there's no meaningful
         # percentage for a single preview pair, just a running/not-running
@@ -211,7 +215,6 @@ class PreviewPanel(QWidget):
         self.progress_bar.setVisible(False)
         self.progress_bar.setFixedWidth(160)
         status_row.addWidget(self.progress_bar)
-        status_row.addStretch(1)
 
         # Starts disabled: it only makes sense once a preview result exists
         # to draw arrows on top of (see _on_preview_finished/_render, which
@@ -245,16 +248,6 @@ class PreviewPanel(QWidget):
         self.placeholder.setObjectName("plotPlaceholder")
         self.canvas_container.addWidget(self.placeholder)
         layout.addWidget(self.plot_area, stretch=1)
-
-    def _figsize_for_canvas(self):
-        """Figure size in inches matching the space actually available, so the
-        plot fills the panel instead of being letterboxed inside a fixed 7x6.
-        Falls back to a sane default before the widget has a real size (during
-        construction, or offscreen in tests)."""
-        dpi = 100.0
-        w = max(self.plot_area.width(), 320)
-        h = max(self.plot_area.height(), 240)
-        return (w / dpi, h / dpi)
 
     def _on_vectors_toggled(self, _checked):
         if self._last_result is not None:
@@ -333,6 +326,12 @@ class PreviewPanel(QWidget):
             self.placeholder = None
         self.canvas = FigureCanvasQTAgg(fig)
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # FigureCanvasQTAgg resizes the figure to match this widget, so a
+        # degenerate widget size makes a degenerate figure -- matplotlib's
+        # constrained layout then gives up with "axes sizes collapsed to zero"
+        # and the plot renders without its layout. Reachable whenever the
+        # canvas is laid out before it has a real size.
+        self.canvas.setMinimumSize(220, 165)
         self.canvas_container.addWidget(self.canvas)
 
     def _do_preview(self):
@@ -416,8 +415,31 @@ class PreviewPanel(QWidget):
 
     def _on_preview_failed(self, message):
         self._teardown_preview_thread()
+        self._clear_canvas("Preview failed. Fix the problem above and try again.")
         self.status_label.setText(f"Preview failed: {message}")
         self.previewed.emit(False)
+
+    def _clear_canvas(self, message):
+        """Drop any rendered field and show `message` in its place.
+
+        A failed preview used to leave the PREVIOUS pair's field on screen,
+        with only the status line saying otherwise -- so the plot showed one
+        pair while the controls described another, and toggling Vectors
+        re-rendered the stale result as if it were current."""
+        if self.canvas is not None:
+            old_fig = self.canvas.figure
+            self.canvas.setParent(None)
+            plt.close(old_fig)
+            self.canvas = None
+        self._last_result = None
+        self.show_vectors_check.setEnabled(False)
+        if self.placeholder is None:
+            self.placeholder = QLabel()
+            self.placeholder.setAlignment(Qt.AlignCenter)
+            self.placeholder.setObjectName("plotPlaceholder")
+            self.canvas_container.addWidget(self.placeholder)
+        self.placeholder.setText(message)
+        self.placeholder.setVisible(True)
 
     def _on_preview_finished(self, result):
         self._teardown_preview_thread()
@@ -434,7 +456,7 @@ class PreviewPanel(QWidget):
         cached _last_result, when only the Vectors toggle changed -- see
         _on_vectors_toggled). Runs on the GUI thread (matplotlib's Qt
         canvas requires it). Enables the Vectors checkbox -- it starts
-        disabled (see _build_plot_options_box) since there's nothing to
+        disabled (see the Vectors checkbox in the status row) since there's nothing to
         overlay vectors onto before a preview has actually rendered."""
         self.status_label.setText(
             f"Pair '{r['pair_id']}': {r['elapsed']:.3f}s, {r['n_valid']}/{r['n_total']} valid "
@@ -445,8 +467,7 @@ class PreviewPanel(QWidget):
         fig = make_preview_figure(
             "stereo" if r["kind"] == "stereo" else "planar",
             r["x"], r["y"], r["u"], r["v"], r["valid"], w=r.get("w"), units=r["units"],
-            title=f"Preview -- {r['pair_id']}", show_vectors=self.show_vectors_check.isChecked(),
-            figsize=self._figsize_for_canvas())
+            title=f"Preview -- {r['pair_id']}", show_vectors=self.show_vectors_check.isChecked())
         self._set_canvas(fig)
 
     def _compute_planar(self, project, preprocess, correlation, validation, post, calibration, index):

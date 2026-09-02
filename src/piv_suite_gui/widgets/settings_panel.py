@@ -40,6 +40,9 @@ from piv_suite.perf.autotune import recommended_workers
 
 from ._util import CollapsibleSection, fit_table_to_rows, style_spin
 
+#: The only correlation method this app supports -- see where it is displayed.
+CORRELATION_METHOD = "circular"
+
 
 class _PassesTable(QGroupBox):
     """Multi-pass window/overlap schedule editor -- an ordered (coarse to
@@ -163,11 +166,19 @@ class SettingsPanel(QWidget):
         adv_grid.addWidget(QLabel("Subpixel method:"), 0,0)
         adv_grid.addWidget(self.subpixel_combo, 0,1)
 
-        self.correlation_method_combo = QComboBox()
-        self.correlation_method_combo.addItems(["circular"])
-        self.correlation_method_combo.setToolTip("CPU backend only -- ignored on GPU.")
+        # A LABEL, not a one-item combo. Zero-padded ("linear") correlation was
+        # removed because it needs a normalization this app never applies and
+        # measured 4.665 px RMS at 14 px against circular's 0.059 -- which left
+        # a dropdown that could never change. An enabled control that cannot do
+        # anything is its own kind of dead control; stating the value is
+        # honest, and keeps it discoverable.
+        self.correlation_method_value = QLabel(CORRELATION_METHOD)
+        self.correlation_method_value.setToolTip(
+            "Circular (unpadded) FFT cross-correlation. Not a choice: openpiv's "
+            "zero-padded alternative needs a normalization this app does not "
+            "apply, and measures far worse at every displacement.")
         adv_grid.addWidget(QLabel("Correlation method:"), 1,0)
-        adv_grid.addWidget(self.correlation_method_combo, 1,1)
+        adv_grid.addWidget(self.correlation_method_value, 1,1)
 
         self.deformation_method_combo = QComboBox()
         self.deformation_method_combo.addItems(["symmetric", "second image"])
@@ -470,7 +481,7 @@ class SettingsPanel(QWidget):
         self.batch_size_spin.setEnabled(is_gpu and self.batch_size_check.isChecked())
         self.tile_margin_spin.setEnabled(is_gpu and self.tile_margin_check.isChecked())
 
-        for w in (self.correlation_method_combo, self.deformation_method_combo,
+        for w in (self.deformation_method_combo,
                   self.interpolation_order_spin, self.filter_method_combo):
             w.setEnabled(not is_gpu)
 
@@ -485,7 +496,7 @@ class SettingsPanel(QWidget):
         return CorrelationSettings(
             passes=self.passes_table.get_passes(),
             dt=self.dt_spin.value(),
-            correlation_method=self.correlation_method_combo.currentText(),
+            correlation_method=CORRELATION_METHOD,
             subpixel_method=self.subpixel_combo.currentText(),
             deformation_method=self.deformation_method_combo.currentText(),
             interpolation_order=self.interpolation_order_spin.value(),

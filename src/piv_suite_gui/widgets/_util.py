@@ -99,3 +99,35 @@ def section_label(text):
     label = QLabel(text.upper())
     label.setObjectName("inlineSectionLabel")
     return label
+
+
+class ElidingLabel(QLabel):
+    """A QLabel that shortens with an ellipsis instead of being cut off.
+
+    A plain QLabel clipped by its layout truncates mid-word with no ellipsis,
+    so the reader cannot tell text is missing -- the preview's status line lost
+    "...valid (range/residual rej" at the window's own minimum size. The full
+    text is always available as the tooltip.
+    """
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self._full_text = text
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+
+    def setText(self, text):
+        self._full_text = text or ""
+        self.setToolTip(self._full_text)
+        self._apply_elide()
+
+    def fullText(self):
+        return self._full_text
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_elide()
+
+    def _apply_elide(self):
+        metrics = self.fontMetrics()
+        super().setText(metrics.elidedText(self._full_text, Qt.ElideRight,
+                                           max(self.width() - 2, 24)))

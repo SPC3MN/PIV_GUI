@@ -316,7 +316,7 @@ def test_settings_panel_greys_out_inapplicable_backend_fields(qtbot):
 
     gpu_only = [sp.batch_size_check, sp.tiling_check, sp.n_tiles_y_spin,
                 sp.n_tiles_x_spin, sp.tile_margin_check]
-    cpu_only = [sp.correlation_method_combo, sp.deformation_method_combo,
+    cpu_only = [sp.deformation_method_combo,
                 sp.interpolation_order_spin, sp.filter_method_combo]
 
     # default backend is CPU -- GPU-only fields start disabled
@@ -1300,17 +1300,20 @@ def test_no_permanently_disabled_controls_are_shipped(qtbot):
             f"up or remove it")
 
 
-def test_correlation_method_does_not_offer_the_broken_linear_option(qtbot):
+def test_correlation_method_is_stated_not_offered_as_a_choice(qtbot):
     """openpiv's zero-padded 'linear' branch requires a normalization this app
     never applies (its own source says so), and measured 4.665 px RMS at 14 px
-    displacement against circular's 0.059 -- a 79x regression reachable from a
-    dropdown. It is removed rather than labelled."""
+    displacement against circular's 0.059 -- a 79x regression that used to be
+    reachable from a dropdown. With it gone there is only one valid value, so
+    the control states it rather than pretending to offer a choice."""
     window = MainWindow()
     qtbot.addWidget(window)
-    items = [window.settings_panel.correlation_method_combo.itemText(i)
-             for i in range(window.settings_panel.correlation_method_combo.count())]
-    assert "linear" not in items
-    assert items == ["circular"]
+    sp = window.settings_panel
+    assert not hasattr(sp, "correlation_method_combo")
+    assert sp.correlation_method_value.text() == "circular"
+    # ...and the emitted settings still carry it (this assertion previously
+    # disappeared with the "linear" test case, leaving the field uncovered).
+    assert sp.get_correlation_settings().correlation_method == "circular"
 
 
 def test_preview_plot_area_gets_the_spare_space(qtbot):
@@ -1352,3 +1355,29 @@ def test_a_blocking_calibration_failure_is_shown_where_it_can_be_acted_on(qtbot)
     panel.set_problem(None)
     assert not panel.problem_label.isVisibleTo(panel)
     assert panel.model_label.isVisibleTo(panel)
+
+
+def test_a_failed_preview_does_not_leave_the_previous_field_on_screen(qtbot):
+    """A stale plot is worse than no plot: it shows one pair while the controls
+    describe another, and toggling Vectors would re-render the stale result as
+    if it were current."""
+    import numpy as np
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    panel = window.preview_panel
+    x, y = np.meshgrid(np.arange(6.0), np.arange(5.0))
+    result = dict(kind="planar", pair_id="0000", x=x, y=y, u=x, v=y,
+                  w=None, valid=np.ones_like(x, dtype=bool), elapsed=1.0,
+                  n_valid=x.size, n_total=x.size, n_range=0, n_std=0,
+                  n_group=0, n_fov=x.size, units="m/s")
+    panel._render(result)
+    assert panel.canvas is not None
+    assert panel.show_vectors_check.isEnabled()
+
+    panel._on_preview_failed("boom")
+    assert panel.canvas is None                    # the stale field is gone
+    assert panel._last_result is None              # ...and cannot be re-rendered
+    assert not panel.show_vectors_check.isEnabled()
+    assert "failed" in panel.placeholder.text().lower()
+    assert "boom" in panel.status_label.fullText()

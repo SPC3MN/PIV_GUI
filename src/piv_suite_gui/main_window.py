@@ -13,7 +13,8 @@ import os
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QMainWindow, QScrollArea, QTabWidget, QVBoxLayout, QWidget,
+    QApplication, QHBoxLayout, QLabel, QMainWindow, QScrollArea, QTabWidget,
+    QVBoxLayout, QWidget,
 )
 
 from piv_suite import __version__
@@ -43,10 +44,25 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("PIV Testing")
-        self.resize(INITIAL_WINDOW_WIDTH, 900)
         # Below this the left rail's own controls start clipping.
         self.setMinimumSize(900, 620)
+        self.resize(*self._initial_size())
         self._build_ui()
+
+    def _initial_size(self):
+        """A default that fits the screen it opens on.
+
+        A fixed 1260x900 does not fit a 1366x768 laptop once the taskbar is
+        accounted for, so the window opened taller than the desktop. Clamp to
+        the available work area, leaving a small margin, and never go below the
+        window's own minimum."""
+        preferred_w, preferred_h = INITIAL_WINDOW_WIDTH, 900
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return preferred_w, preferred_h
+        available = screen.availableGeometry()
+        return (max(self.minimumWidth(), min(preferred_w, available.width() - 40)),
+                max(self.minimumHeight(), min(preferred_h, available.height() - 40)))
 
     def _build_ui(self):
         central = QWidget()

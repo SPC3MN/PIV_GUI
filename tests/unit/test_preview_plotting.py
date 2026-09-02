@@ -197,8 +197,11 @@ def test_a_circular_feature_stays_circular():
 
 
 def test_figure_size_follows_the_requested_canvas_shape():
-    """The preview fills a resizable widget, so the figure must take its shape
-    from the caller instead of a hard-coded 7x6."""
+    """figsize is honoured for callers that render the figure directly.
+
+    NOTE it does not drive the GUI: FigureCanvasQTAgg resets the figure to the
+    widget's size as soon as the canvas is laid out. The preview panel relies
+    on its layout stretch for sizing, not on this argument."""
     x, y, u, v, valid = _planar_field()
     fig = make_preview_figure("planar", x, y, u, v, valid, "t", figsize=(11.0, 4.0))
     assert tuple(fig.get_size_inches()) == pytest.approx((11.0, 4.0))

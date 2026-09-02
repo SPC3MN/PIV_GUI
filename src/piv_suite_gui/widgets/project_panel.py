@@ -197,6 +197,8 @@ class ProjectPanel(QWidget):
         # ---- pre-processing (applied to raw frames, before correlation --
         # for stereo, before dewarping too) ----
         prep_layout = QHBoxLayout()
+        prep_layout.setSpacing(6)
+        prep_layout.addWidget(section_label("Pre-processing"))
         self.min_max_check = QCheckBox("Min/max filter (L px):")
         self.min_max_check.setToolTip(
             "LaVision-style sliding min/max background removal + local "
@@ -253,13 +255,9 @@ class ProjectPanel(QWidget):
             "component). Auto-detected/extracted from the selected .set's own "
             "calibration; both cameras run through the ordinary planar PIV path and "
             "are combined afterward.")
-        dual_row = QHBoxLayout()
-        dual_row.addWidget(self.dual_camera_check)
         self.dual_camera_status_label = QLabel()
         self.dual_camera_status_label.setWordWrap(True)
         self.dual_camera_status_label.setVisible(False)
-        dual_row.addWidget(self.dual_camera_status_label, 1)
-        input_layout.addLayout(dual_row)
 
         backend_layout = QHBoxLayout()
         backend_layout.setSpacing(6)
@@ -287,6 +285,15 @@ class ProjectPanel(QWidget):
         mode_backend_row.addStretch(1)
 
         input_layout.addLayout(mode_backend_row)
+
+        # AFTER the Mode row, not before it: dual-camera is planar-only and is
+        # cleared and hidden when Stereo is selected, so a reader meets the
+        # control that governs it first.
+        dual_row = QHBoxLayout()
+        dual_row.addWidget(self.dual_camera_check)
+        dual_row.addWidget(self.dual_camera_status_label, 1)
+        input_layout.addLayout(dual_row)
+
         layout.addWidget(input_box)
 
         # ---- output ----

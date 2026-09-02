@@ -228,7 +228,6 @@ class CalibrationPanel(QWidget):
         # of zeros that looks like it matters.
         self.model_label = QLabel("Model: polynomial — decoded from the project, editable under Advanced")
         self.model_label.setWordWrap(True)
-        self.model_label.setWordWrap(True)
         cam_layout.addWidget(self.model_label)
 
         # A calibration that cannot be read is a BLOCKING condition -- the
@@ -247,16 +246,21 @@ class CalibrationPanel(QWidget):
         # so the 40-odd coefficient fields only matter for data that has no
         # DaVis calibration -- and presenting them by default made a rarely
         # used fallback the most prominent thing on the panel.
-        self.advanced = CollapsibleSection("Advanced — manual calibration")
-        cam_layout.addWidget(self.advanced)
+        # A PEER of the camera card, not a child of it. The drawer holds the
+        # world grid and the viewing-angle overrides as well as the coefficient
+        # forms, and neither of those is a camera mapping -- nesting them made
+        # the CAMERA CALIBRATION card's border run down the whole panel around
+        # sections that are not camera calibration.
+        self.advanced = CollapsibleSection("Advanced — calibration")
 
         cam_tabs = QTabWidget()
         self.cam0_form = _CameraMappingForm("cam0")
         self.cam1_form = _CameraMappingForm("cam1")
         cam_tabs.addTab(self.cam0_form, "cam0")
         cam_tabs.addTab(self.cam1_form, "cam1")
-        self.advanced.add_widget(cam_tabs)
         layout.addWidget(cam_box)
+        layout.addWidget(self.advanced)
+        self.advanced.add_widget(cam_tabs)
 
         geom_box = QGroupBox("WORLD GRID / DEWARP")
         geom_grid = QGridLayout(geom_box)
@@ -366,10 +370,18 @@ class CalibrationPanel(QWidget):
         return style_spin(s, width=SPIN_WIDTH)
 
     def set_problem(self, text):
-        """Show a blocking calibration problem, or clear it with None/""."""
+        """Show a blocking calibration problem, or clear it with None/"".
+
+        Opens the Advanced drawer alongside it. Every one of these messages
+        ends by telling the user to "enter calibration manually on the
+        Calibration panel" -- and manual entry is exactly what the drawer
+        hides, so leaving it shut points the user at a control they cannot
+        see. A remedy the reader cannot reach is not a remedy."""
         self.problem_label.setText(text or "")
         self.problem_label.setVisible(bool(text))
         self.model_label.setVisible(not text)
+        if text:
+            self.advanced.set_expanded(True)
 
     def get_settings(self) -> StereoSettings:
         return StereoSettings(
