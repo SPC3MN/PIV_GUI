@@ -307,6 +307,21 @@ against each other.
 
 ### Root cause found and fixed: inter-pass smoothing was never enabled (2026-08-29)
 
+> **SUPERSEDED (2026-09-01), read this first.** The section below concluded
+> `smoothn_p = 15.0`. That conclusion was an artifact of its own metric: it
+> scored agreement against DaVis's `.vc7`, which is itself a POST-DENOISED
+> field (`useDenoisingFilter=true, denoisingFilter=3,
+> anisotropicSmoothingKernelSize=25, anisotropicSmoothingStrength=3.5` in the
+> reference project's own `JobHistory.xml`). Smoothing this app's field
+> therefore raised agreement, and raised "density" as well, because a flatter
+> field stops tripping the local-median outlier test -- neither of which is
+> evidence of a better measurement. Re-measured against KNOWN ground truth
+> (synthetic particle images with prescribed displacement), `p=15.0` is
+> 1.5x-4.9x WORSE in RMS error on every field with real spatial structure and
+> better only on a uniform shift. The default is now `0.75`; see
+> `config.schema.ValidationSettings.smoothn_p`. Enabling `smoothn` at all was
+> right and stands. The numbers below are kept as a record of what was run.
+
 The residual gap left open by the deep dive above turned out to be
 explained by a real, previously-undiscovered default-configuration gap,
 not by anything wrong in the correlation/subpixel/per-pass-validation

@@ -68,11 +68,22 @@ Backend and mode are auto-detected from which keys are present.
 - `piv_suite/io/` -- `.set` DaVis project ingestion (`davis_set.py`,
   lvpyio-backed) and loose-folder ingestion (`loose_files.py`, supporting
   `.im7` plus generic TIFF/PNG labeled image pairs via `readers.py`).
-- `piv_suite/calibration/` -- DaVis polynomial camera mapping/dewarping
-  (`camera_mapping.py`), two-camera 3-component reconstruction
-  (`reconstruction.py`), and a stub for automated DaVis-calibration-report
-  parsing (`report_parser.py`, not yet implemented -- calibration is
-  entered manually via form fields for now).
+- `piv_suite/calibration/` -- both of DaVis's internal calibration models,
+  decoded exactly from a project's own `Calibration.xml`: the 3rd-order
+  polynomial mapping (`camera_mapping.py`) and the OpenCV pinhole one
+  (`pinhole.py`). Also two-camera 3-component reconstruction
+  (`reconstruction.py`) and a stub for parsing a printed DaVis calibration
+  report (`report_parser.py`, not implemented -- unnecessary for a real
+  `.set` project, which carries the calibration itself).
+
+  Stereo triangulation angles are DERIVED PER CORRELATION POINT from the
+  calibration (`stereo_view_angles`), not entered by hand and not a single
+  scalar per camera: the real viewing angle varies several degrees across a
+  stereo field of view, and collapsing it to one number measurably corrupts
+  the in-plane components. `StereoSettings.alpha1_deg`/`alpha2_deg`/
+  `beta1_deg`/`beta2_deg` remain as an override for a calibration that
+  genuinely cannot supply the geometry (a single calibrated Z-plane, or a
+  hand-entered mapping).
 - `piv_suite/engines/` -- the CPU (`cpu_engine.py`, plain openpiv-python)
   and GPU (`gpu_engine.py`, openpiv-python-gpu + tiling for large frames)
   backends behind a shared `PIVEngine` Protocol (`base.py`), selected via
