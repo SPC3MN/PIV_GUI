@@ -10,6 +10,7 @@ import os
 
 from .schema import (
     CalibrationSettings, CameraMappingSettings, CorrelationSettings,
+    PinholeMappingSettings,
     DualPlanarCameraSettings, DualPlanarSettings, OutputSettings, PassSettings,
     PerformanceSettings, PostProcessSettings, PreprocessSettings, ProjectConfig,
     ProjectSettings, RangeFilterSettings, StereoSettings, ValidationSettings,
@@ -68,6 +69,13 @@ def from_dict(d: dict) -> ProjectConfig:
     for key in ("cam0_mapping", "cam1_mapping", "cam0_mapping_plane2", "cam1_mapping_plane2"):
         if key in stereo_d and stereo_d[key] is not None:
             stereo_d[key] = CameraMappingSettings(**_filtered_kwargs(CameraMappingSettings, stereo_d[key]))
+    # DaVis's other calibration model. Absent from any project saved before it
+    # was supported, which is exactly why this is a separate loop with its own
+    # `key in` guard rather than an entry in the one above.
+    for key in ("cam0_pinhole", "cam1_pinhole"):
+        if key in stereo_d and stereo_d[key] is not None:
+            stereo_d[key] = PinholeMappingSettings(
+                **_filtered_kwargs(PinholeMappingSettings, stereo_d[key]))
     if "world_shape" in stereo_d and stereo_d["world_shape"] is not None:
         stereo_d["world_shape"] = tuple(stereo_d["world_shape"])
     stereo = StereoSettings(**_filtered_kwargs(StereoSettings, stereo_d))

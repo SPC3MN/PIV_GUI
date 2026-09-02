@@ -209,6 +209,60 @@ def test_correction_field_polynomial_snapshot_is_refused_not_silently_used():
             os.path.join(_REAL_PROJECT, "Initial_Test", "Self2_04.set"))
 
 
+def test_project_round_trips_pinhole_settings_through_json(tmp_path):
+    """A pinhole project must survive save_project/load_project.
+
+    Two real bugs this covers, both invisible until a project is actually
+    saved: PinholeMappingSettings must come back as a dataclass rather than
+    the bare dict json gives us (config.io.from_dict rebuilds only the
+    polynomial keys unless told otherwise), and every field must be a plain
+    float -- the extrinsics come off a numpy array, and json has no encoder
+    for np.float64, so saving raised."""
+    from piv_suite.config import io as config_io
+    from piv_suite.config.schema import ProjectConfig
+
+    cfg = ProjectConfig()
+    cfg.project.mode = "stereo"
+    cfg.stereo.cam0_pinhole = PinholeMappingSettings(
+        f_px=27719.5, cx=3066.4, cy=1221.1, k1=0.173, k2=-10.64,
+        p1=6.2e-4, p2=2.4e-3, rx=3.125, ry=-0.788, rz=0.0147,
+        tx=np.float64(-60.49), ty=np.float64(12.35), tz=np.float64(1693.11),
+        scale_x=0.0609, scale_y=-0.0609, offset_x=-162.42, offset_y=86.40,
+        name="cam0", raw_width=4096, raw_height=3008, fit_rms=0.4259)
+    cfg.stereo.world_shape = (3027, 5628)
+
+    path = str(tmp_path / "p.pivproj")
+    config_io.save_project(path, cfg)
+    back = config_io.load_project(path)
+
+    assert isinstance(back.stereo.cam0_pinhole, PinholeMappingSettings)
+    assert back.stereo.cam0_pinhole.f_px == pytest.approx(27719.5)
+    assert back.stereo.cam0_pinhole.tx == pytest.approx(-60.49)
+    assert back.stereo.cam1_pinhole is None
+    assert back.stereo.world_shape == (3027, 5628)
+
+
+def test_loading_a_project_saved_before_pinhole_existed_still_works(tmp_path):
+    """An older .pivproj has no cam*_pinhole keys at all -- it must load and
+    keep working on the polynomial path."""
+    import json
+
+    from piv_suite.config import io as config_io
+
+    legacy = {
+        "project": {"mode": "stereo"},
+        "stereo": {"cam0_mapping": {"x0": 1.0, "x_span": 2.0},
+                   "world_shape": [100, 200], "beta1_deg": 0.0},
+    }
+    path = str(tmp_path / "legacy.pivproj")
+    with open(path, "w") as fh:
+        json.dump(legacy, fh)
+    back = config_io.load_project(path)
+    assert back.stereo.cam0_pinhole is None
+    assert back.stereo.cam0_mapping.x0 == pytest.approx(1.0)
+    assert back.stereo.world_shape == (100, 200)
+
+
 def test_stereo_view_angles_negates_beta_but_not_alpha():
     """The engine's `v` is row-down while world Y is y-up (the canvas Y scale
     is negative), so beta must be negated to share reconstruct_stereo's frame;

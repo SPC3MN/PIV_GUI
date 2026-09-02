@@ -854,11 +854,14 @@ def _pinhole_stereo_settings_from_calibration_xml(calibration_xml, snapshot_dir,
 
     def to_settings(cam, rx_ry_rz):
         rx, ry, rz = rx_ry_rz
+        # float(), not the numpy scalars cam.T carries: ProjectConfig is
+        # serialized with json.dump (config.io.save_project), and json has no
+        # encoder for np.float64 -- saving a project would raise.
         return PinholeMappingSettings(
-            f_px=cam.f_px, cx=cam.cx, cy=cam.cy,
-            k1=cam.k1, k2=cam.k2, p1=cam.p1, p2=cam.p2,
-            rx=rx, ry=ry, rz=rz,
-            tx=cam.T[0], ty=cam.T[1], tz=cam.T[2],
+            f_px=float(cam.f_px), cx=float(cam.cx), cy=float(cam.cy),
+            k1=float(cam.k1), k2=float(cam.k2), p1=float(cam.p1), p2=float(cam.p2),
+            rx=float(rx), ry=float(ry), rz=float(rz),
+            tx=float(cam.T[0]), ty=float(cam.T[1]), tz=float(cam.T[2]),
             scale_x=cam.scale_x, scale_y=cam.scale_y,
             offset_x=cam.offset_x, offset_y=cam.offset_y,
             name=cam.name, raw_width=cam.raw_width, raw_height=cam.raw_height,
