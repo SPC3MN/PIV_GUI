@@ -72,9 +72,7 @@ Backend and mode are auto-detected from which keys are present.
   decoded exactly from a project's own `Calibration.xml`: the 3rd-order
   polynomial mapping (`camera_mapping.py`) and the OpenCV pinhole one
   (`pinhole.py`). Also two-camera 3-component reconstruction
-  (`reconstruction.py`) and a stub for parsing a printed DaVis calibration
-  report (`report_parser.py`, not implemented -- unnecessary for a real
-  `.set` project, which carries the calibration itself).
+  (`reconstruction.py`).
 
   Stereo triangulation angles are DERIVED PER CORRELATION POINT from the
   calibration (`stereo_view_angles`), not entered by hand and not a single
@@ -99,8 +97,13 @@ Backend and mode are auto-detected from which keys are present.
 - `piv_suite/plotting/` -- quiver plotting (planar/stereo) and in-memory
   preview figures for the GUI.
 - `piv_suite/cli/` -- the unified command-line entry point.
-- `piv_suite_gui/` -- the PySide6 desktop GUI (project/settings/
-  calibration/preview/run panels, a `QThread` batch worker).
+- `piv_suite_gui/` -- the PySide6 desktop GUI. The left rail carries the
+  everyday flow top to bottom (Source, Output, Camera calibration, then the
+  processing settings); the right side is Preview and Run. Settings that are
+  real but rarely touched -- hand-entered calibration coefficients, algorithm
+  method pickers, GPU tiling, per-pass internals, worker count -- sit in
+  collapsed "Advanced" disclosures rather than competing with the flow.
+  Batch runs happen on a `QThread` worker.
 
 ## Known limitations
 
@@ -108,8 +111,6 @@ Backend and mode are auto-detected from which keys are present.
   `iter_stereo_from_loose_files`) is still `.im7`/lvpyio-only, inherited
   unchanged from the original repos -- unlike planar loose ingestion, it
   hasn't been generalized to generic image formats yet.
-- `calibration/report_parser.py` (parsing a DaVis calibration report
-  directly instead of manual coefficient entry) is a stub.
 - Per-vector correlation-plane uncertainty quantification is explicitly
   out of scope for this program -- post-processing here means
   displacement-range/residual and standard-deviation-based spurious-
