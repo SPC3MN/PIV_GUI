@@ -149,6 +149,61 @@ def test_select_calibration_snapshot_falls_back_to_current_when_none_precede(tmp
     assert "current" in label
 
 
+def test_select_calibration_snapshot_prefers_current_when_it_is_the_newest_preceding(tmp_path):
+    """The CURRENT calibration is a candidate, not just a fallback -- History
+    holds the SUPERSEDED ones, so the current calibration is simply the most
+    recent. Treating it as a fallback only meant that after any recalibration,
+    every later recording silently used the PREVIOUS calibration.
+
+    Real case this reproduces: the reference project's dt_opt was recorded at
+    18:08 with the current calibration (written 17:51 by a self-calibration
+    run), but the newest History entry is 16:10. The two differ materially --
+    corrected canvas 5628x3027 vs 5443x3014 -- and DaVis's own output for that
+    recording is on the 5628x3027 grid."""
+    root = tmp_path / "Project"
+    current = root / "Properties" / "Calibration"
+    current.mkdir(parents=True)
+    (current / "Calibration.xml").write_text(
+        '<Calibration Version="2" CalibrationIdentifier="260323_175144"/>')
+    history = root / "Properties" / "Calibration History"
+    _write_history_snapshot(history, "Calibration_260323_161023")
+
+    recording_dt = datetime(2026, 3, 23, 18, 8, 41)
+    snap_dir, label = _select_calibration_snapshot(str(root), recording_dt)
+    assert snap_dir == str(current)
+    assert "260323_175144" in label
+
+
+def test_select_calibration_snapshot_still_prefers_history_when_current_postdates(tmp_path):
+    """The converse must keep working: a recalibration made AFTER a recording
+    must not be applied to it."""
+    root = tmp_path / "Project"
+    current = root / "Properties" / "Calibration"
+    current.mkdir(parents=True)
+    (current / "Calibration.xml").write_text(
+        '<Calibration Version="2" CalibrationIdentifier="260801_120000"/>')
+    history = root / "Properties" / "Calibration History"
+    expected = _write_history_snapshot(history, "Calibration_260715_171237")
+
+    snap_dir, label = _select_calibration_snapshot(str(root), datetime(2026, 7, 21, 22, 9, 52))
+    assert snap_dir == str(expected)
+    assert label == "Calibration_260715_171237"
+
+
+def test_select_calibration_snapshot_tolerates_current_without_identifier(tmp_path):
+    """An older Calibration.xml with no CalibrationIdentifier must not break
+    selection -- it simply isn't datable, so History still decides."""
+    root = tmp_path / "Project"
+    current = root / "Properties" / "Calibration"
+    current.mkdir(parents=True)
+    (current / "Calibration.xml").write_text('<Calibration Version="2"/>')
+    history = root / "Properties" / "Calibration History"
+    expected = _write_history_snapshot(history, "Calibration_260715_171237")
+
+    snap_dir, _ = _select_calibration_snapshot(str(root), datetime(2026, 7, 21, 22, 9, 52))
+    assert snap_dir == str(expected)
+
+
 def test_select_calibration_snapshot_falls_back_to_current_when_recording_dt_unknown(tmp_path):
     root = tmp_path / "Project"
     (root / "Properties" / "Calibration").mkdir(parents=True)

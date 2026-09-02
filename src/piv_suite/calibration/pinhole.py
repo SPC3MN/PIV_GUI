@@ -172,7 +172,16 @@ class PinholeCameraMapping:
         X, Y = self.canvas_to_world_mm(xp, yp)
         C = self.centre
         vx, vy, vz = C[0] - X, C[1] - Y, C[2] - self.z_mm
-        return np.degrees(np.arctan2(vx, vz)), np.degrees(np.arctan2(vy, vz))
+        # arctan of the RATIO, not arctan2 of the pair -- matching
+        # camera_mapping.CameraMapping.view_angles, so both calibration models
+        # report the same quantity. reconstruct_stereo only ever uses
+        # tan(alpha), which is pi-periodic, so the two differ by nothing that
+        # reaches the reconstruction; but arctan2 additionally encodes which
+        # way along the ray the camera lies, and reports 180-deg-wrapped
+        # angles for a rig whose cameras sit on the -Z side of the light
+        # sheet. That is a real configuration, and a reported "180 deg
+        # viewing angle" would be nonsense in the GUI and in diagnostics.
+        return np.degrees(np.arctan(vx / vz)), np.degrees(np.arctan(vy / vz))
 
     def at_z(self, z_mm):
         """A copy of this mapping evaluated at a different laser-sheet Z."""

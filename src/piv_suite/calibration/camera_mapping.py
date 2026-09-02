@@ -381,4 +381,28 @@ def stereo_view_angles(cam0, cam1, x, y, overrides=None):
 
     a1, b1 = resolve(cam0, alpha1_ov, beta1_ov)
     a2, b2 = resolve(cam1, alpha2_ov, beta2_ov)
-    return tuple(np.deg2rad(a) for a in (a1, a2, b1, b2))
+
+    # BETA IS NEGATED; ALPHA IS NOT. This is a real frame mismatch in the
+    # engine's output, not a modelling choice:
+    #
+    #   * view_angles works in WORLD mm. The canvas Y scale is NEGATIVE
+    #     (LinearScaleY FactorMmPerPixel = -0.0609 on real DaVis data), so
+    #     world Y increases UPWARD while the canvas row index increases
+    #     downward. Beta therefore comes back in a y-up frame.
+    #   * The engine's `v`, however, is row-DOWN. openpiv's own
+    #     tools.transform_coordinates flips y and negates v TOGETHER -- they
+    #     are a matched pair -- but engines.cpu_engine.init_cpu_processor
+    #     flips y (`y = frame_shape[0]*scaling_par - y`) without negating v.
+    #     So `v` stays in openpiv's original image-based, row-down frame.
+    #   * reconstruct_stereo solves dy = dY - dZ*tan(beta), which requires dy
+    #     and beta to share one frame. They don't, until this negation.
+    #
+    # X has no such flip (the canvas X scale is positive and `u` is
+    # column-right), so alpha is already consistent and must NOT be negated.
+    #
+    # Measured on a real pair, per-pixel alpha with beta negated vs not:
+    # mean|diff| U,V 23.41 -> 22.21 mm/s and corr(V) 0.9234 -> 0.9379. It also
+    # beats a scalar beta (22.53 / 0.9331), which is what made the bug visible
+    # -- a physically-correct per-pixel field that performs WORSE than a
+    # constant is a frame error, not a modelling error.
+    return tuple(np.deg2rad(a) for a in (a1, a2, -b1, -b2))

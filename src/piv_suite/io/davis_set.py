@@ -335,6 +335,20 @@ def _select_calibration_snapshot(project_root, recording_dt):
     blindly using "current" would silently pick up a later recalibration
     rather than the one actually valid at acquisition time.
 
+    THE CURRENT CALIBRATION IS A CANDIDATE TOO, not just a fallback. It
+    carries its own acquisition timestamp in Calibration.xml's
+    CalibrationIdentifier attribute (same YYMMDD_HHMMSS form as a History
+    folder name), and it is simply the most recent calibration -- History
+    holds the SUPERSEDED ones. Treating it only as a fallback meant that
+    after any recalibration, every subsequent recording silently used the
+    PREVIOUS calibration. Confirmed on the reference project: dt_opt was
+    recorded at 18:08 with the current calibration (260323_175144, written
+    17:51 by a self-calibration run), but the newest History entry is
+    260323_161023 -- and the two differ materially, including a corrected
+    canvas of 5628x3027 versus the older 5443x3014. DaVis's own output for
+    that recording is on the 5628x3027 grid, i.e. DaVis used the current
+    calibration and this function did not.
+
     Returns (snapshot_dir, label) -- snapshot_dir contains Calibration.xml
     plus camera1/, camera2/ mark-data subfolders, either way."""
     current_dir = os.path.join(project_root, "Properties", "Calibration")
@@ -348,15 +362,48 @@ def _select_calibration_snapshot(project_root, recording_dt):
                 yy, mm, dd, hh, mi, ss = (int(g) for g in m.groups())
                 candidates.append((datetime(2000 + yy, mm, dd, hh, mi, ss), snap_dir, name))
 
+    current_dt = _read_calibration_identifier_dt(
+        os.path.join(current_dir, "Calibration.xml"))
+    if current_dt is not None:
+        candidates.append((current_dt, current_dir, "current (%s)"
+                           % current_dt.strftime("%y%m%d_%H%M%S")))
+
     if recording_dt is None:
         return current_dir, "current (recording timestamp unknown)"
     recording_naive = recording_dt.replace(tzinfo=None)
     preceding = [c for c in candidates if c[0] <= recording_naive]
     if not preceding:
-        return current_dir, "current (no History snapshot precedes the recording)"
+        # Every known calibration postdates the recording. The current one is
+        # still the best available answer, but say so -- it is not the
+        # calibration that was in effect at acquisition time.
+        return current_dir, "current (no calibration precedes the recording)"
     preceding.sort(key=lambda c: c[0])
     _, snap_dir, name = preceding[-1]
     return snap_dir, name
+
+
+def _read_calibration_identifier_dt(calibration_xml_path):
+    """The datetime encoded in Calibration.xml's own CalibrationIdentifier
+    ("260323_175144" -> 2026-03-23 17:51:44), or None if absent/unparseable.
+
+    This is how the CURRENT calibration states when it was made; History
+    folders encode the same thing in their names instead."""
+    if not os.path.isfile(calibration_xml_path):
+        return None
+    try:
+        ident = ET.parse(calibration_xml_path).getroot().attrib.get("CalibrationIdentifier")
+    except ET.ParseError:
+        return None
+    if not ident:
+        return None
+    m = re.fullmatch(r"(\d{2})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})", ident.strip())
+    if not m:
+        return None
+    yy, mm, dd, hh, mi, ss = (int(g) for g in m.groups())
+    try:
+        return datetime(2000 + yy, mm, dd, hh, mi, ss)
+    except ValueError:
+        return None
 
 
 def _read_pixel_per_mm(calibration_xml_path, camera_identifier):
