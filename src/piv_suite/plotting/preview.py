@@ -66,7 +66,7 @@ def _auto_range(masked_data):
 
 
 def make_preview_figure(mode, x, y, u, v, valid, title, w=None, units="m/s",
-                         show_vectors=False, quiver_scale=1000):
+                         show_vectors=False, quiver_scale=1000, figsize=(7, 6)):
     """Build (not save/show) a matplotlib Figure showing ONE velocity-
     magnitude field for the GUI to embed directly. mode is "planar" or
     "stereo" -- used only to label the axes (stereo's grid is DaVis's
@@ -81,14 +81,27 @@ def make_preview_figure(mode, x, y, u, v, valid, title, w=None, units="m/s",
 
     show_vectors overlays a quiver of the in-plane (u, v) direction on
     top of the magnitude contour -- always ON TOP, never an alternative
-    to it (there's no contour-off mode any more; magnitude IS the plot)."""
+    to it (there's no contour-off mode any more; magnitude IS the plot).
+
+    figsize is in inches and should be derived from the widget the figure
+    will be shown in (see preview_panel._figsize_for_canvas), so the plot
+    fills the space available instead of being letterboxed inside a
+    hard-coded one. It only sets the CANVAS shape -- the data's own shape
+    is preserved independently by the equal aspect below."""
     magnitude = np.sqrt(u**2 + v**2) if w is None else np.sqrt(u**2 + v**2 + w**2)
     masked = np.ma.masked_where(~valid, magnitude)
     vmin, vmax = _auto_range(masked)
     levels = np.linspace(vmin, vmax, 21)
 
-    fig, ax = plt.subplots(figsize=(7, 6))
+    fig, ax = plt.subplots(figsize=figsize)
     cs = ax.contourf(x, y, masked, levels=levels, cmap=MAGNITUDE_CMAP, extend="both")
+    # EQUAL ASPECT, and it is not cosmetic. A PIV field is a picture of a
+    # physical region, so the preview's whole job -- "does this flow look
+    # right" -- depends on shape being preserved. matplotlib's default
+    # aspect="auto" stretches the data to fill whatever axes box it is given:
+    # measured at 1.881x on a real 379x704 stereo grid, i.e. a round vortex
+    # rendered 88% taller than wide, which reads as a physically wrong flow.
+    ax.set_aspect("equal")
     fig.colorbar(cs, ax=ax, label=f"|V| ({units})")
     if show_vectors:
         ax.quiver(x[valid], y[valid], u[valid], v[valid], color="black", scale=quiver_scale)

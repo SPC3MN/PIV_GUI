@@ -18,10 +18,10 @@ draw it on top of (see show_vectors_check below).
 """
 
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel, QProgressBar,
+    QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QProgressBar,
     QPushButton, QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
 )
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, Qt, QThread, Signal
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 import matplotlib.pyplot as plt
 import numpy as np
@@ -147,8 +147,11 @@ class PreviewPanel(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
 
         pair_row = QHBoxLayout()
+        pair_row.setSpacing(6)
         pair_row.addWidget(QLabel("Pair:"))
         self.pair_combo = QComboBox()
         self.pair_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -172,14 +175,31 @@ class PreviewPanel(QWidget):
         self.refresh_pairs_btn.setToolTip("Re-scan the current input settings and repopulate the Pair list above.")
         self.refresh_pairs_btn.clicked.connect(self._refresh_pairs)
         pair_row.addWidget(self.refresh_pairs_btn)
-        layout.addLayout(pair_row)
 
-        self.preview_btn = QPushButton("Preview selected pair(s)")
+        # Preview lives IN the toolbar rather than as its own full-width row.
+        # It used to span the panel, which cost a whole band of vertical space
+        # for one button -- space the plot needs far more than the button does.
+        self.preview_btn = QPushButton("Preview")
         self.preview_btn.setProperty("accent", True)
         self.preview_btn.clicked.connect(self._do_preview)
-        layout.addWidget(self.preview_btn)
+        pair_row.addWidget(self.preview_btn)
+        layout.addLayout(pair_row)
 
         # Indeterminate ("busy") mode by default -- there's no meaningful
+        # percentage for a single preview pair, just a running/not-running
+        # state. Switched to a determinate 0..count range for a multi-pair
+        # range preview instead (see _do_preview/_on_preview_progress),
+        # since there IS real per-pair progress to report there. Hidden
+        # except while a preview is in progress.
+        # Status and the one remaining plot option share a single thin band.
+        # "Plot options" used to be a whole titled group box around one
+        # checkbox -- an entire card of chrome for one control.
+        status_row = QHBoxLayout()
+        status_row.setSpacing(8)
+        self.status_label = QLabel("No preview yet.")
+        status_row.addWidget(self.status_label)
+
+        # Indeterminate ("busy") by default -- there's no meaningful
         # percentage for a single preview pair, just a running/not-running
         # state. Switched to a determinate 0..count range for a multi-pair
         # range preview instead (see _do_preview/_on_preview_progress),
@@ -189,28 +209,14 @@ class PreviewPanel(QWidget):
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setVisible(False)
-        layout.addWidget(self.progress_bar)
+        self.progress_bar.setFixedWidth(160)
+        status_row.addWidget(self.progress_bar)
+        status_row.addStretch(1)
 
-        self.status_label = QLabel("No preview yet.")
-        layout.addWidget(self.status_label)
-
-        layout.addWidget(self._build_plot_options_box())
-
-        self.canvas_container = QVBoxLayout()
-        layout.addLayout(self.canvas_container)
-        layout.addStretch(1)
-
-    def _build_plot_options_box(self):
-        # Contours (the magnitude field itself), auto-range, and colormap
-        # are no longer configurable -- see plotting.preview's docstring
-        # for why a single magnitude plot doesn't need any of that UI any
-        # more. Vectors is the one option left, and it starts disabled: it
-        # only makes sense once a preview result actually exists to draw
-        # arrows on top of (see _on_preview_finished/_render, which enable
-        # it, and _on_vectors_toggled, which re-renders the cached result
-        # rather than recomputing).
-        box = QGroupBox("PLOT OPTIONS")
-        box_layout = QHBoxLayout(box)
+        # Starts disabled: it only makes sense once a preview result exists
+        # to draw arrows on top of (see _on_preview_finished/_render, which
+        # enable it, and _on_vectors_toggled, which re-renders the cached
+        # result rather than recomputing).
         self.show_vectors_check = QCheckBox("Vectors")
         self.show_vectors_check.setChecked(False)
         self.show_vectors_check.setEnabled(False)
@@ -221,9 +227,34 @@ class PreviewPanel(QWidget):
             "same already-computed result, it doesn't re-run the PIV "
             "computation.")
         self.show_vectors_check.toggled.connect(self._on_vectors_toggled)
-        box_layout.addWidget(self.show_vectors_check)
-        box_layout.addStretch(1)
-        return box
+        status_row.addWidget(self.show_vectors_check)
+        layout.addLayout(status_row)
+
+        # THE PLOT GETS THE REMAINING SPACE. This used to be an unstretched
+        # layout followed by addStretch(1), so the spare height went to the
+        # stretch and the canvas was pinned to its minimum size hint --
+        # leaving most of the window empty grey while the plot sat small in
+        # the corner.
+        self.plot_area = QFrame()
+        self.plot_area.setObjectName("plotArea")
+        self.plot_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.canvas_container = QVBoxLayout(self.plot_area)
+        self.canvas_container.setContentsMargins(0, 0, 0, 0)
+        self.placeholder = QLabel("Select a pair and press Preview to render a velocity field.")
+        self.placeholder.setAlignment(Qt.AlignCenter)
+        self.placeholder.setObjectName("plotPlaceholder")
+        self.canvas_container.addWidget(self.placeholder)
+        layout.addWidget(self.plot_area, stretch=1)
+
+    def _figsize_for_canvas(self):
+        """Figure size in inches matching the space actually available, so the
+        plot fills the panel instead of being letterboxed inside a fixed 7x6.
+        Falls back to a sane default before the widget has a real size (during
+        construction, or offscreen in tests)."""
+        dpi = 100.0
+        w = max(self.plot_area.width(), 320)
+        h = max(self.plot_area.height(), 240)
+        return (w / dpi, h / dpi)
 
     def _on_vectors_toggled(self, _checked):
         if self._last_result is not None:
@@ -297,7 +328,11 @@ class PreviewPanel(QWidget):
             old_fig = self.canvas.figure
             self.canvas.setParent(None)
             plt.close(old_fig)
+        if self.placeholder is not None:
+            self.placeholder.setParent(None)
+            self.placeholder = None
         self.canvas = FigureCanvasQTAgg(fig)
+        self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.canvas_container.addWidget(self.canvas)
 
     def _do_preview(self):
@@ -410,7 +445,8 @@ class PreviewPanel(QWidget):
         fig = make_preview_figure(
             "stereo" if r["kind"] == "stereo" else "planar",
             r["x"], r["y"], r["u"], r["v"], r["valid"], w=r.get("w"), units=r["units"],
-            title=f"Preview -- {r['pair_id']}", show_vectors=self.show_vectors_check.isChecked())
+            title=f"Preview -- {r['pair_id']}", show_vectors=self.show_vectors_check.isChecked(),
+            figsize=self._figsize_for_canvas())
         self._set_canvas(fig)
 
     def _compute_planar(self, project, preprocess, correlation, validation, post, calibration, index):

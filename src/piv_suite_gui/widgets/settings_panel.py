@@ -152,7 +152,7 @@ class SettingsPanel(QWidget):
         corr_grid.addWidget(self.subpixel_combo, 1, 1)
 
         self.correlation_method_combo = QComboBox()
-        self.correlation_method_combo.addItems(["circular", "linear"])
+        self.correlation_method_combo.addItems(["circular"])
         self.correlation_method_combo.setToolTip("CPU backend only -- ignored on GPU.")
         corr_grid.addWidget(QLabel("Correlation method:"), 2, 0)
         corr_grid.addWidget(self.correlation_method_combo, 2, 1)

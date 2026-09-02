@@ -1,10 +1,9 @@
 """Stereo calibration panel: per-camera DaVis polynomial coefficients,
 world/dewarp geometry, and the two cameras' viewing angles used by
-reconstruct_stereo. Manual coefficient entry (structured form fields
-instead of hand-edited JSON) is the near-term workflow -- the "Load from
-DaVis report..." button is wired to calibration.report_parser's stub
-interface but stays disabled until that parser is implemented (see
-calibration/report_parser.py).
+reconstruct_stereo. A real DaVis .set project carries its own calibration and decodes exactly
+(io.davis_set.read_stereo_calibration_from_set), so the manual coefficient
+form here is an ESCAPE HATCH for data that has none -- not the normal path.
+It lives behind an "Advanced" disclosure for that reason.
 
 cam0/cam1 forms are tabs rather than side-by-side, to keep the panel's
 width fixed instead of doubling it. Labels use the same symbols as
@@ -19,11 +18,10 @@ angle parameters.
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QCheckBox, QDoubleSpinBox, QGridLayout, QGroupBox, QHeaderView, QHBoxLayout,
-    QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox, QTableWidget,
+    QLabel, QLineEdit, QPushButton, QSpinBox, QTableWidget,
     QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from piv_suite.calibration.report_parser import parse_davis_calibration_report
 from piv_suite.config.schema import CameraMappingSettings, StereoSettings
 
 from ._util import fit_table_to_rows, style_spin
@@ -112,16 +110,6 @@ class _CameraMappingForm(QWidget):
             top.addWidget(w, i, 1)
         layout.addLayout(top)
 
-        load_btn = QPushButton("Load from DaVis report...")
-        load_btn.setEnabled(False)
-        load_btn.setToolTip(
-            "Not implemented yet -- calibration.report_parser is a stub. "
-            "Enter coefficients manually below, read off DaVis's own "
-            "calibration report panel."
-        )
-        load_btn.clicked.connect(self._load_from_report)
-        layout.addWidget(load_btn)
-
         self.coef_table = QTableWidget(len(COEF_KEYS), 2)
         self.coef_table.setHorizontalHeaderLabels(["dx(s,t)", "dy(s,t)"])
         self.coef_table.setToolTip(
@@ -144,12 +132,6 @@ class _CameraMappingForm(QWidget):
         s.setRange(-1e7, 1e7)
         s.setValue(default)
         return style_spin(s, width=SPIN_WIDTH)
-
-    def _load_from_report(self):
-        try:
-            parse_davis_calibration_report("")
-        except NotImplementedError as e:
-            QMessageBox.information(self, "Not implemented", str(e))
 
     def _clear_davis_autoload(self):
         self._plane2 = None

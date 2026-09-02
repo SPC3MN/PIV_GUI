@@ -566,7 +566,6 @@ def test_correlation_settings_exposes_all_calculation_fields(qtbot):
     qtbot.addWidget(window)
     sp = window.settings_panel
 
-    sp.correlation_method_combo.setCurrentText("linear")
     sp.deformation_method_combo.setCurrentText("second image")
     sp.interpolation_order_spin.setValue(1)
     sp.batch_size_check.setChecked(True)
@@ -575,7 +574,6 @@ def test_correlation_settings_exposes_all_calculation_fields(qtbot):
     sp.tile_margin_spin.setValue(200)
 
     settings = sp.get_correlation_settings()
-    assert settings.correlation_method == "linear"
     assert settings.deformation_method == "second image"
     assert settings.interpolation_order == 1
     assert settings.batch_size == 128
@@ -1255,3 +1253,59 @@ def test_calibration_labels_use_math_notation(qtbot):
     from PySide6.QtWidgets import QLabel
     angle_labels = {lbl.text() for lbl in cp.findChildren(QLabel)} & {"α₁:", "α₂:", "β₁:", "β₂:"}
     assert angle_labels == {"α₁:", "α₂:", "β₁:", "β₂:"}
+
+
+# ---- the control surface itself ----
+
+def test_no_permanently_disabled_controls_are_shipped(qtbot):
+    """Every disabled control must be disabled because of STATE, not because
+    it was never implemented. A button that can never be pressed is worse than
+    a missing one: it advertises a capability the app does not have.
+
+    The specific offender this replaces was "Load from DaVis report...", wired
+    to a stub that only ever raised NotImplementedError."""
+    from PySide6.QtWidgets import QPushButton
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    # Buttons legitimately gated on state: Run needs a successful Preview
+    # first, Cancel needs a batch in flight. Matched as a substring because
+    # some carry a glyph prefix.
+    state_gated = ("Run", "Cancel", "Preview")
+    for btn in window.findChildren(QPushButton):
+        text = btn.text()
+        if btn.isEnabled() or any(g in text for g in state_gated):
+            continue
+        raise AssertionError(
+            f"{text!r} ships disabled and is not state-gated -- either wire it "
+            f"up or remove it")
+
+
+def test_correlation_method_does_not_offer_the_broken_linear_option(qtbot):
+    """openpiv's zero-padded 'linear' branch requires a normalization this app
+    never applies (its own source says so), and measured 4.665 px RMS at 14 px
+    displacement against circular's 0.059 -- a 79x regression reachable from a
+    dropdown. It is removed rather than labelled."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    items = [window.settings_panel.correlation_method_combo.itemText(i)
+             for i in range(window.settings_panel.correlation_method_combo.count())]
+    assert "linear" not in items
+    assert items == ["circular"]
+
+
+def test_preview_plot_area_gets_the_spare_space(qtbot):
+    """The plot is the point of the Preview tab, so it must take the leftover
+    height. It previously sat in an unstretched layout followed by
+    addStretch(1), which handed all spare space to the stretch and pinned the
+    canvas to its minimum -- most of the window rendered as empty grey."""
+    from PySide6.QtWidgets import QSizePolicy
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    panel = window.preview_panel
+    layout = panel.layout()
+    idx = layout.indexOf(panel.plot_area)
+    assert idx >= 0
+    assert layout.stretch(idx) == 1
+    assert panel.plot_area.sizePolicy().verticalPolicy() == QSizePolicy.Expanding
