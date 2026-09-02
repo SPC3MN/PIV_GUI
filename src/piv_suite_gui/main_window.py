@@ -241,13 +241,14 @@ class MainWindow(QMainWindow):
                 messages.append(f"Couldn't auto-extract stereo calibration: {e}")
             else:
                 self.calibration_panel.set_settings(stereo)
-                angle_note = (f", β₁={stereo.beta1_deg:.1f}° β₂={stereo.beta2_deg:.1f}° estimated "
-                               f"from calibration -- α₁/α₂ (the primary triangulation angle) "
-                               f"must be entered manually on the Calibration panel before "
-                               f"processing (see its tooltip)"
-                               if stereo.cam0_mapping_plane2 is not None else "")
-                messages.append(f"Stereo calibration auto-extracted from DaVis .set "
-                                 f"({stereo.cam0_mapping.name}){angle_note}.")
+                model = ("PinholeOpenCV" if stereo.cam0_pinhole is not None
+                         else "Polynomial3rdOrder")
+                name = (stereo.cam0_pinhole.name if stereo.cam0_pinhole is not None
+                        else stereo.cam0_mapping.name)
+                messages.append(
+                    f"Stereo calibration auto-extracted from DaVis .set ({model}: {name}) "
+                    f"-- triangulation angles are derived per pixel from it, nothing to "
+                    f"enter manually.")
         else:
             is_dual = False
             try:

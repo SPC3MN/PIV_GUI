@@ -1,0 +1,9 @@
+is_gpu_available() failed at: import cupy / openpiv_gpu
+sys.executable: C:\Users\Alec\Desktop\GUI_Audit\repo\.venv\Scripts\python.exe
+frozen: False
+
+Traceback (most recent call last):
+  File "C:\Users\Alec\Desktop\GUI_Audit\repo\src\piv_suite\engines\gpu_engine.py", line 56, in is_gpu_available
+    import cupy  # noqa: F401
+    ^^^^^^^^^^^
+ModuleNotFoundError: No module named 'cupy'

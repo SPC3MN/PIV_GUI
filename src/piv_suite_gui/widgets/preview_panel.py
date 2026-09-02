@@ -26,7 +26,8 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 import matplotlib.pyplot as plt
 import numpy as np
 
-from piv_suite.calibration.camera_mapping import build_camera_mapping, stereo_fov_valid
+from piv_suite.calibration.camera_mapping import (build_stereo_cameras, stereo_angles_for,
+                                                  stereo_fov_valid)
 from piv_suite.config.legacy import to_cpu_settings, to_gpu_settings
 from piv_suite.engines.registry import get_engine_factory
 from piv_suite.io.davis_set import (
@@ -462,10 +463,7 @@ class PreviewPanel(QWidget):
 
     def _compute_stereo(self, project, preprocess, correlation, validation, post, calibration,
                          stereo_settings, index):
-        cam0 = build_camera_mapping(stereo_settings.cam0_mapping, stereo_settings.cam0_mapping_plane2,
-                                    stereo_settings.sheet_z_mm)
-        cam1 = build_camera_mapping(stereo_settings.cam1_mapping, stereo_settings.cam1_mapping_plane2,
-                                    stereo_settings.sheet_z_mm)
+        cam0, cam1 = build_stereo_cameras(stereo_settings)
 
         pair_id, fa0, fb0, fa1, fb1 = self._first_pair_stereo(project, index)
         fa0, fb0 = apply_preprocess_pair(fa0, fb0, preprocess)
@@ -490,15 +488,12 @@ class PreviewPanel(QWidget):
         # top/bottom edge gets checked against the wrong row.
         y_row_down = stereo_settings.world_shape[0] - y
         fov_valid = stereo_fov_valid(cam0, cam1, x, y_row_down)
-        if stereo_settings.alpha1_deg is None or stereo_settings.alpha2_deg is None:
-            raise ValueError(
-                "Stereo triangulation angle not set -- check 'Angles measured' on the "
-                "Calibration panel and enter a real measured value (e.g. DaVis's own "
-                "Calibration report's \"Min/Max angle 1-2\", split symmetrically) before "
-                "previewing. No calibration-file-only estimate is trustworthy enough to "
-                "auto-fill this (see StereoSettings.alpha1_deg's own comment).")
-        angles = (np.deg2rad(stereo_settings.alpha1_deg), np.deg2rad(stereo_settings.alpha2_deg),
-                  np.deg2rad(stereo_settings.beta1_deg), np.deg2rad(stereo_settings.beta2_deg))
+        # Per-pixel triangulation angles, derived from this project's own
+        # calibration on the same grid stereo_fov_valid just used. A single
+        # global angle per camera measurably corrupts U and V (see
+        # config.schema.StereoSettings.alpha1_deg); StereoSettings' scalar
+        # fields survive only as an explicit override.
+        angles = stereo_angles_for(stereo_settings, cam0, cam1, x, y_row_down)
         # process_stereo_pair validates the COMBINED/triangulated field
         # once (not each camera's raw 2D field independently, then
         # intersected) -- see its own docstring for why: on real data,

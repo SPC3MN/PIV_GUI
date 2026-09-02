@@ -291,22 +291,23 @@ class CalibrationPanel(QWidget):
         # calibration's higher-order/finite-standoff terms). Gated behind
         # this checkbox (unchecked = not yet entered = None, mirroring
         # sheet_z_mm_check's own pattern just above) rather than shown as
-        # some numeric placeholder that looks like a real answer -- get_
-        # settings()/set_settings() below refuse to silently invent a
-        # value, and every processing entry point refuses to run while
-        # unchecked.
-        self.alpha_measured_check = QCheckBox("Angles measured (required):")
-        self.alpha_measured_check.setToolTip(
-            "Real stereo triangulation angle for camera 0/1 (deg), used by reconstruct_stereo "
-            "to solve for U/V/W. NOT auto-derived from calibration data -- io.davis_set."
-            "_estimate_stereo_angles' 2-plane linear-parallax model was found to be measurably "
-            "wrong for a real (finite-standoff) camera rig, and there's no general fix derivable "
-            "from a calibration file alone. Enter a real measured value instead -- e.g. DaVis's "
-            "own Calibration report's \"Min/Max angle 1-2\", split symmetrically (α₁=+half, "
-            "α₂=-half), or your own rig measurement. Processing refuses to run until this is "
-            "checked.")
-        self.alpha_measured_check.toggled.connect(
-            lambda c: (self.alpha1_spin.setEnabled(c), self.alpha2_spin.setEnabled(c)))
+        # some numeric placeholder that looks like a real answer.
+        self.alpha_override_check = QCheckBox("Override derived angles:")
+        self.alpha_override_check.setToolTip(
+            "Leave UNCHECKED (the default). The stereo triangulation angles are derived "
+            "PER PIXEL from this project's own calibration, exactly, at every correlation "
+            "point -- calibration.camera_mapping.stereo_view_angles. That is strictly better "
+            "than any single number you can type here: the real viewing angle varies several "
+            "degrees across a stereo field of view (8.4°/8.8° on the reference rig), "
+            "and collapsing it to one value per camera puts ~13% of W into U at the field "
+            "edges and ~7% into V at top/bottom.\n\n"
+            "Check this ONLY for a calibration that genuinely cannot supply the geometry -- "
+            "a single calibrated Z-plane, or a manual/marks-fit mapping. Then enter a real "
+            "measured value, e.g. DaVis's own Calibration report's \"Min/Max angle 1-2\", "
+            "split symmetrically.")
+        self.alpha_override_check.toggled.connect(
+            lambda c: [w.setEnabled(c) for w in (self.alpha1_spin, self.alpha2_spin,
+                                                 self.beta1_spin, self.beta2_spin)])
         self.alpha1_spin = self._angle_spin(44.765)
         self.alpha1_spin.setToolTip("Camera 0's in-plane viewing angle (deg) relative to the world Z-axis. See the checkbox's tooltip above.")
         self.alpha1_spin.setEnabled(False)
@@ -314,10 +315,12 @@ class CalibrationPanel(QWidget):
         self.alpha2_spin.setToolTip("Camera 1's in-plane viewing angle (deg) relative to the world Z-axis. See the checkbox's tooltip above.")
         self.alpha2_spin.setEnabled(False)
         self.beta1_spin = self._angle_spin(0.0)
-        self.beta1_spin.setToolTip("Camera 0's out-of-plane viewing angle (deg), used by reconstruct_stereo to solve for U/V/W. Auto-derived from the calibration's own two Z-planes (io.davis_set._estimate_stereo_angles) -- edit freely if you know the real angle.")
+        self.beta1_spin.setToolTip("Camera 0's out-of-plane viewing angle (deg). Derived per pixel from the calibration unless the override above is checked.")
+        self.beta1_spin.setEnabled(False)
         self.beta2_spin = self._angle_spin(0.0)
-        self.beta2_spin.setToolTip("Camera 1's out-of-plane viewing angle (deg), used by reconstruct_stereo to solve for U/V/W. Auto-derived -- see β₁'s tooltip.")
-        angle_grid.addWidget(self.alpha_measured_check, 0, 0)
+        self.beta2_spin.setToolTip("Camera 1's out-of-plane viewing angle (deg). See β₁'s tooltip.")
+        self.beta2_spin.setEnabled(False)
+        angle_grid.addWidget(self.alpha_override_check, 0, 0)
         for i, (label, w) in enumerate([
             ("α₁:", self.alpha1_spin), ("α₂:", self.alpha2_spin),
         ], start=1):
@@ -347,9 +350,11 @@ class CalibrationPanel(QWidget):
             world_shape=(self.world_h_spin.value(), self.world_w_spin.value()),
             world_scale_px_per_mm=self.world_scale_spin.value(),
             dewarp_order=self.dewarp_order_spin.value(),
-            alpha1_deg=self.alpha1_spin.value() if self.alpha_measured_check.isChecked() else None,
-            alpha2_deg=self.alpha2_spin.value() if self.alpha_measured_check.isChecked() else None,
-            beta1_deg=self.beta1_spin.value(), beta2_deg=self.beta2_spin.value(),
+            # Unchecked -> all four None -> derived per pixel downstream.
+            alpha1_deg=self.alpha1_spin.value() if self.alpha_override_check.isChecked() else None,
+            alpha2_deg=self.alpha2_spin.value() if self.alpha_override_check.isChecked() else None,
+            beta1_deg=self.beta1_spin.value() if self.alpha_override_check.isChecked() else None,
+            beta2_deg=self.beta2_spin.value() if self.alpha_override_check.isChecked() else None,
             sheet_z_mm=self.sheet_z_mm_spin.value() if self.sheet_z_mm_check.isChecked() else None,
         )
 
@@ -364,25 +369,19 @@ class CalibrationPanel(QWidget):
             self.world_h_spin.setValue(settings.world_shape[0])
             self.world_w_spin.setValue(settings.world_shape[1])
         self.world_scale_spin.setValue(settings.world_scale_px_per_mm)
-        # beta1/beta2: davis_set.read_stereo_calibration_from_set derives
-        # these from the real calibration mapping itself (see its own
-        # _estimate_stereo_angles docstring) -- still just a starting
-        # point, same "always overwrite, user can edit afterward"
-        # convention as every other auto-extracted field here, not locked/
-        # read-only.
-        self.beta1_spin.setValue(settings.beta1_deg)
-        self.beta2_spin.setValue(settings.beta2_deg)
-        # alpha1/alpha2: REQUIRED, no auto-derive any more (see the
-        # checkbox's own tooltip) -- checked/populated only if this
-        # settings object already carries a real measured value (e.g.
-        # loaded from a previously-saved project); otherwise left
-        # unchecked/disabled, same "not yet entered" state a brand new
-        # project starts in.
-        has_alpha = settings.alpha1_deg is not None and settings.alpha2_deg is not None
-        self.alpha_measured_check.setChecked(has_alpha)
-        if has_alpha:
+        # All four angles are an OPTIONAL OVERRIDE now. A freshly-extracted
+        # calibration leaves them None (derived per pixel downstream), so the
+        # override box goes unchecked; a project saved with real measured
+        # values re-loads them and stays checked.
+        has_override = settings.alpha1_deg is not None and settings.alpha2_deg is not None
+        self.alpha_override_check.setChecked(has_override)
+        if has_override:
             self.alpha1_spin.setValue(settings.alpha1_deg)
             self.alpha2_spin.setValue(settings.alpha2_deg)
+            if settings.beta1_deg is not None:
+                self.beta1_spin.setValue(settings.beta1_deg)
+            if settings.beta2_deg is not None:
+                self.beta2_spin.setValue(settings.beta2_deg)
         self.sheet_z_mm_check.setChecked(settings.sheet_z_mm is not None)
         if settings.sheet_z_mm is not None:
             self.sheet_z_mm_spin.setValue(settings.sheet_z_mm)

@@ -62,10 +62,11 @@ from datetime import datetime
 import numpy as np
 import pytest
 
-from piv_suite.calibration.camera_mapping import COEF_KEYS, CameraMapping
+from piv_suite.calibration.camera_mapping import (COEF_KEYS, CameraMapping, build_camera_mapping,
+                                                  stereo_view_angles)
 from piv_suite.config.schema import CameraMappingSettings
 from piv_suite.io.davis_set import (
-    _derive_world_shape, _estimate_stereo_angles, _exact_camera_mapping_from_calibration_xml,
+    _derive_world_shape, _exact_camera_mapping_from_calibration_xml,
     _files_are_identical, _find_calibration_project_root, _fit_camera_mapping_planes,
     _POLY3_COEF_SUFFIXES, _read_pixel_per_mm, _read_set_time, _select_calibration_snapshot,
     read_stereo_calibration_from_set,
@@ -458,79 +459,86 @@ def test_exact_camera_mapping_returns_none_for_missing_camera(tmp_path):
     assert _exact_camera_mapping_from_calibration_xml(str(xml_path), "2") is None
 
 
-# ---- _estimate_stereo_angles: synthetic, exact-angle recovery ----
+# ---- per-pixel view angles (replaces the deleted _estimate_stereo_angles) ----
+#
+# The tests that used to live here were CIRCULAR: they built synthetic
+# calibration data with the exact linear formula _estimate_stereo_angles then
+# inverted, with every higher-order coefficient zero, so they asserted only
+# that the function inverts its own assumption. They passed for the whole life
+# of a function that was ~10 degrees wrong on every real rig it ever saw.
+#
+# The replacement is deliberately NOT self-consistent in that way: it builds a
+# real perspective viewing ray, projects it onto two Z-planes, and checks the
+# recovered angle -- so a model error has somewhere to show up.
 
-def _planes_with_known_angle(angle_deg, dz_mm=1.0, px_per_mm=1.0):
-    """Two CameraMappingSettings ("planes" of ONE camera) whose world_to_
-    raw x-shift between them, at ANY sampled (X,Y) point (constant dx_coefs
-    only -- no s/t dependence, so the estimate is exact, not merely
-    averaged-to-approximately-correct), corresponds EXACTLY to angle_deg
-    under _estimate_stereo_angles' own sign convention (dx = dX -
-    dZ*tan(alpha) -- see that function's docstring): d_raw_mm = -tan
-    (angle_deg)*dz_mm, achieved here via each plane's constant ("1") dx_
-    coef term alone, everything else zero."""
-    # world_to_raw_x = xp - dx_coefs["1"] (constant-only poly), so
-    # rx1-rx2 = -dx_coefs["1"] for plane2's coefs=0 -- the coefficient
-    # itself must be the NEGATION of the target (rx1-rx2)/px_per_mm value
-    # (matches _estimate_stereo_angles' own -atan2(...) sign convention;
-    # confirmed against the real Calibration.xml-driven end-to-end test
-    # below, which does NOT pre-negate its own coefficient and recovers
-    # its target angle correctly).
+
+def _planes_from_viewing_ray(alpha_deg, beta_deg, z_a, z_b, px_per_mm, span=4000.0):
+    """Two CameraMappingSettings for ONE camera whose two calibrated Z-planes
+    are consistent with a real viewing ray at (alpha_deg, beta_deg).
+
+    A point at world (X, Y) on plane A and the SAME sensor pixel on plane B
+    are separated, in world mm, by (tan(alpha), tan(beta)) * (z_b - z_a).
+    Expressed as canvas pixels that is a constant offset between the two
+    planes' mappings, which is what the constant ("1") coefficient encodes.
+    """
     zero = {k: 0.0 for k in COEF_KEYS}
-    d_raw_mm = np.tan(np.radians(angle_deg)) * dz_mm
-    c1 = {**zero, "1": d_raw_mm}  # plane1's world_to_raw_x = xp - d_raw_mm
-    c2 = dict(zero)               # plane2's world_to_raw_x = xp
-    plane1 = CameraMappingSettings(x0=0.0, x_span=100.0, y0=0.0, y_span=100.0,
-                                    dx_coefs=c1, dy_coefs=zero, z_mm=dz_mm)
-    plane2 = CameraMappingSettings(x0=0.0, x_span=100.0, y0=0.0, y_span=100.0,
-                                    dx_coefs=c2, dy_coefs=zero, z_mm=0.0)
-    return [plane1, plane2], px_per_mm
+    dz = z_b - z_a
+    dx_px = np.tan(np.radians(alpha_deg)) * dz * px_per_mm
+    dy_px = np.tan(np.radians(beta_deg)) * dz * px_per_mm
+    plane_a = CameraMappingSettings(x0=0.0, x_span=span, y0=0.0, y_span=span,
+                                    dx_coefs=dict(zero), dy_coefs=dict(zero), z_mm=z_a)
+    plane_b = CameraMappingSettings(x0=0.0, x_span=span, y0=0.0, y_span=span,
+                                    dx_coefs={**zero, "1": dx_px},
+                                    dy_coefs={**zero, "1": dy_px}, z_mm=z_b)
+    return plane_a, plane_b
 
 
-def test_estimate_stereo_angles_recovers_known_alpha_exactly():
-    planes, px_per_mm = _planes_with_known_angle(30.0)
-    alpha1, alpha2, beta1, beta2 = _estimate_stereo_angles(
-        planes, planes, px_per_mm, world_shape=(100, 100), n_samples=5)
-    assert alpha1 == pytest.approx(30.0, abs=1e-9)
-    assert alpha2 == pytest.approx(30.0, abs=1e-9)
-    assert beta1 == pytest.approx(0.0, abs=1e-9)
-    assert beta2 == pytest.approx(0.0, abs=1e-9)
+@pytest.mark.parametrize("alpha_deg,beta_deg", [(45.0, 0.0), (-44.1, 2.5), (30.0, -1.25)])
+def test_view_angles_recovers_a_real_viewing_ray(alpha_deg, beta_deg):
+    ppm = 16.424011381674053
+    plane_a, plane_b = _planes_from_viewing_ray(alpha_deg, beta_deg, 1.0, -2.0, ppm)
+    cam = build_camera_mapping(plane_a, plane_b, sheet_z_mm=-0.5, px_per_mm=ppm)
+    x, y = np.meshgrid(np.linspace(0, 3000, 5), np.linspace(0, 2000, 5))
+    alpha, beta = cam.view_angles(x, y)
+    assert alpha == pytest.approx(alpha_deg, abs=1e-6)
+    assert beta == pytest.approx(beta_deg, abs=1e-6)
 
 
-def test_estimate_stereo_angles_recovers_known_negative_alpha_exactly():
-    planes, px_per_mm = _planes_with_known_angle(-35.78)
-    alpha1, _alpha2, _beta1, _beta2 = _estimate_stereo_angles(
-        planes, planes, px_per_mm, world_shape=(100, 100), n_samples=5)
-    assert alpha1 == pytest.approx(-35.78, abs=1e-9)
-
-
-def test_estimate_stereo_angles_returns_zeros_for_single_plane():
+def test_view_angles_raises_without_two_planes():
+    """A single-plane (or marks-fit) mapping has no parallax to recover a
+    viewing direction from -- it must say so rather than invent an angle."""
     zero = {k: 0.0 for k in COEF_KEYS}
-    one_plane = [CameraMappingSettings(x0=0.0, x_span=100.0, y0=0.0, y_span=100.0,
-                                        dx_coefs=zero, dy_coefs=zero, z_mm=1.0)]
-    result = _estimate_stereo_angles(one_plane, one_plane, 1.0, world_shape=(100, 100))
-    assert result == (0.0, 0.0, 0.0, 0.0)
+    one = CameraMappingSettings(x0=0.0, x_span=100.0, y0=0.0, y_span=100.0,
+                                dx_coefs=zero, dy_coefs=zero, z_mm=1.0)
+    cam = build_camera_mapping(one)
+    with pytest.raises(ValueError, match="two calibrated Z-planes"):
+        cam.view_angles(np.zeros((3, 3)), np.zeros((3, 3)))
 
 
-def test_read_stereo_calibration_from_set_populates_angles_when_two_planes(tmp_path):
-    """End-to-end: read_stereo_calibration_from_set's own returned
-    StereoSettings carries a beta estimate when the calibration has two
-    Z-planes with a real angular difference between them -- not just
-    _estimate_stereo_angles in isolation. alpha1_deg/alpha2_deg are
-    DELIBERATELY left None even though _estimate_stereo_angles computes a
-    value for them internally -- that estimate was confirmed measurably
-    wrong against a real rig (see StereoSettings.alpha1_deg's own
-    comment), so this function no longer auto-applies it; the primary
-    triangulation angle is now a required, manually-entered field."""
+def test_stereo_view_angles_honours_explicit_overrides():
+    ppm = 16.0
+    a0, b0 = _planes_from_viewing_ray(-44.0, 0.0, 1.0, -2.0, ppm)
+    a1, b1 = _planes_from_viewing_ray(45.0, 0.0, 1.0, -2.0, ppm)
+    cam0 = build_camera_mapping(a0, b0, sheet_z_mm=-0.5, px_per_mm=ppm)
+    cam1 = build_camera_mapping(a1, b1, sheet_z_mm=-0.5, px_per_mm=ppm)
+    x, y = np.meshgrid(np.linspace(0, 1000, 4), np.linspace(0, 800, 4))
+    # No override -> derived per pixel.
+    alpha1, alpha2, _, _ = stereo_view_angles(cam0, cam1, x, y)
+    assert np.degrees(alpha1) == pytest.approx(-44.0, abs=1e-6)
+    assert np.degrees(alpha2) == pytest.approx(45.0, abs=1e-6)
+    # An explicit value replaces the derived field entirely.
+    alpha1, alpha2, _, _ = stereo_view_angles(cam0, cam1, x, y, (10.0, None, None, None))
+    assert np.degrees(alpha1) == pytest.approx(10.0, abs=1e-9)
+    assert np.degrees(alpha2) == pytest.approx(45.0, abs=1e-6)
+
+
+def test_read_stereo_calibration_leaves_all_angles_none(tmp_path):
+    """read_stereo_calibration_from_set must NOT bake a scalar angle into
+    StereoSettings: all four are derived per pixel downstream, and a value
+    here would silently override that with a worse global approximation."""
     zero = {k: 0.0 for k in COEF_KEYS}
     ppm = 18.0
-    # _estimate_stereo_angles divides the raw dx_coefs["1"] (RAW PIXEL
-    # units, matching what a real a_o coefficient is in Calibration.xml)
-    # by px_per_mm before comparing to dz (mm) -- so the coefficient
-    # itself must be pre-scaled by ppm to land on a known target angle,
-    # not just -tan(angle)*dz directly (that would be correct only if
-    # px_per_mm==1, which the real pipeline never has).
-    a_o = np.tan(np.radians(20.0)) * ppm  # plane1 z=1, plane2 z=0, dz=1
+    a_o = np.tan(np.radians(20.0)) * ppm
     a1 = {**zero, "1": a_o}
     root = tmp_path / "Project"
     cal_dir = root / "Properties" / "Calibration"
@@ -546,7 +554,8 @@ def test_read_stereo_calibration_from_set_populates_angles_when_two_planes(tmp_p
     result = read_stereo_calibration_from_set(str(recording))
     assert result.alpha1_deg is None
     assert result.alpha2_deg is None
-    assert result.beta1_deg == pytest.approx(0.0, abs=1e-9)
+    assert result.beta1_deg is None
+    assert result.beta2_deg is None
 
 
 # ---- full pipeline, synthetic exact-decode happy path (Calibration.xml

@@ -702,23 +702,41 @@ def read_stereo_calibration_from_set(set_path, multiset_index=0):
             f"wider field, not an angled stereo pair. Use Planar mode with 'Dual "
             f"camera (SideBySide)' checked instead of Stereo mode for this project.")
 
+    pinhole = _pinhole_stereo_settings_from_calibration_xml(
+        calibration_xml, snapshot_dir, snapshot_label)
+    if pinhole is not None:
+        return pinhole
+
     cam0_exact = _exact_camera_mapping_from_calibration_xml(
         calibration_xml, "1", name_prefix=f"cam0 (DaVis {snapshot_label})")
     cam1_exact = _exact_camera_mapping_from_calibration_xml(
         calibration_xml, "2", name_prefix=f"cam1 (DaVis {snapshot_label})")
     if cam0_exact is None or cam1_exact is None:
         raise NotImplementedError(
-            f"Calibration snapshot '{snapshot_label}' ({snapshot_dir}) isn't a "
-            f"'Polynomial3rdOrder' DaVis calibration for both cameras (or is "
-            f"missing plane data) -- exact stereo dewarp coefficient extraction "
-            f"only supports that calibration Type (verified against real "
-            f"MarkPositionTable.xml ground truth to 0.3-0.7px RMS). DaVis's "
-            f"other internal calibration model, 'PinholeOpenCV', was attempted "
-            f"but not successfully decoded to exact precision (see this "
-            f"function's docstring) -- a least-squares fit from calibration "
-            f"marks exists in this module (_fit_camera_mapping_planes) but "
-            f"isn't exact, so it isn't used here automatically. Enter "
-            f"calibration manually on the Calibration panel.")
+            f"Calibration snapshot '{snapshot_label}' ({snapshot_dir}) is neither a "
+            f"'Polynomial3rdOrder' nor a 'PinholeOpenCV' DaVis calibration for both "
+            f"cameras (or is missing plane data) -- those are the two models this app "
+            f"decodes exactly. A least-squares fit from calibration marks exists in "
+            f"this module (_fit_camera_mapping_planes) but isn't exact, so it isn't "
+            f"used here automatically. Enter calibration manually on the Calibration "
+            f"panel.")
+
+    # A self-calibration CORRECTION FIELD makes the stored polynomial only a
+    # BASE LAYER: the true mapping is polynomial + correction, and decoding
+    # the base alone is silently wrong (measured 16-32 px on this project's
+    # own snapshots) with nothing in the file marking it. Refuse rather than
+    # hand back a plausible-looking mapping that is tens of pixels out --
+    # every downstream vector would be wrong with no signal anywhere.
+    if os.path.isdir(os.path.join(snapshot_dir, "Correction field")):
+        raise NotImplementedError(
+            f"Calibration snapshot '{snapshot_label}' ({snapshot_dir}) is a "
+            f"'Polynomial3rdOrder' calibration with a self-calibration CORRECTION "
+            f"FIELD ('Correction field\\' is present). The stored polynomial is only "
+            f"the base layer -- DaVis applies the correction field on top of it, and "
+            f"this app does not read that yet, so decoding the polynomial alone would "
+            f"be silently wrong (measured 16-32 px on real snapshots). Use a "
+            f"calibration snapshot without a correction field, or enter calibration "
+            f"manually on the Calibration panel.")
 
     cam0_planes, px_per_mm_0, corrected_wh_0 = cam0_exact
     cam1_planes, px_per_mm_1, corrected_wh_1 = cam1_exact
@@ -733,20 +751,15 @@ def read_stereo_calibration_from_set(set_path, multiset_index=0):
     world_shape = (int(np.ceil(max(corrected_wh_0[1], corrected_wh_1[1]))),
                    int(np.ceil(max(corrected_wh_0[0], corrected_wh_1[0]))))
 
-    # alpha1_deg/alpha2_deg (the primary triangulation angle) are
-    # DELIBERATELY NOT taken from _estimate_stereo_angles any more --
-    # confirmed measurably wrong against a real rig (see StereoSettings.
-    # alpha1_deg's own comment for the full story), and there's no general
-    # calibration-file-only fix for it. Left None (required, no default) so
-    # every processing entry point refuses to run until a real measured
-    # value is entered. beta1_deg/beta2_deg use the same estimator (just
-    # projected onto the other axis) and share its theoretical flaw, but
-    # were never observed to be a meaningfully large real-data source of
-    # error (near-zero on the one rig this was validated against) -- kept
-    # as an auto-derived starting point, still freely editable.
-    _, _, beta1_deg, beta2_deg = _estimate_stereo_angles(
-        cam0_planes, cam1_planes, px_per_mm_0, world_shape)
-
+    # All four triangulation angles are left None: they are no longer a
+    # scalar at all. calibration.camera_mapping.stereo_view_angles derives
+    # them PER PIXEL from this same calibration at each processing entry
+    # point (CameraMapping.view_angles recovers the viewing ray from the two
+    # calibrated Z-planes). Setting any of them here would silently override
+    # that derivation with a worse global approximation -- see
+    # config.schema.StereoSettings.alpha1_deg's comment for the measured
+    # cost of a global angle, and for why the previous auto-derive
+    # (_estimate_stereo_angles, deleted) was ~10 deg wrong.
     return StereoSettings(
         cam0_mapping=cam0_planes[0],
         cam0_mapping_plane2=cam0_planes[1] if len(cam0_planes) > 1 else None,
@@ -754,92 +767,122 @@ def read_stereo_calibration_from_set(set_path, multiset_index=0):
         cam1_mapping_plane2=cam1_planes[1] if len(cam1_planes) > 1 else None,
         world_shape=world_shape,
         world_scale_px_per_mm=px_per_mm_0,
-        alpha1_deg=None, alpha2_deg=None, beta1_deg=beta1_deg, beta2_deg=beta2_deg,
+        alpha1_deg=None, alpha2_deg=None, beta1_deg=None, beta2_deg=None,
         sheet_z_mm=None,
     )
 
 
-def _estimate_stereo_angles(cam0_planes, cam1_planes, px_per_mm, world_shape, n_samples=15):
-    """Best-effort estimate of calibration.reconstruction.reconstruct_
-    stereo's required alpha1/alpha2/beta1/beta2 scalars (config.schema.
-    StereoSettings' own fields) DIRECTLY from the real calibration
-    mapping -- not a measured rig value, but not a blind GUI placeholder
-    either.
+def _pinhole_stereo_settings_from_calibration_xml(calibration_xml, snapshot_dir, snapshot_label):
+    """StereoSettings for a DaVis 'PinholeOpenCV' snapshot, or None if this
+    snapshot isn't that Type for both cameras.
 
-    WHY THIS IS POSSIBLE AT ALL: DaVis's own calibration performs a real
-    bundle adjustment against the calibration plate to determine each
-    camera's true 3D pose (confirmed directly: a project's own
-    CalibrationDialogModel.xml has a BundleConstraints/bundleExtrinsics
-    field -- "extrinsics" is the standard photogrammetry term for a
-    camera's position+orientation) -- but the RESULT gets baked straight
-    into the polynomial mapping's own coefficients, never exposed as a
-    separate angle anywhere Calibration.xml stores (confirmed via a
-    complete, unfiltered dump of every element/attribute in a real
-    Calibration.xml -- no rotation/angle field exists for the
-    Polynomial3rdOrder Type at all). DaVis's own stereo reconstruction
-    doesn't need a global scalar angle regardless -- it triangulates
-    from each camera's full per-pixel mapping directly. This app's own
-    reconstruct_stereo uses a deliberately simpler model (ONE constant
-    angle per camera, uniform across the whole image), so recovering
-    its required scalar means reading the angle back OUT of the
-    per-pixel mapping DaVis already computed.
+    Every decoded convention (and its validation against real
+    MarkPositionTable.xml ground truth) is documented in
+    calibration.pinhole's module docstring. Summary of why this is exact
+    where a previous attempt concluded it wasn't: FocalLengthPixel is
+    stored in MILLIMETRES, PrincipalPoint is the projection AND distortion
+    centre, OriginPixelPosition is a canvas quantity that plays no part in
+    the projection, the rotation is Euler zyx, and the distortion is plain
+    OpenCV Brown-Conrady on normalized coordinates. Used verbatim, those
+    reproduce DaVis's own declared <FitError RMS> to a relative difference
+    of ~1e-14 on this project's snapshots.
 
-    HOW: for a camera calibrated at two real Z-planes, a FIXED world
-    (X,Y) point's apparent raw-sensor position shifts between the two
-    planes purely due to that camera's own viewing angle (parallax) --
-    tan(angle) = (raw-pixel shift, in mm) / (real Z separation, in mm).
-    Averaged across many (X,Y) samples spanning the calibrated canvas
-    (not just the image center, which is noisier / less representative
-    of the WHOLE-image constant this app's model actually needs), this
-    gives a much more robust single-scalar estimate than any one point
-    alone -- confirmed directly: sampling a 15x15 grid gives alpha
-    estimates with ~0.15deg standard deviation across the whole field
-    (i.e. genuinely close to constant, validating this app's own
-    single-angle model as a good fit for real rig geometry) while beta
-    (the vertical/tilt component, expected near-zero for a standard
-    horizontal stereo rig) shows more relative scatter but stays small
-    in absolute terms.
+    Unlike the polynomial model there is no per-Z-plane coefficient set: a
+    pinhole camera is valid at any Z by construction, so sheet_z_mm is a
+    plain evaluation parameter rather than an interpolation weight, and no
+    second plane is needed."""
+    from ..calibration.pinhole import read_pinhole_camera
+    from ..config.schema import PinholeMappingSettings
 
-    Sign convention: NEGATED relative to the raw "how far did the raw
-    image point move" measurement -- reconstruct_stereo's own convention
-    is dx = dX - dZ*tan(alpha), the opposite sign. VALIDATED empirically,
-    not just derived: using exactly this formula (sign included) against
-    real DaVis stereo reference data (J:\\Final_Stereo) reached
-    corr(W)=0.955-0.983 across 3 independent real pairs -- strong
-    evidence this sign/magnitude convention is the one reconstruct_
-    stereo actually expects, not merely a plausible-looking number.
+    cams = []
+    for ident, label in (("1", "cam0"), ("2", "cam1")):
+        cam = read_pinhole_camera(calibration_xml, ident,
+                                  name=f"{label} (DaVis {snapshot_label}, PinholeOpenCV, exact)")
+        if cam is None:
+            return None
+        cams.append(cam)
+    cam0, cam1 = cams
 
-    Only usable when BOTH cameras have two calibrated Z-planes (the same
-    requirement calibration.camera_mapping.build_camera_mapping already
-    has for its own interpolation) -- returns all zeros otherwise
-    (matching StereoSettings' own pre-existing dataclass defaults) rather
-    than raising: this is a best-effort REFINEMENT layered on top of the
-    exact, independently-validated dewarp coefficients, never a hard
-    requirement the way those are, and a caller/GUI is always free to
-    override these with a real measured value on the Calibration panel."""
-    if len(cam0_planes) < 2 or len(cam1_planes) < 2:
-        return 0.0, 0.0, 0.0, 0.0
+    _warn_if_marks_disagree(snapshot_dir, snapshot_label, cams)
 
-    ny, nx = world_shape
-    xs = np.linspace(nx * 0.1, nx * 0.9, n_samples)
-    ys = np.linspace(ny * 0.1, ny * 0.9, n_samples)
-    x_grid, y_grid = np.meshgrid(xs, ys)
-    x_grid, y_grid = x_grid.ravel(), y_grid.ravel()
+    def to_settings(cam, rx_ry_rz):
+        rx, ry, rz = rx_ry_rz
+        return PinholeMappingSettings(
+            f_px=cam.f_px, cx=cam.cx, cy=cam.cy,
+            k1=cam.k1, k2=cam.k2, p1=cam.p1, p2=cam.p2,
+            rx=rx, ry=ry, rz=rz,
+            tx=cam.T[0], ty=cam.T[1], tz=cam.T[2],
+            scale_x=cam.scale_x, scale_y=cam.scale_y,
+            offset_x=cam.offset_x, offset_y=cam.offset_y,
+            name=cam.name, raw_width=cam.raw_width, raw_height=cam.raw_height,
+            fit_rms=cam.fit_rms)
 
-    def angle_for(planes, axis):
-        m1 = CameraMapping(planes[0].x0, planes[0].x_span, planes[0].y0, planes[0].y_span,
-                            planes[0].dx_coefs, planes[0].dy_coefs)
-        m2 = CameraMapping(planes[1].x0, planes[1].x_span, planes[1].y0, planes[1].y_span,
-                            planes[1].dx_coefs, planes[1].dy_coefs)
-        rx1, ry1 = m1.world_to_raw(x_grid, y_grid)
-        rx2, ry2 = m2.world_to_raw(x_grid, y_grid)
-        d_raw_mm = ((rx1 - rx2) if axis == "x" else (ry1 - ry2)) / px_per_mm
-        dz = planes[0].z_mm - planes[1].z_mm
-        return -float(np.degrees(np.arctan2(d_raw_mm, dz)).mean())
+    root = ET.parse(calibration_xml).getroot()
+    eulers = []
+    for ident in ("1", "2"):
+        ro = root.find(f".//CoordinateMapper[@CameraIdentifier='{ident}']"
+                       f"//ExternalCameraParameters/RotationAngles").attrib
+        eulers.append((float(ro["Rx"]), float(ro["Ry"]), float(ro["Rz"])))
 
-    alpha1_deg, alpha2_deg = angle_for(cam0_planes, "x"), angle_for(cam1_planes, "x")
-    beta1_deg, beta2_deg = angle_for(cam0_planes, "y"), angle_for(cam1_planes, "y")
-    return alpha1_deg, alpha2_deg, beta1_deg, beta2_deg
+    # Both cameras share DaVis's own corrected-canvas size and scale
+    # (confirmed identical between camera1/camera2 on real data), same as
+    # the polynomial path -- take the larger of the two rather than
+    # assuming which to trust.
+    world_shape = (int(np.ceil(max(cam0.corrected_wh[1], cam1.corrected_wh[1]))),
+                   int(np.ceil(max(cam0.corrected_wh[0], cam1.corrected_wh[0]))))
+    return StereoSettings(
+        cam0_pinhole=to_settings(cam0, eulers[0]),
+        cam1_pinhole=to_settings(cam1, eulers[1]),
+        world_shape=world_shape,
+        world_scale_px_per_mm=1.0 / abs(cam0.scale_x),
+        alpha1_deg=None, alpha2_deg=None, beta1_deg=None, beta2_deg=None,
+        sheet_z_mm=None,
+    )
+
+
+def _warn_if_marks_disagree(snapshot_dir, snapshot_label, cams):
+    """Check each decoded camera against its own snapshot's
+    MarkPositionTable.xml and warn if the reprojection RMS doesn't match
+    DaVis's declared <FitError RMS>.
+
+    This is a real staleness detector, not a formality. When a coordinate
+    system is re-datumed after calibrating, DaVis writes new extrinsics and
+    a new canvas but BYTE-COPIES the old mark table, so the marks are then
+    expressed in the previous world frame -- reprojecting them gives a
+    large RMS (21.5 px measured) even though the calibration itself is
+    perfectly self-consistent and correct to use. So this warns rather than
+    raising: the projection never needs the marks (extrinsics and the
+    canvas offsets always share one frame), they are only the independent
+    check.
+
+    NOTE the file layout, which is easy to get wrong: DaVis writes the SAME
+    MarkPositionTable.xml into camera1\\ and camera2\\, and each copy holds
+    BOTH cameras' blocks. Selecting by folder rather than by CameraNumber
+    silently pairs one camera's marks with the other's parameters -- that
+    mistake is what previously made this model look undecodable."""
+    from ..calibration.pinhole import read_marks, weighted_reprojection_rms
+    for i, cam in enumerate(cams):
+        number = i + 1
+        path = os.path.join(snapshot_dir, f"camera{number}", "MarkPositionTable.xml")
+        if not os.path.isfile(path) or cam.fit_rms is None:
+            continue
+        try:
+            marks = read_marks(path, number)
+            if marks is None or not len(marks[0]):
+                continue
+            rms = weighted_reprojection_rms(cam, marks)
+        except Exception as exc:                       # noqa: BLE001 - advisory only
+            print(f"[warn] davis_set: couldn't cross-check camera{number}'s marks "
+                  f"for '{snapshot_label}': {exc}")
+            continue
+        if rms > max(1.5 * cam.fit_rms, cam.fit_rms + 0.25):
+            print(f"[warn] davis_set: camera{number}'s MarkPositionTable.xml reprojects "
+                  f"at {rms:.3f} px but '{snapshot_label}' declares FitError RMS "
+                  f"{cam.fit_rms:.3f} px. That normally means the mark table is STALE "
+                  f"(the coordinate system was re-datumed after calibrating and DaVis "
+                  f"copied the old table forward), which does NOT affect the "
+                  f"calibration itself -- the extrinsics and canvas offsets share one "
+                  f"frame and are used directly. Proceeding.")
 
 
 def _read_field_of_view(calibration_xml_path):

@@ -15,7 +15,7 @@ import os
 import numpy as np
 import pytest
 
-from piv_suite.calibration.camera_mapping import build_camera_mapping
+from piv_suite.calibration.camera_mapping import build_stereo_cameras, stereo_angles_for
 from piv_suite.config.legacy import to_cpu_settings
 from piv_suite.config.schema import (
     CameraMappingSettings, PassSettings, ProjectConfig, StereoSettings,
@@ -81,11 +81,6 @@ def _fast_stereo_cfg():
     return cfg
 
 
-def _angles(cfg):
-    return (np.deg2rad(cfg.stereo.alpha1_deg), np.deg2rad(cfg.stereo.alpha2_deg),
-            np.deg2rad(cfg.stereo.beta1_deg), np.deg2rad(cfg.stereo.beta2_deg))
-
-
 def _make_raw_pair(rng, shift):
     base = (rng.rand(*RAW_SHAPE) * 200 + 20).astype(np.float32)
     shifted = np.roll(base, shift=shift, axis=(0, 1))
@@ -98,7 +93,7 @@ def _make_stereo_pair(rng, shift0=(1, 2), shift1=(2, 1)):
     return fa0, fb0, fa1, fb1
 
 
-def _serial_reference(cfg, angles, fa0, fb0, fa1, fb1):
+def _serial_reference(cfg, fa0, fb0, fa1, fb1):
     """What the ORIGINAL (pre-Tier-3) serial per-pair code (cli.main.
     handle_pair_stereo / pipeline_worker._process_set_stereo) computes --
     build cam0/cam1 + dewarp + build engine PER CAMERA (two separate
@@ -118,10 +113,7 @@ def _serial_reference(cfg, angles, fa0, fb0, fa1, fb1):
     way; this reference is kept structurally faithful to the real
     production call sites anyway, not just simplified to whatever
     matches."""
-    cam0 = build_camera_mapping(cfg.stereo.cam0_mapping, cfg.stereo.cam0_mapping_plane2,
-                                 cfg.stereo.sheet_z_mm)
-    cam1 = build_camera_mapping(cfg.stereo.cam1_mapping, cfg.stereo.cam1_mapping_plane2,
-                                 cfg.stereo.sheet_z_mm)
+    cam0, cam1 = build_stereo_cameras(cfg.stereo)
 
     fa0, fb0 = apply_preprocess_pair(fa0, fb0, cfg.preprocess)
     fa1, fb1 = apply_preprocess_pair(fa1, fb1, cfg.preprocess)
@@ -138,6 +130,7 @@ def _serial_reference(cfg, angles, fa0, fb0, fa1, fb1):
     engine1, _, _ = factory(dw_a1.shape, {"cpu_settings": cpu_settings})
     y_row_down = cfg.stereo.world_shape[0] - y
     fov_valid = cam0.raw_domain_valid(x, y_row_down) & cam1.raw_domain_valid(x, y_row_down)
+    angles = stereo_angles_for(cfg.stereo, cam0, cam1, x, y_row_down)
 
     U, V, W, valid, _, r = pipeline.process_stereo_pair(
         engine0, engine1, dw_a0, dw_b0, dw_a1, dw_b1, angles,
@@ -148,19 +141,18 @@ def _serial_reference(cfg, angles, fa0, fb0, fa1, fb1):
 
 def test_process_one_pair_stereo_worker_matches_serial_reference(tmp_path):
     cfg = _fast_stereo_cfg()
-    angles = _angles(cfg)
     _worker_init(cfg)  # normally the ProcessPoolExecutor initializer -- called directly here
     # since this test invokes the worker function in-process, not via a pool.
     rng = np.random.RandomState(1)
     fa0, fb0, fa1, fb1 = _make_stereo_pair(rng)
 
     result = process_one_pair_stereo_worker(
-        0, "pairA", fa0.copy(), fb0.copy(), fa1.copy(), fb1.copy(), cfg, str(tmp_path), angles)
+        0, "pairA", fa0.copy(), fb0.copy(), fa1.copy(), fb1.copy(), cfg, str(tmp_path))
     assert result["pair_id"] == "pairA"
 
     saved = np.load(tmp_path / "pairA_stereo_velocity.npz")
     x_ref, y_ref, U_ref, V_ref, W_ref, valid_ref, n_range_ref, n_std_ref = _serial_reference(
-        cfg, angles, fa0.copy(), fb0.copy(), fa1.copy(), fb1.copy())
+        cfg, fa0.copy(), fb0.copy(), fa1.copy(), fb1.copy())
 
     assert np.array_equal(saved["x"], x_ref)
     assert np.array_equal(saved["y"], y_ref)
@@ -176,7 +168,6 @@ def test_process_one_pair_stereo_worker_matches_serial_reference(tmp_path):
 
 def test_run_stereo_batch_parallel_matches_serial_for_every_pair(tmp_path):
     cfg = _fast_stereo_cfg()
-    angles = _angles(cfg)
     rng = np.random.RandomState(2)
     pairs = [(f"pair{i}", *_make_stereo_pair(rng, shift0=(i % 3 + 1, i % 2 + 1),
                                               shift1=(i % 2 + 1, i % 3 + 1)))
@@ -186,7 +177,7 @@ def test_run_stereo_batch_parallel_matches_serial_for_every_pair(tmp_path):
     out_dir.mkdir()
     results, cancelled = run_stereo_batch_parallel(
         ((pid, a0.copy(), b0.copy(), a1.copy(), b1.copy()) for pid, a0, b0, a1, b1 in pairs),
-        cfg, str(out_dir), angles, n_workers=3)
+        cfg, str(out_dir), n_workers=3)
 
     assert not cancelled
     assert [r["pair_id"] for r in results] == [pid for pid, *_ in pairs]  # submission order preserved
@@ -194,7 +185,7 @@ def test_run_stereo_batch_parallel_matches_serial_for_every_pair(tmp_path):
     for pair_id, fa0, fb0, fa1, fb1 in pairs:
         saved = np.load(out_dir / f"{pair_id}_stereo_velocity.npz")
         _, _, U_ref, V_ref, W_ref, valid_ref, _, _ = _serial_reference(
-            cfg, angles, fa0.copy(), fb0.copy(), fa1.copy(), fb1.copy())
+            cfg, fa0.copy(), fb0.copy(), fa1.copy(), fb1.copy())
         np.testing.assert_array_equal(saved["U"], U_ref)
         np.testing.assert_array_equal(saved["V"], V_ref)
         np.testing.assert_array_equal(saved["W"], W_ref)
@@ -203,7 +194,6 @@ def test_run_stereo_batch_parallel_matches_serial_for_every_pair(tmp_path):
 
 def test_run_stereo_batch_parallel_output_independent_of_worker_count(tmp_path):
     cfg = _fast_stereo_cfg()
-    angles = _angles(cfg)
     rng = np.random.RandomState(3)
     pairs = [(f"pair{i}", *_make_stereo_pair(rng, shift0=(i + 1, i + 1), shift1=(i + 2, i + 1)))
              for i in range(4)]
@@ -218,7 +208,7 @@ def test_run_stereo_batch_parallel_output_independent_of_worker_count(tmp_path):
         out_dir.mkdir()
         results, cancelled = run_stereo_batch_parallel(
             ((pid, a0.copy(), b0.copy(), a1.copy(), b1.copy()) for pid, a0, b0, a1, b1 in pairs),
-            cfg, str(out_dir), angles, n_workers=n_workers)
+            cfg, str(out_dir), n_workers=n_workers)
         assert not cancelled
         dirs[n_workers] = out_dir
 
@@ -234,7 +224,6 @@ def test_run_stereo_batch_parallel_output_independent_of_worker_count(tmp_path):
 
 def test_run_stereo_batch_parallel_stops_submitting_after_cancel(tmp_path):
     cfg = _fast_stereo_cfg()
-    angles = _angles(cfg)
     rng = np.random.RandomState(4)
     pairs = [(f"pair{i}", *_make_stereo_pair(rng)) for i in range(6)]
 
@@ -250,7 +239,7 @@ def test_run_stereo_batch_parallel_stops_submitting_after_cancel(tmp_path):
     out_dir.mkdir()
     results, cancelled = run_stereo_batch_parallel(
         ((pid, a0.copy(), b0.copy(), a1.copy(), b1.copy()) for pid, a0, b0, a1, b1 in pairs),
-        cfg, str(out_dir), angles, n_workers=2,
+        cfg, str(out_dir), n_workers=2,
         on_pair_started=on_started, cancel_check=cancel_after_two)
 
     assert cancelled
@@ -263,7 +252,6 @@ def test_run_stereo_batch_parallel_stops_submitting_after_cancel(tmp_path):
 
 def test_run_stereo_batch_parallel_one_pair_erroring_does_not_lose_others(tmp_path):
     cfg = _fast_stereo_cfg()
-    angles = _angles(cfg)
     rng = np.random.RandomState(5)
     good0 = _make_stereo_pair(rng)
     good1 = _make_stereo_pair(rng)
@@ -283,7 +271,7 @@ def test_run_stereo_batch_parallel_one_pair_erroring_does_not_lose_others(tmp_pa
     out_dir.mkdir()
     results, cancelled = run_stereo_batch_parallel(
         ((pid, a0, b0, a1, b1) for pid, a0, b0, a1, b1 in pairs),
-        cfg, str(out_dir), angles, n_workers=2,
+        cfg, str(out_dir), n_workers=2,
         on_pair_error=lambda pair_id, exc: errors.append(pair_id))
 
     assert not cancelled
@@ -341,7 +329,6 @@ def test_run_stereo_batch_parallel_matches_serial_on_real_swirl_frames(tmp_path)
         world_shape=world_shape, world_scale_px_per_mm=1.0, dewarp_order=1,
         alpha1_deg=-44.765, alpha2_deg=44.765, beta1_deg=0.0, beta2_deg=0.0,
     )
-    angles = _angles(cfg)
 
     pairs = []
     for pair_id, fa0, fb0, fa1, fb1 in iter_stereo_from_set(REAL_SWIRL_SET):
@@ -355,14 +342,14 @@ def test_run_stereo_batch_parallel_matches_serial_on_real_swirl_frames(tmp_path)
     out_dir.mkdir()
     results, cancelled = run_stereo_batch_parallel(
         ((pid, a0.copy(), b0.copy(), a1.copy(), b1.copy()) for pid, a0, b0, a1, b1 in pairs),
-        cfg, str(out_dir), angles, n_workers=3)
+        cfg, str(out_dir), n_workers=3)
     assert not cancelled
     assert len(results) == 3
 
     for pair_id, fa0, fb0, fa1, fb1 in pairs:
         saved = np.load(out_dir / f"{pair_id}_stereo_velocity.npz")
         _, _, U_ref, V_ref, W_ref, valid_ref, _, _ = _serial_reference(
-            cfg, angles, fa0.copy(), fb0.copy(), fa1.copy(), fb1.copy())
+            cfg, fa0.copy(), fb0.copy(), fa1.copy(), fb1.copy())
         np.testing.assert_array_equal(saved["U"], U_ref)
         np.testing.assert_array_equal(saved["V"], V_ref)
         np.testing.assert_array_equal(saved["W"], W_ref)

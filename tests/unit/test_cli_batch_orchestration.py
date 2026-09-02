@@ -38,9 +38,8 @@ def _cfg(verbose=True):
 
 def _fake_parallel_run(recorder):
     def _run(pair_source, cfg, output_dir, *rest, on_pair_finished=None, on_pair_error=None, **kwargs):
-        # stereo's signature has an extra positional `angles` before
-        # n_workers; dual_planar/planar don't -- n_workers is always the
-        # LAST positional arg in `rest` regardless.
+        # n_workers is always the LAST positional arg in `rest`, for
+        # every mode's batch-runner signature.
         recorder["called"] = True
         recorder["n_workers"] = rest[-1]
         return [], False
@@ -82,8 +81,7 @@ def test_process_pairs_stereo_uses_parallel_path_despite_interactive_preview(mon
     recorder = {"called": False}
     monkeypatch.setattr(parallel_stereo, "run_stereo_batch_parallel", _fake_parallel_run(recorder))
 
-    angles = (0.0, 0.0, 0.0, 0.0)
-    rows = cli_main.process_pairs_stereo(iter([]), cfg, angles, "out", interactive_preview=True)
+    rows = cli_main.process_pairs_stereo(iter([]), cfg, "out", interactive_preview=True)
 
     assert recorder["called"] is True
     assert recorder["n_workers"] == 4

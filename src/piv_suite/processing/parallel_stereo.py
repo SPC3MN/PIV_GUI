@@ -81,7 +81,8 @@ from concurrent.futures import ProcessPoolExecutor, wait
 
 import numpy as np
 
-from ..calibration.camera_mapping import build_camera_mapping, stereo_fov_valid
+from ..calibration.camera_mapping import (build_stereo_cameras, stereo_angles_for,
+                                          stereo_fov_valid)
 from ..config.legacy import to_cpu_settings
 from ..engines._openpiv_speedups import apply_speedups
 from ..engines.registry import get_engine_factory
@@ -116,11 +117,7 @@ def _worker_init(cfg):
     os.environ["OPENBLAS_NUM_THREADS"] = "1"
     apply_speedups()
     global _worker_cameras
-    cam0 = build_camera_mapping(cfg.stereo.cam0_mapping, cfg.stereo.cam0_mapping_plane2,
-                                 cfg.stereo.sheet_z_mm)
-    cam1 = build_camera_mapping(cfg.stereo.cam1_mapping, cfg.stereo.cam1_mapping_plane2,
-                                 cfg.stereo.sheet_z_mm)
-    _worker_cameras = (cam0, cam1)
+    _worker_cameras = build_stereo_cameras(cfg.stereo)
 
 
 def _get_worker_engine(frame_shape, correlation, validation):
@@ -140,7 +137,7 @@ def _get_worker_engine(frame_shape, correlation, validation):
     return engine, x, y
 
 
-def process_one_pair_stereo_worker(idx, pair_id, fa0, fb0, fa1, fb1, cfg, output_dir, angles):
+def process_one_pair_stereo_worker(idx, pair_id, fa0, fb0, fa1, fb1, cfg, output_dir):
     """The actual per-pair work, run inside a worker process. Same
     sequence as cli.main.handle_pair_stereo and pipeline_worker.
     PipelineWorker._process_set_stereo's own per-pair body: preprocess ->
@@ -190,6 +187,7 @@ def process_one_pair_stereo_worker(idx, pair_id, fa0, fb0, fa1, fb1, cfg, output
     # world_to_raw's row-down grid convention first.
     y_row_down = cfg.stereo.world_shape[0] - y
     fov_valid = stereo_fov_valid(cam0, cam1, x, y_row_down)
+    angles = stereo_angles_for(cfg.stereo, cam0, cam1, x, y_row_down)
 
     # process_stereo_pair validates the COMBINED/triangulated field once
     # (not each camera's raw 2D field independently, then intersected) --
@@ -233,7 +231,7 @@ def process_one_pair_stereo_worker(idx, pair_id, fa0, fb0, fa1, fb1, cfg, output
     }
 
 
-def run_stereo_batch_parallel(pair_source, cfg, output_dir, angles, n_workers,
+def run_stereo_batch_parallel(pair_source, cfg, output_dir, n_workers,
                                on_pair_started=None, on_pair_finished=None,
                                on_pair_error=None, cancel_check=None):
     """Drives process_one_pair_stereo_worker() across a ProcessPoolExecutor
@@ -306,7 +304,7 @@ def run_stereo_batch_parallel(pair_source, cfg, output_dir, angles, n_workers,
                 on_pair_started(pair_id)
             try:
                 future = executor.submit(
-                    process_one_pair_stereo_worker, idx, pair_id, fa0, fb0, fa1, fb1, cfg, output_dir, angles)
+                    process_one_pair_stereo_worker, idx, pair_id, fa0, fb0, fa1, fb1, cfg, output_dir)
             except Exception:
                 # Lost a race against the cancel poller: it killed workers
                 # between our semaphore.acquire()/cancel_event check above

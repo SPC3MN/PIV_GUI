@@ -15,7 +15,8 @@ import time
 import numpy as np
 from PySide6.QtCore import QObject, Signal
 
-from piv_suite.calibration.camera_mapping import build_camera_mapping, stereo_fov_valid
+from piv_suite.calibration.camera_mapping import (build_stereo_cameras, stereo_angles_for,
+                                                  stereo_fov_valid)
 from piv_suite.config.legacy import to_cpu_settings, to_gpu_settings
 from piv_suite.engines.base import EngineCancelled
 from piv_suite.engines.registry import get_engine_factory
@@ -133,21 +134,12 @@ class PipelineWorker(QObject):
             else:
                 set_paths, is_batch = [cfg.project.input_path], False
 
-            angles = cam0 = cam1 = None
+            cam0 = cam1 = None
             if stereo:
-                if cfg.stereo.alpha1_deg is None or cfg.stereo.alpha2_deg is None:
-                    raise ValueError(
-                        "Stereo triangulation angle not set -- check 'Angles measured' on the "
-                        "Calibration panel and enter a real measured value (e.g. DaVis's own "
-                        "Calibration report's \"Min/Max angle 1-2\", split symmetrically) before "
-                        "running. No calibration-file-only estimate is trustworthy enough to "
-                        "auto-fill this (see StereoSettings.alpha1_deg's own comment).")
-                cam0 = build_camera_mapping(cfg.stereo.cam0_mapping, cfg.stereo.cam0_mapping_plane2,
-                                             cfg.stereo.sheet_z_mm)
-                cam1 = build_camera_mapping(cfg.stereo.cam1_mapping, cfg.stereo.cam1_mapping_plane2,
-                                             cfg.stereo.sheet_z_mm)
-                angles = (np.deg2rad(cfg.stereo.alpha1_deg), np.deg2rad(cfg.stereo.alpha2_deg),
-                          np.deg2rad(cfg.stereo.beta1_deg), np.deg2rad(cfg.stereo.beta2_deg))
+                # No up-front angle gate any more: the triangulation angles
+                # are derived per pixel from this calibration at each pair's
+                # own correlation grid (stereo_angles_for).
+                cam0, cam1 = build_stereo_cameras(cfg.stereo)
 
             grand_total = 0
             for set_path in set_paths:
@@ -169,7 +161,7 @@ class PipelineWorker(QObject):
                             cfg.project.input_path, cfg.project.loose_glob,
                             cfg.project.suffix_cam0, cfg.project.suffix_cam1, cfg.project.stereo_frame_order)
                     summary_rows, batch_cancelled = self._process_set_stereo(
-                        pair_source, cfg, output_dir, cam0, cam1, angles)
+                        pair_source, cfg, output_dir, cam0, cam1)
                 elif dual_planar:
                     self.log.emit(f"[info] processing set '{set_path}'")
                     pair_source = iter_dual_planar_from_set(set_path, cfg.project.multiset_index)
@@ -347,7 +339,7 @@ class PipelineWorker(QObject):
             free_gpu_pools()
         return u, v, valid, elapsed, x, y, rejects
 
-    def _process_set_stereo(self, pair_source, cfg, output_dir, cam0, cam1, angles):
+    def _process_set_stereo(self, pair_source, cfg, output_dir, cam0, cam1):
         backend = cfg.project.backend
 
         # Tier 3: process-level parallelism across independent pairs
@@ -362,7 +354,7 @@ class PipelineWorker(QObject):
             auto_note = "auto" if cfg.performance.n_workers is None else "user override"
             self.log.emit(f"[info] stereo CPU batch: {n_workers} worker process(es) ({auto_note})")
             if n_workers > 1:
-                return self._process_set_stereo_parallel(pair_source, cfg, output_dir, angles, n_workers)
+                return self._process_set_stereo_parallel(pair_source, cfg, output_dir, n_workers)
 
         summary_rows = []
         cancelled = False
@@ -397,6 +389,7 @@ class PipelineWorker(QObject):
                 # grid convention first.
                 y_row_down = cfg.stereo.world_shape[0] - y
                 fov_valid = stereo_fov_valid(cam0, cam1, x, y_row_down)
+                angles = stereo_angles_for(cfg.stereo, cam0, cam1, x, y_row_down)
 
                 t_run0 = time.time()
                 U, V, W, valid, elapsed, r = pipeline.process_stereo_pair(
@@ -445,7 +438,7 @@ class PipelineWorker(QObject):
 
         return summary_rows, cancelled
 
-    def _process_set_stereo_parallel(self, pair_source, cfg, output_dir, angles, n_workers):
+    def _process_set_stereo_parallel(self, pair_source, cfg, output_dir, n_workers):
         """The n_workers > 1 branch of _process_set_stereo -- same Qt
         signal contract as the serial loop (and as
         _process_set_planar_parallel above), driven by
@@ -473,7 +466,7 @@ class PipelineWorker(QObject):
             self.error.emit(pair_id, str(exc))
 
         results, cancelled = run_stereo_batch_parallel(
-            pair_source, cfg, output_dir, angles, n_workers,
+            pair_source, cfg, output_dir, n_workers,
             on_pair_started=self.pair_started.emit, on_pair_finished=_on_finished,
             on_pair_error=_on_error, cancel_check=self._cancel_event.is_set,
         )

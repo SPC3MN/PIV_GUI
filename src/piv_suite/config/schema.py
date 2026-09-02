@@ -72,7 +72,16 @@ class CorrelationSettings:
     correlation_method: str = "circular"     # CPU-only; ignored by GPU adapter
     subpixel_method: str = "gaussian"
     deformation_method: str = "symmetric"    # CPU-only; ignored by GPU adapter
-    interpolation_order: int = 3             # CPU-only; ignored by GPU adapter
+    # 5, not 3. This is the spline order used to RESAMPLE THE IMAGES during
+    # window deformation, and it is the dominant remaining source of
+    # sub-pixel bias. Measured max |bias| over a sweep of sub-pixel shifts:
+    # order 1 (bilinear) 0.0659 px, order 3 0.0197 px, order 5 0.0069 px.
+    # The residual periodic bias this app shows is NOT classic peak-locking
+    # (it has period 2.0 px in total displacement, i.e. period 1 in the
+    # HALF-displacement windef applies to each frame for the symmetric
+    # split) -- it is deformation-interpolation error, so raising this is
+    # the lever that actually moves it.
+    interpolation_order: int = 5             # CPU-only; ignored by GPU adapter
     batch_size: Optional[int] = None         # GPU-only; ignored by CPU adapter
 
     # ---- GPU tiling (ignored entirely when backend == "cpu") ----
@@ -118,20 +127,40 @@ class ValidationSettings:
     # inter-pass smoothing, which this app's old smoothn=False default
     # never replicated.
     #
-    # A strength sweep (smoothn_p = 0.05 [old default], 1.0, 5.0, 15.0,
-    # 50.0) on real planar data found a clear, consistently-scaling
-    # improvement up to ~15.0, then a plateau/slight reversal by 50.0
-    # (early over-smoothing) -- confirmed at full 20-pair scale against the
-    # real DaVis PostProc reference, on this data:
-    #   old default (smoothn=False):        density=95.41% corr(U)=0.957 corr(V)=0.949 relative-diff=25.15%
-    #   smoothn=True, smoothn_p=15.0 (new): density=98.66% corr(U)=0.978 corr(V)=0.974 relative-diff=18.26%
-    # This is a ~27% relative reduction in the DaVis disagreement, and
-    # density now matches DaVis's own ~98% almost exactly, at negligible
-    # extra cost (smoothn is O(n log n) per component per pass). See
-    # DATASET_VALIDATION_REPORT.md's 2026-08-29 section for the full sweep
-    # table and methodology.
+    # Turning it ON was right and stays. The STRENGTH below was not -- see
+    # smoothn_p's own comment for the ground-truth re-measurement that
+    # replaced 15.0 with 0.75, and for why the original real-data sweep
+    # (recorded in DATASET_VALIDATION_REPORT.md's 2026-08-29 section, which
+    # reported density 95.41%->98.66% and corr(U) 0.957->0.978 for p=15.0)
+    # was measuring agreement with a smoothed reference rather than
+    # measurement quality. Read that section's numbers as a record of what
+    # was run, not as support for the value it recommended.
     smoothn: bool = True
-    smoothn_p: float = 15.0
+    # 0.75, NOT 15.0. The 15.0 that used to be here was chosen by a sweep
+    # scored against DaVis's own PostProc output -- but that reference is
+    # itself heavily post-smoothed (denoisingFilter=3, anisotropic kernel 25,
+    # strength 3.5, straight from a real JobHistory.xml), so smoothing this
+    # app's field raised agreement with it, and raised "density" too because
+    # a flatter field stops tripping the local-median outlier test. Neither
+    # is evidence of a better measurement, and the metric rewarded exactly
+    # the wrong end of the sweep it ran.
+    #
+    # Re-measured against KNOWN ground truth (synthetic particle images,
+    # displacement prescribed exactly), p=15.0 is 1.5x-4.9x WORSE in RMS
+    # error on every field with real spatial structure, and better only on a
+    # uniform shift -- which is free to over-smooth by construction:
+    #     field                     p=0.75    p=15.0
+    #     turbulence k<=6           0.167 px  0.750 px   (4.5x)
+    #     turbulence k<=4           0.131 px  0.173 px   (1.3x)
+    #     Lamb-Oseen r_c=15         0.035 px  0.056 px   (1.6x)
+    #     Lamb-Oseen r_c=30         0.022 px  0.035 px   (1.6x)
+    #     uniform 3.37 px           0.021 px  0.021 px   (1.0x)
+    # smoothn's `s` enters as a transfer function 1/(1 + s*lambda^2); at
+    # s=15 the mid-band gain is ~1/16 and Nyquist ~1/1000, i.e. near-total
+    # removal of everything but the largest scales -- then fed forward as the
+    # next pass's deformation predictor. The 0.3-1.0 plateau is flat; keep
+    # smoothn ON (enabling it WAS right), just not at that strength.
+    smoothn_p: float = 0.75
 
     # CPU-only; no effect on GPU. Restores openpiv's own real per-pass
     # validation (Westerweel & Scarano's "universal outlier detection"
@@ -359,9 +388,65 @@ class CameraMappingSettings:
 
 
 @dataclass
+class PinholeMappingSettings:
+    """One camera's DaVis `PinholeOpenCV` calibration, stored as plain scalars
+    so the whole ProjectConfig stays dataclasses.asdict/from_dict round-trippable
+    (config.io) -- the live object with the actual projection maths is
+    calibration.pinhole.PinholeCameraMapping, built from this by
+    calibration.camera_mapping.build_camera_mapping.
+
+    This is the SECOND of DaVis's two internal calibration models. Unlike
+    CameraMappingSettings (Polynomial3rdOrder), which stores one coefficient set
+    per calibrated Z-plane and interpolates between them, a pinhole camera is
+    valid at any Z by construction -- so there is no plane2 counterpart, and
+    sheet_z_mm simply selects the plane the mapping is evaluated on.
+
+    f_px is already converted to PIXELS (Calibration.xml stores FocalLengthPixel
+    in millimetres despite its name -- see calibration.pinhole's module
+    docstring, which documents every decoded convention and its validation).
+    """
+    f_px: float = 0.0
+    cx: float = 0.0
+    cy: float = 0.0
+    k1: float = 0.0
+    k2: float = 0.0
+    p1: float = 0.0
+    p2: float = 0.0
+    # Extrinsics as DaVis stores them: Euler angles (radians, applied Rz@Ry@Rx)
+    # and a translation in mm, rather than a pre-multiplied 3x3 -- keeps the
+    # serialized form identical to the source file's own parameterization.
+    rx: float = 0.0
+    ry: float = 0.0
+    rz: float = 0.0
+    tx: float = 0.0
+    ty: float = 0.0
+    tz: float = 0.0
+    # Corrected/dewarped canvas <-> world mm, straight off this camera's <Scales>.
+    scale_x: float = 1.0
+    scale_y: float = 1.0
+    offset_x: float = 0.0
+    offset_y: float = 0.0
+    name: str = ""
+    raw_width: int = 0
+    raw_height: int = 0
+    # DaVis's own declared <FitError RMS> for this camera. Kept because it is a
+    # real, checkable invariant: reprojecting the snapshot's own
+    # MarkPositionTable.xml must reproduce it (see io.davis_set's staleness
+    # check), which is what makes a stale or correction-field-backed snapshot
+    # detectable instead of silently wrong.
+    fit_rms: Optional[float] = None
+
+
+@dataclass
 class StereoSettings:
     cam0_mapping: CameraMappingSettings = field(default_factory=CameraMappingSettings)
     cam1_mapping: CameraMappingSettings = field(default_factory=CameraMappingSettings)
+    # DaVis 'PinholeOpenCV' calibration, when that is what the project has.
+    # Mutually exclusive with cam*_mapping/cam*_mapping_plane2 (which carry the
+    # 'Polynomial3rdOrder' model): whichever is populated is the one
+    # build_camera_mapping uses. None (the default) keeps the polynomial path.
+    cam0_pinhole: Optional[PinholeMappingSettings] = None
+    cam1_pinhole: Optional[PinholeMappingSettings] = None
     # Second calibrated Z-plane per camera -- None (the default) means a
     # single-plane mapping, unchanged from before this field existed.
     # Populated together with sheet_z_mm when DaVis auto-extraction finds two
@@ -372,28 +457,32 @@ class StereoSettings:
     world_shape: Tuple[int, int] = (0, 0)
     world_scale_px_per_mm: float = 1.0
     dewarp_order: int = 1
-    # REQUIRED, no usable auto-derive: io.davis_set._estimate_stereo_angles
-    # used to compute these from the two-Z-plane calibration's own parallax
-    # (a 2-plane finite-difference / linear-parallax model), but that model
-    # is only correct for an orthographic/infinite-standoff camera -- a real
-    # DaVis calibration's higher-order polynomial terms (genuine finite-
-    # standoff perspective) make it measurably wrong, confirmed against a
-    # real rig: auto-derive gave alpha1=33.3deg/alpha2=-35.9deg (implied
-    # 69.2deg total) against DaVis's own calibration-UI-measured "Min/Max
-    # angle 1-2: 89.53deg" -- a ~20deg error that isn't specific to that one
-    # rig (the model flaw is general; only the magnitude/sign of its bias
-    # varies per rig's real standoff distance, which no calibration file
-    # stores). See SESSION_HANDOFF.md's stereo angle investigation for the
-    # full derivation. None (the default) means "not yet entered" --
-    # read_stereo_calibration_from_set no longer auto-populates these, and
-    # every processing entry point (preview_panel/cli/pipeline_worker)
-    # refuses to run with a clear error until a real measured value (e.g.
-    # DaVis's own "Min/Max angle 1-2", split symmetrically) is entered on
-    # the Calibration panel or via --alpha1-deg/--alpha2-deg.
+    # OPTIONAL MANUAL OVERRIDE. Normally leave all four None: the triangulation
+    # angles are now derived PER PIXEL and exactly from the calibration itself,
+    # by calibration.camera_mapping.stereo_view_angles, at each processing entry
+    # point. Setting these forces one single global angle per camera instead,
+    # for a rig whose calibration genuinely can't supply the geometry.
+    #
+    # Why per-pixel replaced a scalar. reconstruct_stereo solves
+    # dx1 = dX - dZ*tan(alpha1), and the real viewing angle is not constant: on
+    # the reference rig it varies 8.4deg (cam0) / 8.8deg (cam1) across the field
+    # of view. The two cameras' errors largely cancel in the DIFFERENCE, so W is
+    # barely affected (~0.6%) -- but the in-plane components are not, because
+    # nothing cancels there: U is off by ~13% of |W| at the FOV edges and V by
+    # ~7% at top/bottom, the latter entirely from beta, whose near-zero MEAN
+    # (-0.07deg) hides a +-4.3deg variation. That is why tuning a scalar angle
+    # never closed the gap -- the quantity being tuned does not exist.
+    #
+    # The previous auto-derive (_estimate_stereo_angles, now deleted) returned
+    # -34.5deg/+35.0deg where the truth is ~-44.1deg/+45.0deg. It measured
+    # parallax on the RAW SENSOR, foreshortened by cos(alpha), and never
+    # inverted the mapping: tan(34.53)/tan(44.08) = 0.710 ~= cos(44.1deg). One
+    # missing factor, ~10deg of error, and the reason this field used to be a
+    # required manual entry at all.
     alpha1_deg: Optional[float] = None
     alpha2_deg: Optional[float] = None
-    beta1_deg: float = 0.0
-    beta2_deg: float = 0.0
+    beta1_deg: Optional[float] = None
+    beta2_deg: Optional[float] = None
     # Real Z (mm) of the laser sheet for the CURRENT recording -- an
     # acquisition-time quantity, never derivable from a calibration file.
     # Only meaningful/required when a camera has a second calibrated plane.

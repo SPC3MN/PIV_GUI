@@ -18,7 +18,8 @@ import time
 
 import numpy as np
 
-from ..calibration.camera_mapping import build_camera_mapping, stereo_fov_valid
+from ..calibration.camera_mapping import (build_stereo_cameras, stereo_angles_for,
+                                          stereo_fov_valid)
 from ..config.io import ProjectConfig, load_project, save_project
 from ..config.legacy import to_cpu_settings, to_gpu_settings
 from ..engines.registry import get_engine_factory
@@ -360,7 +361,7 @@ def _run_camera(frame_a, frame_b, cfg):
     return u, v, valid, elapsed, x, y, rejects
 
 
-def handle_pair_stereo(pair_id, dw_a0, dw_b0, dw_a1, dw_b1, cfg, angles, output_dir):
+def handle_pair_stereo(pair_id, dw_a0, dw_b0, dw_a1, dw_b1, cfg, output_dir):
     verbose = cfg.output.verbose
     if verbose:
         print(f"Processing {pair_id} ...", end=" ", flush=True)
@@ -382,6 +383,7 @@ def handle_pair_stereo(pair_id, dw_a0, dw_b0, dw_a1, dw_b1, cfg, angles, output_
         u2, v2, valid2, elapsed2, _, _, r2, t_post2 = _run_camera(dw_a1, dw_b1, cfg)
         y_row_down = cfg.stereo.world_shape[0] - y
         valid = valid1 & valid2 & stereo_fov_valid(cfg.stereo._cam0, cfg.stereo._cam1, x, y_row_down)
+        angles = stereo_angles_for(cfg.stereo, cfg.stereo._cam0, cfg.stereo._cam1, x, y_row_down)
         elapsed = elapsed1 + elapsed2
         U, V, W = pipeline.combine_stereo_pair(
             u1, v1, u2, v2, angles, cfg.stereo.world_scale_px_per_mm, cfg.calibration.frame_dt_s)
@@ -400,6 +402,7 @@ def handle_pair_stereo(pair_id, dw_a0, dw_b0, dw_a1, dw_b1, cfg, angles, output_
         engine1, _, _ = _build_engine(cfg.project.backend, dw_a1.shape, cfg.correlation, cfg.validation)
         y_row_down = cfg.stereo.world_shape[0] - y
         fov_valid = stereo_fov_valid(cfg.stereo._cam0, cfg.stereo._cam1, x, y_row_down)
+        angles = stereo_angles_for(cfg.stereo, cfg.stereo._cam0, cfg.stereo._cam1, x, y_row_down)
         post = cfg.postprocess.for_pipeline()
         t_post0 = time.time()
         U, V, W, valid, elapsed, r = pipeline.process_stereo_pair(
@@ -429,7 +432,7 @@ def handle_pair_stereo(pair_id, dw_a0, dw_b0, dw_a1, dw_b1, cfg, angles, output_
     return row, x, y, U, V, W, valid
 
 
-def process_pairs_stereo(pair_source, cfg, angles, output_dir, interactive_preview):
+def process_pairs_stereo(pair_source, cfg, output_dir, interactive_preview):
     backend = cfg.project.backend
 
     # Tier 3: process-level parallelism across independent pairs
@@ -470,7 +473,7 @@ def process_pairs_stereo(pair_source, cfg, angles, output_dir, interactive_previ
                 raise exc
 
             results, _cancelled = run_stereo_batch_parallel(
-                pair_source, cfg, output_dir, angles, n_workers,
+                pair_source, cfg, output_dir, n_workers,
                 on_pair_finished=_on_finished, on_pair_error=_on_error)
             return [
                 (r["pair_id"], r["elapsed"], r["n_valid"], r["n_total"],
@@ -487,7 +490,7 @@ def process_pairs_stereo(pair_source, cfg, angles, output_dir, interactive_previ
         dw_a1 = cfg.stereo._cam1.dewarp_image(fa1, cfg.stereo.world_shape, cfg.stereo.dewarp_order)
         dw_b1 = cfg.stereo._cam1.dewarp_image(fb1, cfg.stereo.world_shape, cfg.stereo.dewarp_order)
 
-        row, x, y, U, V, W, valid = handle_pair_stereo(pair_id, dw_a0, dw_b0, dw_a1, dw_b1, cfg, angles, output_dir)
+        row, x, y, U, V, W, valid = handle_pair_stereo(pair_id, dw_a0, dw_b0, dw_a1, dw_b1, cfg, output_dir)
         summary_rows.append(row)
 
         if idx == 0 and interactive_preview:
@@ -593,19 +596,11 @@ def main(argv=None):
     stereo = cfg.project.mode == "stereo"
     dual_planar = cfg.project.mode == "planar" and cfg.project.dual_camera
     if stereo:
-        if cfg.stereo.alpha1_deg is None or cfg.stereo.alpha2_deg is None:
-            sys.exit(
-                "stereo.alpha1_deg/alpha2_deg not set in this project -- no calibration-file-"
-                "only estimate is trustworthy enough to auto-fill this (see StereoSettings."
-                "alpha1_deg's own comment). Pass --alpha1-deg/--alpha2-deg with a real measured "
-                "value (e.g. DaVis's own Calibration report's \"Min/Max angle 1-2\", split "
-                "symmetrically), or set it on the GUI's Calibration panel and save the project.")
-        cfg.stereo._cam0 = build_camera_mapping(cfg.stereo.cam0_mapping, cfg.stereo.cam0_mapping_plane2,
-                                                 cfg.stereo.sheet_z_mm)
-        cfg.stereo._cam1 = build_camera_mapping(cfg.stereo.cam1_mapping, cfg.stereo.cam1_mapping_plane2,
-                                                 cfg.stereo.sheet_z_mm)
-        angles = (np.deg2rad(cfg.stereo.alpha1_deg), np.deg2rad(cfg.stereo.alpha2_deg),
-                  np.deg2rad(cfg.stereo.beta1_deg), np.deg2rad(cfg.stereo.beta2_deg))
+        # Triangulation angles are no longer required up front: they are
+        # derived per pixel from this calibration at each pair's own
+        # correlation grid (stereo_angles_for). StereoSettings' alpha*/beta*
+        # remain as an optional global override.
+        cfg.stereo._cam0, cfg.stereo._cam1 = build_stereo_cameras(cfg.stereo)
 
     grand_summary = []
     for set_path in set_paths:
@@ -622,7 +617,7 @@ def main(argv=None):
                 pair_source = iter_stereo_from_loose_files(
                     cfg.project.input_path, cfg.project.loose_glob,
                     cfg.project.suffix_cam0, cfg.project.suffix_cam1, cfg.project.stereo_frame_order)
-            summary_rows = process_pairs_stereo(pair_source, cfg, angles, output_dir,
+            summary_rows = process_pairs_stereo(pair_source, cfg, output_dir,
                                                  interactive_preview=not is_batch)
         elif dual_planar:
             if cfg.project.input_mode != "set":
