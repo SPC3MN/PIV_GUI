@@ -69,6 +69,18 @@ def euler_zyx(rx, ry, rz):
     return Rz @ Ry @ Rx
 
 
+def rodrigues(v):
+    """Axis-angle (3,) -> rotation matrix. Used only to parameterise a free
+    rigid transform for the stale-mark-table check in io.davis_set -- DaVis's
+    own extrinsics are Euler zyx (see euler_zyx), not axis-angle."""
+    theta = float(np.linalg.norm(v))
+    if theta < 1e-12:
+        return np.eye(3)
+    k = np.asarray(v, float) / theta
+    K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+    return np.eye(3) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K)
+
+
 class PinholeCameraMapping:
     """One camera's exact DaVis PinholeOpenCV mapping.
 
@@ -136,12 +148,35 @@ class PinholeCameraMapping:
         uv = self.project(Xw)
         return uv[..., 0], uv[..., 1]
 
-    def _ensure_grid(self, world_shape):
-        if self._cached_shape != world_shape:
-            ny, nx = world_shape
-            yp, xp = np.mgrid[0:ny, 0:nx].astype(np.float64)
-            self._x_raw, self._y_raw = self.world_to_raw(xp, yp)
-            self._cached_shape = world_shape
+    def _ensure_grid(self, world_shape, rows_per_chunk=256):
+        """Cache the canvas->raw sample grid, built in ROW CHUNKS and stored as
+        float32.
+
+        Built in one piece this is a real memory problem, not a
+        micro-optimisation: project() materialises an (N, 3) world array plus
+        roughly eight full-canvas float64 temporaries, which on a 3027x5628
+        canvas peaked at 2.7 GB and retained 273 MB. The polynomial path
+        stores float32 and peaks at 540 MB. processing.parallel_stereo builds
+        BOTH cameras in EVERY worker process and the grid is created lazily on
+        the first dewarp_image, so N workers hit that peak at once -- ~16 GB
+        transient at six workers. Chunking bounds the peak regardless of
+        canvas size, and float32 matches what the polynomial mapping has
+        always stored (~5e-4 px on a 5628-wide canvas, far below what
+        map_coordinates resolves)."""
+        if self._cached_shape == world_shape:
+            return
+        ny, nx = world_shape
+        x_raw = np.empty((ny, nx), dtype=np.float32)
+        y_raw = np.empty((ny, nx), dtype=np.float32)
+        cols = np.arange(nx, dtype=np.float64)
+        for start in range(0, ny, rows_per_chunk):
+            end = min(start + rows_per_chunk, ny)
+            xp, yp = np.meshgrid(cols, np.arange(start, end, dtype=np.float64))
+            cx, cy = self.world_to_raw(xp, yp)
+            x_raw[start:end] = cx
+            y_raw[start:end] = cy
+        self._x_raw, self._y_raw = x_raw, y_raw
+        self._cached_shape = world_shape
 
     def dewarp_image(self, raw_image, world_shape, order=1):
         from scipy.ndimage import map_coordinates
@@ -161,27 +196,44 @@ class PinholeCameraMapping:
 
     def view_angles(self, xp, yp):
         """Per-point viewing angles (alpha, beta) in DEGREES at canvas pixel
-        (xp, yp), in exactly the convention calibration.reconstruction.
-        reconstruct_stereo solves:  dx_dewarped = dX - dZ*tan(alpha).
+        (xp, yp), in the CANVAS/IMAGE frame: x increasing with the column
+        index, y increasing with the ROW index (downward).
+
+        THE FRAME IS THE WHOLE POINT, so it is stated first. These angles feed
+        calibration.reconstruction.reconstruct_stereo, which solves
+        dx = dX - dZ*tan(alpha) with dx/dy coming from the correlation engine
+        -- and the engine's (u, v) are column-right and ROW-DOWN. An angle in
+        the world frame would be inconsistent with them wherever the canvas
+        axis and the world axis disagree in sign, which for DaVis is always
+        true of Y: LinearScaleY's FactorMmPerPixel is negative (-0.0609 on
+        real data), i.e. world Y increases upward while the row index
+        increases downward. Returning canvas-frame angles means the sign is
+        derived from THIS camera's own scale factors rather than assumed, and
+        it keeps this model's convention identical to
+        camera_mapping.CameraMapping.view_angles, which works in canvas pixels
+        throughout and is therefore already in this frame.
+
+        (The physical, world-frame viewing angle is the same alpha and
+        -beta. Nothing downstream wants that form, so it isn't returned.)
 
         Exact for this model: the ray from the world point to the camera
-        centre is known in closed form, no inversion or finite differencing
-        needed. alpha depends only on x and beta only on y for this rig,
-        but that is a property of the geometry, not an assumption made here.
+        centre is known in closed form, with no inversion or finite
+        differencing.
         """
         X, Y = self.canvas_to_world_mm(xp, yp)
         C = self.centre
         vx, vy, vz = C[0] - X, C[1] - Y, C[2] - self.z_mm
-        # arctan of the RATIO, not arctan2 of the pair -- matching
-        # camera_mapping.CameraMapping.view_angles, so both calibration models
-        # report the same quantity. reconstruct_stereo only ever uses
-        # tan(alpha), which is pi-periodic, so the two differ by nothing that
-        # reaches the reconstruction; but arctan2 additionally encodes which
-        # way along the ray the camera lies, and reports 180-deg-wrapped
-        # angles for a rig whose cameras sit on the -Z side of the light
-        # sheet. That is a real configuration, and a reported "180 deg
-        # viewing angle" would be nonsense in the GUI and in diagnostics.
-        return np.degrees(np.arctan(vx / vz)), np.degrees(np.arctan(vy / vz))
+        # World mm -> canvas mm: a step of one canvas pixel moves the world
+        # point by scale_x (or scale_y) mm, so dividing by the scale converts
+        # a world-frame ray component into a canvas-frame one, sign included.
+        # abs() on the depth keeps alpha/beta as the ray's SLOPE rather than
+        # its direction: reconstruct_stereo uses only tan(), which is
+        # pi-periodic, and arctan of a ratio with a signed denominator would
+        # report 180-deg-wrapped angles for a rig whose cameras sit on the -Z
+        # side of the light sheet -- a real configuration, and nonsense to
+        # show in the GUI.
+        return (np.degrees(np.arctan((vx / self.scale_x) / (vz / abs(self.scale_x)))),
+                np.degrees(np.arctan((vy / self.scale_y) / (vz / abs(self.scale_y)))))
 
     def at_z(self, z_mm):
         """A copy of this mapping evaluated at a different laser-sheet Z."""

@@ -123,27 +123,60 @@ class CameraMapping:
         raw_x, raw_y = self.world_to_raw(x, y)
         return (raw_x >= 0) & (raw_x < self.raw_width) & (raw_y >= 0) & (raw_y < self.raw_height)
 
-    def raw_to_world(self, raw_x, raw_y, iters=12):
-        """Inverse of world_to_raw, by fixed-point iteration.
+    def raw_to_world(self, raw_x, raw_y, tol=1e-9, max_iters=200):
+        """Inverse of world_to_raw, by fixed-point iteration, run to a
+        MEASURED tolerance rather than a fixed iteration count.
 
-        world_to_raw is x = xp - poly(s(xp), t(yp)), i.e. identity minus a
-        small correction, so xp <- raw_x + poly(...) converges geometrically
-        and needs no Jacobian. Converges to well under 1e-6 canvas px in a
-        handful of iterations on real DaVis coefficients; 12 is generous."""
+        world_to_raw is x = xp - poly(s(xp), t(yp)) -- identity minus a
+        correction -- so xp <- raw_x + poly(...) is a contraction wherever the
+        polynomial's derivative is below 1, and needs no Jacobian.
+
+        It converges more slowly than it looks. On real DaVis coefficients the
+        contraction factor is ~0.39, but the iteration is seeded with the RAW
+        coordinate, which is up to ~1500 canvas px from the answer (a 5564-wide
+        canvas against a 4096-wide sensor). A fixed 12 iterations leaves
+        1.4e-2 to 1.8e-2 px of residual -- this docstring previously claimed
+        "well under 1e-6", which was wrong by four orders of magnitude.
+        Downstream that is ~0.02 deg of viewing angle, small but not the
+        rounding error it was advertised as.
+
+        Outside the calibrated canvas the map stops contracting (the
+        derivative reaches ~2.1 on real coefficients) and the iteration
+        diverges to inf/nan. That used to be returned silently; it now raises,
+        because a mapping that has diverged is not a result.
+        """
         xp = np.array(raw_x, dtype=float, copy=True)
         yp = np.array(raw_y, dtype=float, copy=True)
-        for _ in range(iters):
+        for _ in range(max_iters):
             s, t = self.s(xp), self.t(yp)
-            xp = raw_x + self._poly(s, t, self.dx_coefs)
-            yp = raw_y + self._poly(s, t, self.dy_coefs)
+            xp_new = raw_x + self._poly(s, t, self.dx_coefs)
+            yp_new = raw_y + self._poly(s, t, self.dy_coefs)
+            delta = max(np.nanmax(np.abs(xp_new - xp)), np.nanmax(np.abs(yp_new - yp)))
+            xp, yp = xp_new, yp_new
+            if not np.isfinite(delta):
+                break
+            if delta < tol:
+                return xp, yp
+        if not (np.all(np.isfinite(xp)) and np.all(np.isfinite(yp))):
+            raise ValueError(
+                "raw_to_world did not converge: the calibration polynomial is not "
+                "contracting at these points, which happens outside the calibrated "
+                "region. Restrict the grid to the calibrated canvas.")
         return xp, yp
 
     def view_angles(self, xp, yp):
-        """Per-point viewing angles (alpha, beta) in DEGREES, in the
-        convention calibration.reconstruction.reconstruct_stereo solves:
-        dx_dewarped = dX - dZ*tan(alpha). Counterpart to
-        pinhole.PinholeCameraMapping.view_angles, so both DaVis calibration
-        models expose the same thing to stereo_view_angles.
+        """Per-point viewing angles (alpha, beta) in DEGREES, in the CANVAS/
+        IMAGE frame: x increasing with the column index, y increasing with the
+        ROW index (downward). That is the frame the correlation engine's
+        (u, v) are in, and hence the one
+        calibration.reconstruction.reconstruct_stereo needs -- see
+        stereo_view_angles for why it is worth stating explicitly.
+
+        This model works in canvas pixels throughout, so it is already in that
+        frame with nothing to convert; pinhole.PinholeCameraMapping.
+        view_angles converts into it from world mm using its own scale
+        factors. Both must answer in the same frame, and there is a test
+        asserting they do.
 
         A viewing ray is recovered from the TWO calibrated Z-planes: the
         canvas point (xp, yp) on plane A maps to some raw sensor pixel; the
@@ -295,6 +328,18 @@ def build_camera_mapping(settings, plane2_settings=None, sheet_z_mm=None, pinhol
     if pinhole_settings is not None:
         from .pinhole import PinholeCameraMapping, euler_zyx
         p = pinhole_settings
+        if sheet_z_mm is None:
+            # A pinhole camera is valid at any Z, so unlike the two-plane
+            # polynomial case there is nothing to interpolate and no reason to
+            # refuse -- but Z=0 is still an ASSUMPTION about where the light
+            # sheet sat, not a fact from the calibration file. It is the right
+            # default (DaVis's self-calibration re-datums the coordinate
+            # system onto the sheet, putting it at Z=0), and it is wrong for a
+            # rig whose sheet was deliberately offset, so say so once.
+            print("[info] camera_mapping: no sheet_z_mm given -- evaluating the "
+                  "pinhole calibration at Z=0 (the calibration origin plane). Set "
+                  "sheet_z_mm on the Calibration panel if the light sheet was "
+                  "offset from it.")
         return PinholeCameraMapping(
             p.f_px, p.cx, p.cy, p.k1, p.k2, p.p1, p.p2,
             euler_zyx(p.rx, p.ry, p.rz), [p.tx, p.ty, p.tz],
@@ -382,27 +427,26 @@ def stereo_view_angles(cam0, cam1, x, y, overrides=None):
     a1, b1 = resolve(cam0, alpha1_ov, beta1_ov)
     a2, b2 = resolve(cam1, alpha2_ov, beta2_ov)
 
-    # BETA IS NEGATED; ALPHA IS NOT. This is a real frame mismatch in the
-    # engine's output, not a modelling choice:
+    # NO SIGN JUGGLING HERE, deliberately. Both camera models return
+    # view_angles in the CANVAS frame (x column-right, y row-DOWN), which is
+    # already the frame the engine's (u, v) are in, so these pass straight
+    # through. Each model derives that frame from its own calibration rather
+    # than having a convention applied on top of it.
     #
-    #   * view_angles works in WORLD mm. The canvas Y scale is NEGATIVE
-    #     (LinearScaleY FactorMmPerPixel = -0.0609 on real DaVis data), so
-    #     world Y increases UPWARD while the canvas row index increases
-    #     downward. Beta therefore comes back in a y-up frame.
-    #   * The engine's `v`, however, is row-DOWN. openpiv's own
-    #     tools.transform_coordinates flips y and negates v TOGETHER -- they
-    #     are a matched pair -- but engines.cpu_engine.init_cpu_processor
-    #     flips y (`y = frame_shape[0]*scaling_par - y`) without negating v.
-    #     So `v` stays in openpiv's original image-based, row-down frame.
-    #   * reconstruct_stereo solves dy = dY - dZ*tan(beta), which requires dy
-    #     and beta to share one frame. They don't, until this negation.
+    # Why the frame is not obvious, and why it is worth this comment: the
+    # engine's `v` is row-down, but openpiv's own tools.transform_coordinates
+    # flips y and negates v TOGETHER, as a matched pair, while
+    # engines.cpu_engine.init_cpu_processor flips `y` WITHOUT negating `v`.
+    # So the reported y is up and the reported v is down. Meanwhile DaVis's
+    # LinearScaleY FactorMmPerPixel is negative, so world Y is up too. Two
+    # independent y-up/y-down mismatches, and reconstruct_stereo needs dy and
+    # beta in one frame.
     #
-    # X has no such flip (the canvas X scale is positive and `u` is
-    # column-right), so alpha is already consistent and must NOT be negated.
-    #
-    # Measured on a real pair, per-pixel alpha with beta negated vs not:
-    # mean|diff| U,V 23.41 -> 22.21 mm/s and corr(V) 0.9234 -> 0.9379. It also
-    # beats a scalar beta (22.53 / 0.9331), which is what made the bug visible
-    # -- a physically-correct per-pixel field that performs WORSE than a
-    # constant is a frame error, not a modelling error.
-    return tuple(np.deg2rad(a) for a in (a1, a2, -b1, -b2))
+    # An earlier version of this function negated beta here instead. That was
+    # right for the pinhole model (whose view_angles then worked in world mm)
+    # and silently WRONG for the polynomial one (whose view_angles works in
+    # canvas pixels and was therefore already row-down) -- a double negation
+    # that put ~14% of |W| into V, antisymmetric about the canvas mid-row, so
+    # it largely cancelled in a field-wide mean and was easy to miss. Making
+    # both models answer in one stated frame removes the whole class of bug.
+    return tuple(np.deg2rad(a) for a in (a1, a2, b1, b2))

@@ -21,7 +21,8 @@ import os
 import numpy as np
 import pytest
 
-from piv_suite.calibration.camera_mapping import build_camera_mapping, stereo_view_angles
+from piv_suite.calibration.camera_mapping import (build_camera_mapping, build_stereo_cameras,
+                                                  stereo_view_angles)
 from piv_suite.calibration.pinhole import (
     PinholeCameraMapping, euler_zyx, read_marks, read_pinhole_camera,
     weighted_reprojection_rms,
@@ -263,12 +264,11 @@ def test_loading_a_project_saved_before_pinhole_existed_still_works(tmp_path):
     assert back.stereo.world_shape == (100, 200)
 
 
-def test_stereo_view_angles_negates_beta_but_not_alpha():
-    """The engine's `v` is row-down while world Y is y-up (the canvas Y scale
-    is negative), so beta must be negated to share reconstruct_stereo's frame;
-    `u` and world X share a frame, so alpha must not be. Applies to manually
-    overridden angles too -- an override is a physical world-frame angle, the
-    same quantity view_angles derives, so it gets the same treatment."""
+def test_stereo_view_angles_passes_overrides_through_unchanged():
+    """stereo_view_angles applies no sign convention of its own: both models
+    already answer in the canvas frame, so an override is used as typed. An
+    earlier version negated beta here, which was right for the pinhole model
+    and silently wrong for the polynomial one."""
     cam = PinholeCameraMapping(
         f_px=10000.0, cx=0.0, cy=0.0, k1=0.0, k2=0.0, p1=0.0, p2=0.0,
         R=np.eye(3), T=[0.0, 0.0, 1000.0],
@@ -277,8 +277,78 @@ def test_stereo_view_angles_negates_beta_but_not_alpha():
     a1, a2, b1, b2 = stereo_view_angles(cam, cam, x, x, (11.0, -12.0, 13.0, -14.0))
     assert np.degrees(a1) == pytest.approx(11.0)
     assert np.degrees(a2) == pytest.approx(-12.0)
-    assert np.degrees(b1) == pytest.approx(-13.0)
-    assert np.degrees(b2) == pytest.approx(14.0)
+    assert np.degrees(b1) == pytest.approx(13.0)
+    assert np.degrees(b2) == pytest.approx(-14.0)
+
+
+@_has_real
+@pytest.mark.parametrize("camera", ("1", "2"))
+def test_view_angles_predict_the_real_apparent_shift_of_an_out_of_plane_particle(camera):
+    """THE contract, tested directly rather than by convention.
+
+    reconstruct_stereo solves dx = dX - dZ*tan(alpha) and dy = dY -
+    dZ*tan(beta). So for a particle that moves ONLY in Z, the apparent
+    in-plane shift of its image, expressed on the dewarp canvas in mm, must
+    equal -dZ*tan(angle) -- for BOTH components, with the signs that come out.
+
+    Nothing here assumes a frame: the apparent shift is measured by actually
+    projecting the displaced particle and finding which canvas point lands on
+    the same sensor pixel. A sign error anywhere in view_angles fails this.
+    """
+    from scipy.optimize import fsolve
+
+    cam = read_pinhole_camera(
+        os.path.join(_snapshot(_PINHOLE_SNAPSHOTS[0]), "Calibration.xml"), camera)
+    dz = 0.75  # mm out of the light sheet
+    for xp, yp in ((1500.0, 900.0), (4000.0, 2200.0), (2800.0, 1500.0)):
+        X, Y = cam.canvas_to_world_mm(xp, yp)
+        target = cam.project(np.array([X, Y, dz]))
+
+        def residual(c):
+            return cam.project(np.array([*cam.canvas_to_world_mm(c[0], c[1]), 0.0])) - target
+
+        xp2, yp2 = fsolve(residual, [xp, yp], full_output=False)
+        # Apparent shift on the canvas, in mm, using each axis's own scale.
+        dx_mm = (xp2 - xp) * abs(cam.scale_x)
+        dy_mm = (yp2 - yp) * abs(cam.scale_y)
+        alpha, beta = cam.view_angles(np.array([xp]), np.array([yp]))
+        assert dx_mm == pytest.approx(-dz * np.tan(np.radians(alpha[0])), abs=2e-3)
+        assert dy_mm == pytest.approx(-dz * np.tan(np.radians(beta[0])), abs=2e-3)
+
+
+@_has_real
+def test_polynomial_and_pinhole_models_agree_on_the_viewing_angles():
+    """THE cross-model invariant, and the one that would have caught the
+    double-negation bug: two entirely independent decodes of the same physical
+    rig must return the same angles, in the same frame.
+
+    The two calibration snapshots are 13 days apart and the cameras were
+    physically moved between them, so this is a convention/frame check to a
+    couple of degrees, not a numerical-equality one. A SIGN error shows up
+    enormously against that tolerance; a genuine rig change does not."""
+    from piv_suite.io.davis_set import _exact_camera_mapping_from_calibration_xml
+
+    poly_xml = os.path.join(_snapshot("Calibration_260309_161814"), "Calibration.xml")
+    pin_xml = os.path.join(_snapshot("Calibration_260323_161023"), "Calibration.xml")
+
+    for ident in ("1", "2"):
+        planes, ppm, wh = _exact_camera_mapping_from_calibration_xml(poly_xml, ident)
+        poly_cam = build_camera_mapping(planes[0], planes[1], sheet_z_mm=-0.5, px_per_mm=ppm)
+        pin_cam = read_pinhole_camera(pin_xml, ident)
+
+        # Sample well inside both canvases, in each model's own pixel units.
+        for cam, (w, h) in ((poly_cam, wh), (pin_cam, pin_cam.corrected_wh)):
+            cam._sample = np.meshgrid(np.linspace(0.2 * w, 0.8 * w, 5),
+                                      np.linspace(0.2 * h, 0.8 * h, 5))
+        a_poly, b_poly = poly_cam.view_angles(*poly_cam._sample)
+        a_pin, b_pin = pin_cam.view_angles(*pin_cam._sample)
+
+        assert a_poly.mean() == pytest.approx(a_pin.mean(), abs=3.0)
+        assert b_poly.mean() == pytest.approx(b_pin.mean(), abs=3.0)
+        # Beta's mean is near zero, so a mean-only check would pass even with
+        # the sign inverted. Compare the top-to-bottom TREND, which does not.
+        assert np.sign(b_poly[-1].mean() - b_poly[0].mean()) == \
+            np.sign(b_pin[-1].mean() - b_pin[0].mean())
 
 
 @_has_real
@@ -293,3 +363,47 @@ def test_stereo_view_angles_on_a_real_project_are_arrays_not_scalars():
     for a in (a1, a2, b1, b2):
         assert a.shape == x.shape
     assert np.ptp(a1) > np.radians(5.0)
+
+
+@_has_real
+def test_calibration_panel_round_trips_the_pinhole_calibration(qtbot):
+    """The GUI panel must carry cam*_pinhole through set_settings ->
+    get_settings.
+
+    Every processing entry point builds its config from this panel
+    (run_panel, preview_panel), so dropping the pinhole settings here made the
+    whole PinholeOpenCV path unreachable from the GUI -- while the status bar
+    reported a successful extraction. The failure then surfaced much later,
+    inside view_angles, as "supply the angles manually": the exact opposite of
+    what the user had just been told."""
+    from piv_suite_gui.widgets.calibration_panel import CalibrationPanel
+
+    extracted = read_stereo_calibration_from_set(os.path.join(_REAL_PROJECT, "dt_opt.set"))
+    panel = CalibrationPanel()
+    qtbot.addWidget(panel)
+    panel.set_settings(extracted)
+    got = panel.get_settings()
+
+    assert got.cam0_pinhole is not None and got.cam1_pinhole is not None
+    assert got.cam0_pinhole.f_px == pytest.approx(extracted.cam0_pinhole.f_px)
+    assert got.cam1_pinhole.tz == pytest.approx(extracted.cam1_pinhole.tz)
+    assert got.world_shape == extracted.world_shape
+    # And the panel must be able to build real cameras from what it hands back.
+    cam0, cam1 = build_stereo_cameras(got)
+    x, y = np.meshgrid(np.linspace(0, 5000, 4), np.linspace(0, 3000, 4))
+    a1, a2, b1, b2 = stereo_view_angles(cam0, cam1, x, y,
+                                        (got.alpha1_deg, got.alpha2_deg,
+                                         got.beta1_deg, got.beta2_deg))
+    assert np.ptp(np.degrees(a1)) > 3.0
+
+
+def test_calibration_panel_reports_which_model_it_holds(qtbot):
+    from piv_suite_gui.widgets.calibration_panel import CalibrationPanel
+    from piv_suite.config.schema import StereoSettings
+
+    panel = CalibrationPanel()
+    qtbot.addWidget(panel)
+    panel.set_settings(StereoSettings())
+    assert "polynomial" in panel.model_label.text()
+    panel.set_settings(StereoSettings(cam0_pinhole=PinholeMappingSettings(f_px=1.0)))
+    assert "Pinhole" in panel.model_label.text()

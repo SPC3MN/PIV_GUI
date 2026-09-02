@@ -674,22 +674,19 @@ def read_stereo_calibration_from_set(set_path, multiset_index=0):
     decode derivation and its real-ground-truth validation: 0.29-0.69px
     RMS across 2 clean real snapshots, both Z-planes each).
 
-    A SECOND DaVis internal calibration Type exists, 'PinholeOpenCV' --
-    the standard OpenCV pinhole camera model (FocalLengthPixel,
-    PrincipalPoint, Radial/TangentialDistortion, TranslationMm,
-    RotationAngles). This WAS attempted (a Rodrigues-rotation projection
-    with Brown-Conrady distortion, plus Euler-angle rotation variants,
-    focal-length unit conversions, sign/axis permutations -- see this
-    module's git history / SESSION_HANDOFF.md for the exact sweep) and
-    got CLOSE but not exact: with a Z-Y-X Euler rotation order, the
-    y-pixel comes out already sub-pixel (0.7px RMS, matching
-    <FitError RMS>) but x is off by several px in a way that isn't a pure
-    additive constant (varies ~2.5px across the calibration volume even
-    after removing the best-fit affine trend) -- i.e. genuinely not
-    decoded, not merely a units/sign slip like the corrected-image-space
-    discovery that cracked Polynomial3rdOrder. PinholeOpenCV therefore
-    has NO exact path here and raises (see below) rather than silently
-    reusing the mark-fitting approach as if it were the automatic answer.
+    DaVis's SECOND internal calibration Type, 'PinholeOpenCV', is also
+    decoded exactly -- see calibration.pinhole, which documents every
+    convention and its validation (the stored parameters, used verbatim,
+    reproduce DaVis's own <FitError RMS> to ~1e-14 relative on three
+    independent snapshots).
+
+    An earlier attempt concluded this model could not be decoded, reporting a
+    residual that was sub-pixel in y but several px in x. The cause was not the
+    model: DaVis writes the SAME MarkPositionTable.xml into both cameras'
+    folders, and each copy contains BOTH cameras' blocks, so selecting marks
+    by FOLDER validated camera 1's parameters against camera 2's marks. That
+    conclusion is superseded; the note is kept because the failure mode is
+    easy to walk back into.
 
     Locates the project's calibration by walking up from set_path to find
     'Properties/Calibration/' (see _find_calibration_project_root), picks
@@ -768,22 +765,8 @@ def read_stereo_calibration_from_set(set_path, multiset_index=0):
             f"used here automatically. Enter calibration manually on the Calibration "
             f"panel.")
 
-    # A self-calibration CORRECTION FIELD makes the stored polynomial only a
-    # BASE LAYER: the true mapping is polynomial + correction, and decoding
-    # the base alone is silently wrong (measured 16-32 px on this project's
-    # own snapshots) with nothing in the file marking it. Refuse rather than
-    # hand back a plausible-looking mapping that is tens of pixels out --
-    # every downstream vector would be wrong with no signal anywhere.
-    if os.path.isdir(os.path.join(snapshot_dir, "Correction field")):
-        raise NotImplementedError(
-            f"Calibration snapshot '{snapshot_label}' ({snapshot_dir}) is a "
-            f"'Polynomial3rdOrder' calibration with a self-calibration CORRECTION "
-            f"FIELD ('Correction field\\' is present). The stored polynomial is only "
-            f"the base layer -- DaVis applies the correction field on top of it, and "
-            f"this app does not read that yet, so decoding the polynomial alone would "
-            f"be silently wrong (measured 16-32 px on real snapshots). Use a "
-            f"calibration snapshot without a correction field, or enter calibration "
-            f"manually on the Calibration panel.")
+    _refuse_if_base_polynomial_is_not_the_whole_mapping(
+        snapshot_dir, snapshot_label, cam0_exact, cam1_exact)
 
     cam0_planes, px_per_mm_0, corrected_wh_0 = cam0_exact
     cam1_planes, px_per_mm_1, corrected_wh_1 = cam1_exact
@@ -850,6 +833,21 @@ def _pinhole_stereo_settings_from_calibration_xml(calibration_xml, snapshot_dir,
         cams.append(cam)
     cam0, cam1 = cams
 
+    # A self-calibration correction field is not specific to the polynomial
+    # model, and the polynomial guard below runs only after this function has
+    # already returned -- so a pinhole snapshot carrying one would otherwise be
+    # accepted with no signal at all. This project's current calibration was
+    # itself produced by a self-calibration run, so this is not hypothetical
+    # for future data. Warn rather than refuse: unlike the polynomial case
+    # there is no evidence here that the stored model is merely a base layer
+    # (its declared FitError is an honest 0.43/0.66 px and the marks reproduce
+    # it exactly), so refusing would block usable data on a suspicion.
+    if os.path.isdir(os.path.join(snapshot_dir, "Correction field")):
+        print(f"[warn] davis_set: calibration snapshot '{snapshot_label}' has a "
+              f"'Correction field\' that this app does not read. Its PinholeOpenCV "
+              f"parameters are used as stored; if DaVis applied a correction on top of "
+              f"them, this app's dewarp will differ from DaVis's by that correction.")
+
     _warn_if_marks_disagree(snapshot_dir, snapshot_label, cams)
 
     def to_settings(cam, rx_ry_rz):
@@ -890,6 +888,78 @@ def _pinhole_stereo_settings_from_calibration_xml(calibration_xml, snapshot_dir,
     )
 
 
+#: Below this, a declared <FitError RMS> is not a real fit residual. Every
+#: genuine DaVis calibration seen on real projects lands at 0.4-0.8 px, and a
+#: 3rd-order polynomial fit to physical calibration marks cannot do better
+#: than the mark-detection precision (a few tenths of a pixel). Two orders of
+#: magnitude below that means the number is not measuring what it appears to.
+_IMPLAUSIBLE_FIT_ERROR_PX = 0.05
+
+
+def _refuse_if_base_polynomial_is_not_the_whole_mapping(snapshot_dir, snapshot_label,
+                                                        cam0_exact, cam1_exact):
+    """Refuse a Polynomial3rdOrder snapshot whose stored polynomial is only the
+    BASE LAYER beneath a self-calibration correction field.
+
+    A `Correction field\\` directory is NOT sufficient evidence on its own,
+    and refusing on it alone was wrong. Of this project's two polynomial
+    snapshots, both have that directory and only ONE is actually broken:
+
+        Calibration_260309_161814  declares 0.6886 / 0.7251 px  -> a real fit, usable
+        Calibration_260310_140344  declares 0.0035 / 0.0021 px  -> base layer only,
+                                   measured 16.1 / 32.0 px wrong in practice
+
+    Rejecting on directory presence would refuse 260309_161814 -- and with it
+    a dozen real recordings -- for no reason.
+
+    The discriminator is the DECLARED FIT ERROR ITSELF. DaVis scores the fit
+    AFTER applying the correction field, so a snapshot whose polynomial is
+    merely a base layer advertises an impossibly good residual: 0.0035 px is
+    sub-nanometre on this rig. A snapshot whose polynomial really is the whole
+    mapping declares an honest few-tenths-of-a-pixel number. So an implausible
+    FitError is exactly the signature of the failure mode, and it needs
+    nothing but the file already open.
+
+    Both conditions are required: a correction field present AND a declared
+    fit error too good to be a fit. Either alone is not evidence."""
+    if not os.path.isdir(os.path.join(snapshot_dir, "Correction field")):
+        return
+    for number, exact in ((1, cam0_exact), (2, cam1_exact)):
+        declared = _read_fit_error_rms(
+            os.path.join(snapshot_dir, "Calibration.xml"), str(number))
+        if declared is None or declared >= _IMPLAUSIBLE_FIT_ERROR_PX:
+            continue
+        raise NotImplementedError(
+            f"Calibration snapshot '{snapshot_label}' ({snapshot_dir}) is a "
+            f"'Polynomial3rdOrder' calibration whose stored coefficients are only the "
+            f"BASE LAYER of a self-calibration: it has a 'Correction field\\' and "
+            f"declares a FitError RMS of {declared:.5f} px for camera {number}, which is "
+            f"far too small to be a real fit to physical calibration marks -- DaVis "
+            f"scored it AFTER applying the correction field. This app does not read "
+            f"correction fields yet, so using the base polynomial alone would be "
+            f"silently wrong (measured 16-32 px on this snapshot). Use a calibration "
+            f"snapshot without a correction field, or enter calibration manually on the "
+            f"Calibration panel.")
+
+
+def _read_fit_error_rms(calibration_xml_path, camera_identifier):
+    """One camera's declared <FitError RMS>, or None if absent."""
+    try:
+        root = ET.parse(calibration_xml_path).getroot()
+    except (ET.ParseError, OSError):
+        return None
+    cm = root.find(f".//CoordinateMapper[@CameraIdentifier='{camera_identifier}']")
+    if cm is None:
+        return None
+    el = cm.find(".//CommonParameters/FitError")
+    if el is None or "RMS" not in el.attrib:
+        return None
+    try:
+        return float(el.attrib["RMS"])
+    except ValueError:
+        return None
+
+
 def _warn_if_marks_disagree(snapshot_dir, snapshot_label, cams):
     """Check each decoded camera against its own snapshot's
     MarkPositionTable.xml and warn if the reprojection RMS doesn't match
@@ -911,6 +981,7 @@ def _warn_if_marks_disagree(snapshot_dir, snapshot_label, cams):
     silently pairs one camera's marks with the other's parameters -- that
     mistake is what previously made this model look undecodable."""
     from ..calibration.pinhole import read_marks, weighted_reprojection_rms
+    disagreeing = []
     for i, cam in enumerate(cams):
         number = i + 1
         path = os.path.join(snapshot_dir, f"camera{number}", "MarkPositionTable.xml")
@@ -926,13 +997,73 @@ def _warn_if_marks_disagree(snapshot_dir, snapshot_label, cams):
                   f"for '{snapshot_label}': {exc}")
             continue
         if rms > max(1.5 * cam.fit_rms, cam.fit_rms + 0.25):
-            print(f"[warn] davis_set: camera{number}'s MarkPositionTable.xml reprojects "
-                  f"at {rms:.3f} px but '{snapshot_label}' declares FitError RMS "
-                  f"{cam.fit_rms:.3f} px. That normally means the mark table is STALE "
-                  f"(the coordinate system was re-datumed after calibrating and DaVis "
-                  f"copied the old table forward), which does NOT affect the "
-                  f"calibration itself -- the extrinsics and canvas offsets share one "
-                  f"frame and are used directly. Proceeding.")
+            disagreeing.append((number, cam, marks, rms))
+
+    if not disagreeing:
+        return
+
+    # A raw disagreement is NOT yet a problem, and reporting it as one is
+    # worse than useless: on the reference project this fires on EVERY
+    # extraction of the calibration actually in use (21.5 / 22.3 px against a
+    # declared 0.43 / 0.66), because DaVis re-datumed the coordinate system
+    # after calibrating and copied the old mark table forward unchanged --
+    # and it also copied the old <FitError RMS> forward, so the declared
+    # number cannot detect its own staleness. A warning that always fires on
+    # the primary dataset teaches people to ignore warnings.
+    #
+    # The distinguishing test: a stale table is the SAME marks in a DIFFERENT
+    # world frame, so ONE rigid transform, shared by both cameras, should
+    # account for all of it. If it does, the calibration is entirely usable
+    # (the extrinsics and canvas offsets share their own consistent frame and
+    # are what get used) and this is worth an info line, not a warning. If a
+    # rigid transform CANNOT explain it, something is genuinely inconsistent
+    # and the user should hear about it.
+    residual = _rigid_gauge_residual(disagreeing)
+    if residual is not None and all(residual[n] <= max(1.05 * c.fit_rms, c.fit_rms + 0.05)
+                                    for n, c, _, _ in disagreeing):
+        print(f"[info] davis_set: '{snapshot_label}' has a STALE MarkPositionTable.xml "
+              f"(the coordinate system was re-datumed after calibrating and DaVis copied "
+              f"the old table forward). A single rigid frame change accounts for it "
+              f"exactly, so the calibration itself is consistent and is used as stored.")
+        return
+    for number, cam, _marks, rms in disagreeing:
+        print(f"[warn] davis_set: camera{number}'s MarkPositionTable.xml reprojects at "
+              f"{rms:.3f} px but '{snapshot_label}' declares FitError RMS "
+              f"{cam.fit_rms:.3f} px, and no single rigid frame change explains it. The "
+              f"calibration may not match the marks it was fit to. Proceeding, but "
+              f"check the calibration.")
+
+
+def _rigid_gauge_residual(disagreeing):
+    """Fit ONE 6-DOF rigid transform shared by every camera in `disagreeing`,
+    mapping the mark world frame onto the extrinsics' frame, and return each
+    camera's weighted reprojection RMS under it (or None if it can't be fit).
+
+    Shared, not per-camera, on purpose: a per-camera transform has enough
+    freedom to absorb a genuine calibration inconsistency too, which would
+    defeat the check. One transform for both cameras can only absorb an actual
+    change of coordinate system."""
+    try:
+        from scipy.optimize import least_squares
+    except ImportError:
+        return None
+    from ..calibration.pinhole import rodrigues, weighted_reprojection_rms
+
+    def residuals(q):
+        rot, t = rodrigues(q[:3]), q[3:6]
+        out = []
+        for _n, cam, (world, raw, weight), _rms in disagreeing:
+            r = cam.project(world @ rot.T + t) - raw
+            out.append((r * np.sqrt(weight)[:, None]).ravel())
+        return np.concatenate(out)
+
+    try:
+        sol = least_squares(residuals, np.zeros(6))
+    except Exception:                                  # noqa: BLE001 - advisory only
+        return None
+    rot, t = rodrigues(sol.x[:3]), sol.x[3:6]
+    return {n: weighted_reprojection_rms(cam, (world @ rot.T + t, raw, weight))
+            for n, cam, (world, raw, weight), _rms in disagreeing}
 
 
 def _read_field_of_view(calibration_xml_path):

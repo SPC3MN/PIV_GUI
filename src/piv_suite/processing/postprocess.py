@@ -41,7 +41,16 @@ def global_outlier_mask(u, v, n_std, w=None):
 UOD_EPS_PX = 0.1
 
 
-def range_filter(u, v, residual_max=None, window_size=3, eps=UOD_EPS_PX, w=None):
+def _valid_neighbour_count(valid, window_size):
+    """How many non-NaN neighbours each cell has, excluding itself."""
+    from scipy.ndimage import uniform_filter
+    k = int(window_size)
+    total = uniform_filter(valid.astype(np.float64), size=k, mode="constant", cval=0.0) * k * k
+    return np.rint(total).astype(int) - valid.astype(int)
+
+
+def range_filter(u, v, residual_max=None, window_size=3, eps=UOD_EPS_PX, w=None,
+                 insertion_max=None, min_neighbours=None):
     """Universal outlier detection (Westerweel & Scarano 2005): reject a
     vector whose deviation from its local neighbourhood median, NORMALIZED
     by that neighbourhood's median absolute deviation, exceeds
@@ -108,6 +117,26 @@ def range_filter(u, v, residual_max=None, window_size=3, eps=UOD_EPS_PX, w=None)
         docstring for why W matters here specifically. Planar/dual-planar
         callers never pass this; the 2-component form is unchanged.
 
+    insertion_max : float or None -- DaVis's "remove and iteratively
+        replace" second threshold (its medianUniversalOutlierInsertion
+        Factor, default 3, against a removal factor of 2). When given, a
+        rejected vector is RE-INSERTED if, once the other rejects are taken
+        out of its neighbourhood, its residual falls below this. Iterated to
+        convergence. None keeps the plain single-shot removal.
+
+        This is a genuine density mechanism, not a leniency knob. A good
+        vector sitting next to a cluster of bad ones is judged against a
+        neighbourhood median those bad ones have dragged around; removing
+        them first and re-testing is what tells the two cases apart. The
+        threshold is deliberately LOOSER than residual_max, because a
+        vector that has already survived one round of cleaning has more
+        evidence in its favour than one being judged for the first time.
+    min_neighbours : int or None -- refuse to reject a vector with fewer
+        than this many valid neighbours (DaVis's medianFilterMinNoNeighbours,
+        default 3). A vector at the edge of the field or beside a large hole
+        is otherwise judged on almost no evidence, and rejecting it there
+        erodes the field's border a little more on every pass.
+
     Returns a bool array (same shape as u), True = rejected.
     """
     if residual_max is None:
@@ -118,10 +147,37 @@ def range_filter(u, v, residual_max=None, window_size=3, eps=UOD_EPS_PX, w=None)
             "grid -- not applicable to flat/tiled output"
         )
     residual = normalized_median_residual(u, v, window_size=window_size, eps=eps, w=w)
-    return residual > residual_max
+    rejected = residual > residual_max
+
+    present = np.isfinite(u)
+    if min_neighbours:
+        rejected &= _valid_neighbour_count(present, window_size) >= min_neighbours
+    if not insertion_max or not rejected.any():
+        return rejected
+
+    # Iterate to convergence. The rejected set only ever shrinks (a vector is
+    # re-inserted, never re-rejected, because each pass judges against a
+    # neighbourhood that has only gained members), so this terminates; the
+    # cap is belt-and-braces against a pathological float case.
+    for _ in range(10):
+        kept = present & ~rejected
+        # The rejected cell keeps ITS OWN value (it is what's being judged);
+        # only its NEIGHBOURS are cleaned. NaN residual means it has no
+        # surviving neighbours at all -- no evidence to re-admit it on, so it
+        # stays out.
+        resid = normalized_median_residual(u, v, window_size=window_size, eps=eps,
+                                           w=w, contributing=kept)
+        reinstate = rejected & np.isfinite(resid) & (resid <= insertion_max)
+        if min_neighbours:
+            reinstate &= _valid_neighbour_count(kept, window_size) >= min_neighbours
+        if not reinstate.any():
+            break
+        rejected = rejected & ~reinstate
+    return rejected
 
 
-def normalized_median_residual(u, v, window_size=3, eps=UOD_EPS_PX, w=None, _max_bytes=256 * 1024**2):
+def normalized_median_residual(u, v, window_size=3, eps=UOD_EPS_PX, w=None,
+                                contributing=None, _max_bytes=256 * 1024**2):
     """The Westerweel & Scarano universal-outlier-detection statistic per
     vector: sqrt(r_u^2 + r_v^2) (or sqrt(r_u^2 + r_v^2 + r_w^2) when `w` is
     given), where r = |value - neighbourhood median| / (neighbourhood MAD +
@@ -177,9 +233,22 @@ def normalized_median_residual(u, v, window_size=3, eps=UOD_EPS_PX, w=None, _max
     bytes_per_row = nx * k * k * 8 * (3 if w is not None else 2)
     rows_per_chunk = max(1, int(_max_bytes // max(1, bytes_per_row)))
 
-    u_pad = np.pad(u, pad, mode="constant", constant_values=np.nan)
-    v_pad = np.pad(v, pad, mode="constant", constant_values=np.nan)
-    w_pad = np.pad(w, pad, mode="constant", constant_values=np.nan) if w is not None else None
+    # `contributing` separates the two roles this array plays. The centre
+    # value being JUDGED always comes from u/v/w; which cells are allowed to
+    # take part in a neighbourhood is `contributing`. They coincide unless a
+    # caller is re-testing already-rejected vectors against a cleaned
+    # neighbourhood (see range_filter's insertion_max), where the rejected
+    # cell must still be judged even though it may no longer vote.
+    if contributing is None:
+        u_src, v_src, w_src = u, v, w
+    else:
+        u_src = np.where(contributing, u, np.nan)
+        v_src = np.where(contributing, v, np.nan)
+        w_src = np.where(contributing, w, np.nan) if w is not None else None
+
+    u_pad = np.pad(u_src, pad, mode="constant", constant_values=np.nan)
+    v_pad = np.pad(v_src, pad, mode="constant", constant_values=np.nan)
+    w_pad = np.pad(w_src, pad, mode="constant", constant_values=np.nan) if w is not None else None
     out = np.empty((ny, nx), dtype=np.float64)
 
     with warnings.catch_warnings():

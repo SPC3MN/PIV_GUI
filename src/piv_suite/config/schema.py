@@ -72,16 +72,24 @@ class CorrelationSettings:
     correlation_method: str = "circular"     # CPU-only; ignored by GPU adapter
     subpixel_method: str = "gaussian"
     deformation_method: str = "symmetric"    # CPU-only; ignored by GPU adapter
-    # 5, not 3. This is the spline order used to RESAMPLE THE IMAGES during
-    # window deformation, and it is the dominant remaining source of
-    # sub-pixel bias. Measured max |bias| over a sweep of sub-pixel shifts:
-    # order 1 (bilinear) 0.0659 px, order 3 0.0197 px, order 5 0.0069 px.
-    # The residual periodic bias this app shows is NOT classic peak-locking
-    # (it has period 2.0 px in total displacement, i.e. period 1 in the
-    # HALF-displacement windef applies to each frame for the symmetric
-    # split) -- it is deformation-interpolation error, so raising this is
-    # the lever that actually moves it.
-    interpolation_order: int = 5             # CPU-only; ignored by GPU adapter
+    # The spline order used to RESAMPLE THE IMAGES during window deformation,
+    # and the dominant source of this app's residual sub-pixel bias -- which
+    # is NOT classic peak-locking (it has period 2.0 px in total displacement,
+    # i.e. period 1 in the HALF-displacement windef applies to each frame for
+    # the symmetric split), so this is the knob that actually moves it.
+    #
+    # 3 is deliberate, after trying 5. Raising it does measurably reduce bias,
+    # on real particle images and not only synthetic ones -- max |bias| over a
+    # sub-pixel sweep: order 1 (bilinear) 0.0412 px, order 3 0.0145, order 5
+    # 0.0080. But that 0.0065 px is invisible in the quantity anyone actually
+    # cares about: on a real pair against DaVis, mean|diff| U,V was 22.18 mm/s
+    # at order 3 and 22.21 at order 5, with every correlation flat to four
+    # decimals -- and order 5 cost 14-21% of total runtime (map_coordinates on
+    # a 3027x5628 canvas: 1.74 s at order 3, 3.28 s at order 5, times two
+    # frames per pass, two cameras, four passes). Bilinear WOULD be a real
+    # regression; 5 is paying a fifth of every run for something below the
+    # noise floor of the objective.
+    interpolation_order: int = 3             # CPU-only; ignored by GPU adapter
     batch_size: Optional[int] = None         # GPU-only; ignored by CPU adapter
 
     # ---- GPU tiling (ignored entirely when backend == "cpu") ----
@@ -160,6 +168,21 @@ class ValidationSettings:
     # removal of everything but the largest scales -- then fed forward as the
     # next pass's deformation predictor. The 0.3-1.0 plateau is flat; keep
     # smoothn ON (enabling it WAS right), just not at that strength.
+    #
+    # HONEST COUNTER-EVIDENCE, since it looks damning on its own: measured
+    # against DaVis on a real pair, p=15 agrees BETTER than p=0.75 (mean|diff|
+    # U,V 17.50 vs 22.21 mm/s, corr(W) 0.978 vs 0.962). That is not a reason to
+    # go back, because DaVis's .vc7 is a POST-DENOISED field
+    # (useDenoisingFilter=true, denoisingFilter=3, anisotropic kernel 25,
+    # strength 3.5) and this app's output is not -- so over-smoothing the
+    # PREDICTOR buys agreement by making a different, worse measurement.
+    # Measured directly: p=0.75 plus a plain output smoothing of sigma=1.0
+    # reaches mean|diff| 17.58 / corr(U) 0.9696 / corr(W) 0.9810, i.e. it
+    # MATCHES p=15 on mean|diff| and BEATS it on every correlation, while
+    # leaving the underlying measurement intact. If output that lines up with
+    # DaVis is what's wanted, PostProcessSettings.smooth_field/smooth_sigma is
+    # the honest place to get it -- it is applied after the field is measured,
+    # is clearly labelled as smoothing, and can be turned off.
     smoothn_p: float = 0.75
 
     # CPU-only; no effect on GPU. Restores openpiv's own real per-pass
@@ -236,6 +259,20 @@ class RangeFilterSettings:
     enabled: bool = True
     residual_max: Optional[float] = 2.0
     window_size: int = 3
+    # DaVis's medianUniversalOutlierInsertionFactor (3, against its removal
+    # factor of 2) -- its median filter runs in "remove and iteratively
+    # replace" mode, and this app previously implemented only the removal
+    # half. A vector next to a cluster of bad ones is judged against a median
+    # those bad ones dragged around; once they are gone, re-testing tells a
+    # genuine outlier from a bystander. Deliberately LOOSER than residual_max:
+    # a vector that has survived a round of cleaning has more evidence behind
+    # it than one being judged for the first time. None restores the old
+    # single-shot removal.
+    insertion_max: Optional[float] = 3.0
+    # DaVis's medianFilterMinNoNeighbours. Don't reject a vector judged on
+    # almost no evidence -- at the field edge or beside a large hole -- or the
+    # border erodes a little further on every pass.
+    min_neighbours: Optional[int] = 3
 
     def to_kwargs(self):
         """None if disabled or residual_max isn't set (so
@@ -243,7 +280,9 @@ class RangeFilterSettings:
         kwargs dict for postprocess.range_filter()."""
         if not self.enabled or self.residual_max is None:
             return None
-        return {"residual_max": self.residual_max, "window_size": self.window_size}
+        return {"residual_max": self.residual_max, "window_size": self.window_size,
+                "insertion_max": self.insertion_max,
+                "min_neighbours": self.min_neighbours}
 
 
 @dataclass

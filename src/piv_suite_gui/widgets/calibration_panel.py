@@ -207,6 +207,19 @@ class CalibrationPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # DaVis's PinholeOpenCV calibration, when the loaded project has that
+        # model instead of the polynomial one. Held opaquely and passed
+        # straight back out by get_settings: it is 16 fitted camera
+        # parameters per camera, not something a user hand-edits, so it has no
+        # editable form here -- but it MUST survive a set_settings/
+        # get_settings round trip, because every processing entry point builds
+        # its config from this panel. Dropping it silently produced a config
+        # with an identity polynomial mapping and no pinhole, which then
+        # failed deep inside view_angles telling the user to enter angles
+        # manually -- directly contradicting the status line that had just
+        # said the calibration was extracted successfully.
+        self._cam0_pinhole = None
+        self._cam1_pinhole = None
         self._build_ui()
 
     def _build_ui(self):
@@ -225,6 +238,15 @@ class CalibrationPanel(QWidget):
             "when the input path is selected).")
         load_from_set_btn.clicked.connect(self.load_from_set_requested.emit)
         cam_layout.addWidget(load_from_set_btn)
+
+        # Which of DaVis's two calibration models this project actually has.
+        # The coefficient forms below are meaningful only for the polynomial
+        # one; for a PinholeOpenCV project they stay at their defaults and are
+        # not used, so say so rather than showing the user an editable table
+        # of zeros that looks like it matters.
+        self.model_label = QLabel("Model: polynomial (editable below)")
+        self.model_label.setWordWrap(True)
+        cam_layout.addWidget(self.model_label)
 
         cam_tabs = QTabWidget()
         self.cam0_form = _CameraMappingForm("cam0")
@@ -343,6 +365,8 @@ class CalibrationPanel(QWidget):
 
     def get_settings(self) -> StereoSettings:
         return StereoSettings(
+            cam0_pinhole=self._cam0_pinhole,
+            cam1_pinhole=self._cam1_pinhole,
             cam0_mapping=self.cam0_form.get_settings(),
             cam0_mapping_plane2=self.cam0_form.plane2,
             cam1_mapping=self.cam1_form.get_settings(),
@@ -363,6 +387,12 @@ class CalibrationPanel(QWidget):
         authoritatively overwriting whatever was there before -- mirrors
         settings_panel.set_calibration_settings' pattern for the planar
         case."""
+        self._cam0_pinhole = settings.cam0_pinhole
+        self._cam1_pinhole = settings.cam1_pinhole
+        self.model_label.setText(
+            "Model: DaVis PinholeOpenCV (exact; not hand-editable)"
+            if settings.cam0_pinhole is not None
+            else "Model: polynomial (editable below)")
         self.cam0_form.set_settings(settings.cam0_mapping, settings.cam0_mapping_plane2)
         self.cam1_form.set_settings(settings.cam1_mapping, settings.cam1_mapping_plane2)
         if settings.world_shape and settings.world_shape != (0, 0):

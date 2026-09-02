@@ -11,3 +11,4 @@ stereo_piv_output*/
 installer/Output/
 installer/assets/
 piv_comparison_output/
+src/piv_suite/engines/*.log

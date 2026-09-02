@@ -529,12 +529,19 @@ def test_exact_camera_mapping_returns_none_for_missing_camera(tmp_path):
 
 def _planes_from_viewing_ray(alpha_deg, beta_deg, z_a, z_b, px_per_mm, span=4000.0):
     """Two CameraMappingSettings for ONE camera whose two calibrated Z-planes
-    are consistent with a real viewing ray at (alpha_deg, beta_deg).
+    are consistent with a viewing ray whose CANVAS-frame angles are
+    (alpha_deg, beta_deg) -- x with the column index, y with the ROW index.
 
-    A point at world (X, Y) on plane A and the SAME sensor pixel on plane B
-    are separated, in world mm, by (tan(alpha), tan(beta)) * (z_b - z_a).
-    Expressed as canvas pixels that is a constant offset between the two
-    planes' mappings, which is what the constant ("1") coefficient encodes.
+    NOTE THE FRAME. An earlier version of this helper described the offset as
+    "in world mm" while computing it in canvas pixels, silently equating
+    world-Y-up with row-index-down. Since DaVis's LinearScaleY is negative
+    those differ by a sign, and the fixture therefore asserted the wrong
+    convention for beta -- the same circularity the deleted
+    _estimate_stereo_angles tests had, where the fixture encodes the very
+    assumption under test. The cross-model test in
+    test_pinhole_calibration.py is the real guard: it requires the polynomial
+    and pinhole models, given the same physical rig, to return the same
+    angles. A fixture cannot fake agreement between two independent decodes.
     """
     zero = {k: 0.0 for k in COEF_KEYS}
     dz = z_b - z_a

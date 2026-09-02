@@ -53,7 +53,7 @@ shared generic driver right now would mean touching already-working,
 already-tested planar code for a modest de-duplication win, risking a
 subtle behavioral difference reaching BOTH call sites at once instead of
 just this new one. What IS shared, by plain import (never copy-paste):
-apply_speedups, get_engine_factory, to_cpu_settings, build_camera_mapping,
+apply_speedups, get_engine_factory, to_cpu_settings, build_stereo_cameras,
 pipeline.process_stereo_pair, and the preprocess/postprocess helpers --
 i.e. everything where duplication would actually risk drift. The submission loop itself is reimplemented independently
 (structurally identical, not copy-pasted-then-forgotten) rather than
@@ -237,10 +237,10 @@ def run_stereo_batch_parallel(pair_source, cfg, output_dir, n_workers,
     """Drives process_one_pair_stereo_worker() across a ProcessPoolExecutor
     for every (pair_id, fa0, fb0, fa1, fb1) in pair_source. Caller supplies
     n_workers (> 1 -- callers route n_workers<=1 to their own unmodified
-    serial loop instead, see module docstring) and angles (radians, from
-    cfg.stereo.alpha1_deg/alpha2_deg/beta1_deg/beta2_deg -- computed once
-    by the caller, same as both serial loops already do, not recomputed
-    per pair or per worker).
+    serial loop instead, see module docstring). Triangulation angles are NOT a
+    parameter: they are derived per pixel inside each worker
+    (calibration.camera_mapping.stereo_angles_for) on that pair's own
+    correlation grid, exactly as both serial loops do.
 
     Structurally identical to parallel_planar.run_planar_batch_parallel --
     same ordering/error/throttling contract; see that function's

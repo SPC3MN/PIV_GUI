@@ -225,3 +225,99 @@ def test_apply_calibration_scales_correctly():
     u_out, v_out = apply_calibration(u, v, pixel_pitch_mm=0.01, frame_dt_s=0.002)
     expected_scale = (0.01 / 1000.0) / 0.002
     assert np.isclose(u_out[0], 10.0 * expected_scale)
+
+
+# ---- DaVis's "remove and iteratively replace" median filter ----
+#
+# DaVis runs its median filter with a REMOVAL factor of 2 and a separate,
+# looser INSERTION factor of 3 (medianUniversalOutlierRemovalFactor /
+# ...InsertionFactor in a real JobHistory.xml). This app implemented only the
+# removal half, which costs real density: a good vector sitting beside a
+# cluster of bad ones is judged against a neighbourhood median those bad ones
+# have dragged around.
+
+def _field_with_marooned_good_vectors():
+    """A uniform field containing a patch of mutually-inconsistent noise, with
+    two adjacent GOOD vectors marooned inside it.
+
+    A lone outlier does NOT create collateral damage -- a 3x3 median is robust
+    to one bad neighbour in eight, which is the whole point of using it. The
+    damage happens where the neighbourhood is MOSTLY bad, so a good vector is
+    judged against a median the noise owns. That is the case reinsertion
+    exists for, and it is what this fixture builds."""
+    rng = np.random.RandomState(0)
+    u = np.full((11, 11), 1.0)
+    v = np.zeros((11, 11))
+    u[3:8, 3:8] = rng.uniform(-60, 60, (5, 5))
+    v[3:8, 3:8] = rng.uniform(-60, 60, (5, 5))
+    u[5, 5] = u[5, 6] = 1.0
+    v[5, 5] = v[5, 6] = 0.0
+    return u, v
+
+
+def test_reinsertion_recovers_a_good_vector_the_single_shot_pass_rejects():
+    u, v = _field_with_marooned_good_vectors()
+    single = range_filter(u, v, residual_max=2.0, window_size=3)
+    both = range_filter(u, v, residual_max=2.0, window_size=3, insertion_max=3.0)
+
+    # A genuinely good vector, rejected only because the noise around it owned
+    # the median, comes back once the noise is gone.
+    assert single[5, 6]
+    assert not both[5, 6]
+    # Reinsertion can only ever shrink the rejected set.
+    assert not (both & ~single).any()
+    assert both.sum() < single.sum()
+
+
+def test_reinsertion_does_not_readmit_genuinely_inconsistent_vectors():
+    """At DaVis's own insertion factor, a vector that still disagrees with a
+    cleaned neighbourhood stays out. (A large enough threshold would readmit
+    anything -- the protection is the value, not the mechanism.)"""
+    u, v = _field_with_marooned_good_vectors()
+    single = range_filter(u, v, residual_max=2.0, window_size=3)
+    both = range_filter(u, v, residual_max=2.0, window_size=3, insertion_max=3.0)
+    # Most of the noise patch stays rejected: only the 2 marooned good vectors
+    # had any business coming back.
+    assert both.sum() >= single.sum() - 2
+
+
+def test_insertion_max_none_is_the_old_single_shot_behaviour():
+    u, v = _field_with_marooned_good_vectors()
+    assert np.array_equal(
+        range_filter(u, v, residual_max=2.0, window_size=3),
+        range_filter(u, v, residual_max=2.0, window_size=3, insertion_max=None))
+
+
+def test_min_neighbours_protects_a_vector_judged_on_no_evidence():
+    """An isolated vector with too few valid neighbours must not be rejected:
+    there is nothing to judge it against (DaVis's medianFilterMinNoNeighbours)."""
+    u = np.full((7, 7), np.nan)
+    v = np.full((7, 7), np.nan)
+    # One vector plus a single neighbour -- 1 neighbour, below the minimum.
+    u[3, 3], v[3, 3] = 99.0, 99.0
+    u[3, 4], v[3, 4] = 0.0, 0.0
+    assert range_filter(u, v, residual_max=2.0, window_size=3, min_neighbours=None)[3, 3]
+    assert not range_filter(u, v, residual_max=2.0, window_size=3, min_neighbours=3)[3, 3]
+
+
+def test_min_neighbours_still_rejects_where_there_is_evidence():
+    u, v = _field_with_marooned_good_vectors()
+    rejected = range_filter(u, v, residual_max=2.0, window_size=3, min_neighbours=3)
+    assert rejected[3:5, 3:5].all()
+
+
+def test_contributing_separates_the_judged_cell_from_its_neighbourhood():
+    """normalized_median_residual's `contributing` must exclude a cell from
+    OTHERS' neighbourhoods while still judging it -- the two roles the array
+    plays are distinct, and conflating them makes a rejected cell's own
+    residual NaN instead of re-testable."""
+    u = np.full((5, 5), 1.0)
+    v = np.zeros((5, 5))
+    u[2, 2] = 99.0
+    contributing = np.ones((5, 5), dtype=bool)
+    contributing[2, 2] = False
+    resid = normalized_median_residual(u, v, window_size=3, contributing=contributing)
+    # The excluded cell is still judged (finite, and large -- it disagrees).
+    assert np.isfinite(resid[2, 2]) and resid[2, 2] > 10
+    # And its neighbours no longer see its value at all, so they look clean.
+    assert resid[1, 1] < 1.0
