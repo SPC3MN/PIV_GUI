@@ -1,12 +1,19 @@
 """Application-wide visual theme: a light, hairline-ruled "spec sheet"
-look built on charcoal and alabaster, applied globally via
-QApplication.setStyleSheet() rather than styling each widget individually.
+look, applied globally via QApplication.setStyleSheet() rather than styling
+each widget individually.
 
-One accent hue (a deep instrument teal), spent only on meaning: the primary
-action, keyboard focus, selection, and the active tab. Everything else is
-cool-biased neutral. Previously charcoal carried every emphasis job (checked controls, focus rings,
-primary buttons, the active tab), so the only non-neutral color in the
-whole app is OK, and it means "this is working" rather than branding.
+ONE accent hue -- a deep instrument teal, taken from the cold end of the
+turbo colormap this app renders velocity fields with, so the chrome and the
+data belong to the same world. It is spent only where it carries meaning:
+the primary action, keyboard focus, selection, and the active tab. Section
+titles are deliberately NOT accented; there are a dozen of them, and
+colouring every one spends the accent on the frame instead of on what the
+user should act on.
+
+Everything else is cool-biased neutral rather than flat grey -- a pure mid-
+grey reads as unset, and the bias ties the neutrals to the accent. The
+theme was previously accent-free, with charcoal carrying every emphasis
+job, which left nothing on screen distinguishable as "the thing to press".
 
 Surfaces run light-on-light with 1px rules doing the separating, rather
 than the elevation/shadow approach a dark theme needs: cards are plain
@@ -19,14 +26,17 @@ a future palette swap only touches this one block):
     PANEL     -- QGroupBox ("card") background
     PAPER     -- header / tab bar / table header background
     INK       -- primary text
-    ACCENT    -- emphasis fill: checked controls, primary buttons, active tab
+    ACCENT    -- emphasis fill: checked controls, primary buttons, active tab,
+                 focus rings. ACCENT_HOVER/ACCENT_PRESSED are its button
+                 states; ACCENT_WASH is a tint for selected rows.
     INK_SOFT  -- secondary text (field labels, unselected tabs)
     INK_FAINT -- disabled text, status-bar text
     LINE      -- borders and hairlines
     INK_ON_ACCENT -- text drawn ON TOP of an ACCENT fill
-    OK        -- the one non-neutral color, reserved for "this is working"
-                 status. Darker than a dark theme's green would be, so it
-                 still reads against white.
+    OK        -- semantic "this is working" status, kept separate from ACCENT
+                 so a healthy state never reads as a call to action. Darker
+                 than a dark theme's green would be, so it still reads
+                 against white.
 """
 
 # Neutrals are cool-biased rather than pure grey -- a flat mid-grey reads as
@@ -151,7 +161,7 @@ QPushButton {{
     padding: 6px 14px;
 }}
 QPushButton:hover {{ background-color: {PAPER}; border-color: {INK_FAINT}; }}
-QPushButton:pressed {{ background-color: #E7E5E5; }}
+QPushButton:pressed {{ background-color: {BACKDROP}; }}
 QPushButton:disabled {{ color: {INK_FAINT}; background-color: {PAPER}; border-color: {LINE}; }}
 
 QPushButton[accent="true"] {{
