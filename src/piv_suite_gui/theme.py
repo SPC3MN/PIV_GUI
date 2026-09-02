@@ -266,6 +266,16 @@ QFrame#plotArea {{
 }}
 QLabel#plotPlaceholder {{ color: {INK_FAINT}; }}
 
+/* A blocking problem the user has to act on -- readable and persistent,
+   unlike the transient status bar it used to be squeezed into. */
+QLabel#problemLabel {{
+    background-color: #FBF3F2;
+    border: 1px solid #E4C3BF;
+    border-radius: 3px;
+    padding: 8px 10px;
+    color: #8A2F26;
+}}
+
 QProgressBar {{
     border: 1px solid {LINE};
     border-radius: 3px;

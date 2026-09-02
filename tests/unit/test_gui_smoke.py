@@ -961,7 +961,14 @@ def test_stereo_calibration_extraction_failure_shows_status_and_does_not_crash(q
     window.project_panel.input_path_edit.setText(str(set_path))
     window.project_panel.input_path_edit.editingFinished.emit()  # must not raise
 
-    assert "boom" in window.statusBar().currentMessage()
+    # The detail goes where it can be read and acted on...
+    assert "boom" in window.calibration_panel.problem_label.text()
+    assert window.calibration_panel.problem_label.isVisibleTo(window.calibration_panel)
+    # ...and the status bar points at it rather than carrying the whole thing,
+    # which it would truncate and then clear after 8 seconds.
+    message = window.statusBar().currentMessage()
+    assert "Camera calibration panel" in message
+    assert "boom" not in message
 
 
 def test_calibration_panel_load_from_set_button_triggers_main_window_extraction(qtbot, monkeypatch, tmp_path):
@@ -1321,3 +1328,27 @@ def test_preview_plot_area_gets_the_spare_space(qtbot):
     assert idx >= 0
     assert layout.stretch(idx) == 1
     assert panel.plot_area.sizePolicy().verticalPolicy() == QSizePolicy.Expanding
+
+
+def test_a_blocking_calibration_failure_is_shown_where_it_can_be_acted_on(qtbot):
+    """A calibration that cannot be read stops the project being processed at
+    all, so the explanation must be persistent and readable -- not squeezed
+    into a status bar that truncates it and clears after 8 seconds.
+
+    These messages are long on purpose (they say what is wrong AND what to do),
+    and the real one for a correction-field snapshot runs to ~700 characters."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    panel = window.calibration_panel
+
+    assert not panel.problem_label.isVisibleTo(panel)   # nothing wrong yet
+    long_message = "Calibration snapshot 'X' is a base layer. " * 20
+    panel.set_problem(long_message)
+    assert panel.problem_label.isVisibleTo(panel)
+    assert panel.problem_label.text() == long_message
+    assert panel.problem_label.wordWrap()               # or it would be one long line
+    assert not panel.model_label.isVisibleTo(panel)     # don't claim a model we couldn't read
+
+    panel.set_problem(None)
+    assert not panel.problem_label.isVisibleTo(panel)
+    assert panel.model_label.isVisibleTo(panel)

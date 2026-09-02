@@ -228,7 +228,19 @@ class CalibrationPanel(QWidget):
         # of zeros that looks like it matters.
         self.model_label = QLabel("Model: polynomial — decoded from the project, editable under Advanced")
         self.model_label.setWordWrap(True)
+        self.model_label.setWordWrap(True)
         cam_layout.addWidget(self.model_label)
+
+        # A calibration that cannot be read is a BLOCKING condition -- the
+        # project cannot be processed at all -- so it gets a persistent,
+        # readable home here, next to the controls that would fix it. It used
+        # to go only to the status bar, which truncated an 832-character
+        # explanation to whatever fitted and then cleared it after 8 seconds.
+        self.problem_label = QLabel()
+        self.problem_label.setObjectName("problemLabel")
+        self.problem_label.setWordWrap(True)
+        self.problem_label.setVisible(False)
+        cam_layout.addWidget(self.problem_label)
 
         # Everything below is the ESCAPE HATCH, not the normal path. A real
         # DaVis .set decodes exactly on its own (see this module's docstring),
@@ -352,6 +364,12 @@ class CalibrationPanel(QWidget):
         s.setRange(-180.0, 180.0)
         s.setValue(default)
         return style_spin(s, width=SPIN_WIDTH)
+
+    def set_problem(self, text):
+        """Show a blocking calibration problem, or clear it with None/""."""
+        self.problem_label.setText(text or "")
+        self.problem_label.setVisible(bool(text))
+        self.model_label.setVisible(not text)
 
     def get_settings(self) -> StereoSettings:
         return StereoSettings(

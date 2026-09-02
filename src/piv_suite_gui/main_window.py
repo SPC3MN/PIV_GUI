@@ -238,17 +238,22 @@ class MainWindow(QMainWindow):
             try:
                 stereo = read_stereo_calibration_from_set(set_paths[0], idx)
             except Exception as e:
-                messages.append(f"Couldn't auto-extract stereo calibration: {e}")
+                # The status bar gets a one-line summary; the panel gets the
+                # full explanation. These messages run to several hundred
+                # characters (they say what is wrong AND what to do about it),
+                # and a transient, truncating status bar is the wrong home for
+                # something that blocks processing entirely.
+                self.calibration_panel.set_problem(str(e))
+                messages.append("Stereo calibration couldn't be read "
+                                "-- see the Camera calibration panel.")
             else:
+                self.calibration_panel.set_problem(None)
                 self.calibration_panel.set_settings(stereo)
                 model = ("PinholeOpenCV" if stereo.cam0_pinhole is not None
                          else "Polynomial3rdOrder")
                 name = (stereo.cam0_pinhole.name if stereo.cam0_pinhole is not None
                         else stereo.cam0_mapping.name)
-                messages.append(
-                    f"Stereo calibration auto-extracted from DaVis .set ({model}: {name}) "
-                    f"-- triangulation angles are derived per pixel from it, nothing to "
-                    f"enter manually.")
+                messages.append(f"Stereo calibration read from DaVis .set ({model}).")
         else:
             is_dual = False
             try:
