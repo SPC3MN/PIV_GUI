@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 from piv_suite.config.schema import DualPlanarSettings, PreprocessSettings, ProjectSettings
 from piv_suite.engines.registry import is_gpu_available
 
-from ._util import style_spin
+from ._util import section_label, style_spin
 
 
 def _glob_extension(glob_text):
@@ -73,8 +73,12 @@ class ProjectPanel(QWidget):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
-        # ---- input source ----
-        input_box = QGroupBox("INPUT")
+        # ONE section, not four. Input / Pre-processing / Mode / Backend used
+        # to be four separate titled group boxes stacked down the panel, which
+        # spent four headers and four card borders on what is really a single
+        # question: where does the data come from and how should it be read.
+        # ---- source ----
+        input_box = QGroupBox("SOURCE")
         input_layout = QVBoxLayout(input_box)
         input_layout.setSpacing(4)
 
@@ -189,12 +193,10 @@ class ProjectPanel(QWidget):
         loose_grid.addWidget(self.stereo_frame_order_combo, 3, 1)
 
         input_layout.addWidget(self.loose_options)
-        layout.addWidget(input_box)
 
         # ---- pre-processing (applied to raw frames, before correlation --
         # for stereo, before dewarping too) ----
-        prep_box = QGroupBox("PRE-PROCESSING")
-        prep_layout = QHBoxLayout(prep_box)
+        prep_layout = QHBoxLayout()
         self.min_max_check = QCheckBox("Min/max filter (L px):")
         self.min_max_check.setToolTip(
             "LaVision-style sliding min/max background removal + local "
@@ -212,14 +214,15 @@ class ProjectPanel(QWidget):
         prep_layout.addWidget(self.min_max_check)
         prep_layout.addWidget(self.min_max_length_spin)
         prep_layout.addStretch(1)
-        layout.addWidget(prep_box)
+        input_layout.addLayout(prep_layout)
 
-        # ---- mode + backend, separate boxes side by side ----
+        # ---- mode + backend, one row inside the same section ----
         mode_backend_row = QHBoxLayout()
-        mode_backend_row.setSpacing(6)
+        mode_backend_row.setSpacing(10)
 
-        mode_box = QGroupBox("MODE")
-        mode_layout = QHBoxLayout(mode_box)
+        mode_layout = QHBoxLayout()
+        mode_layout.setSpacing(6)
+        mode_layout.addWidget(section_label("Mode"))
         self.planar_radio = QRadioButton("Planar")
         self.planar_radio.setToolTip(
             "Single-camera PIV -- produces in-plane (u, v) velocity only.")
@@ -234,7 +237,8 @@ class ProjectPanel(QWidget):
         mode_group.addButton(self.stereo_radio)
         mode_layout.addWidget(self.planar_radio)
         mode_layout.addWidget(self.stereo_radio)
-        mode_backend_row.addWidget(mode_box)
+        mode_backend_row.addLayout(mode_layout)
+        mode_backend_row.addSpacing(18)
 
         # planar-only: DaVis "SideBySide2D" dual-camera stitching (see
         # config.schema.DualPlanarSettings) -- auto-checked/auto-extracted
@@ -249,14 +253,17 @@ class ProjectPanel(QWidget):
             "component). Auto-detected/extracted from the selected .set's own "
             "calibration; both cameras run through the ordinary planar PIV path and "
             "are combined afterward.")
-        mode_layout.addWidget(self.dual_camera_check)
+        dual_row = QHBoxLayout()
+        dual_row.addWidget(self.dual_camera_check)
         self.dual_camera_status_label = QLabel()
         self.dual_camera_status_label.setWordWrap(True)
         self.dual_camera_status_label.setVisible(False)
-        mode_layout.addWidget(self.dual_camera_status_label)
+        dual_row.addWidget(self.dual_camera_status_label, 1)
+        input_layout.addLayout(dual_row)
 
-        backend_box = QGroupBox("BACKEND")
-        backend_layout = QHBoxLayout(backend_box)
+        backend_layout = QHBoxLayout()
+        backend_layout.setSpacing(6)
+        backend_layout.addWidget(section_label("Backend"))
         self.cpu_radio = QRadioButton("CPU")
         self.cpu_radio.setToolTip("Runs on openpiv-python. Always available, no GPU/CUDA needed.")
         self.gpu_radio = QRadioButton("GPU")
@@ -276,9 +283,11 @@ class ProjectPanel(QWidget):
         backend_group.addButton(self.gpu_radio)
         backend_layout.addWidget(self.cpu_radio)
         backend_layout.addWidget(self.gpu_radio)
-        mode_backend_row.addWidget(backend_box)
+        mode_backend_row.addLayout(backend_layout)
+        mode_backend_row.addStretch(1)
 
-        layout.addLayout(mode_backend_row)
+        input_layout.addLayout(mode_backend_row)
+        layout.addWidget(input_box)
 
         # ---- output ----
         out_box = QGroupBox("OUTPUT")

@@ -2,7 +2,23 @@
 
 from PySide6.QtCore import QAbstractTableModel, Qt
 
-COLUMNS = ["Pair", "Status", "Time (s)", "Valid", "Total", "Rejected (range)", "Rejected (std-dev)"]
+# Short headers on purpose. "Rejected (range)" / "Rejected (std-dev)" were
+# clipped to "ejected (rang" / "ected (std-d" at the panel's real width -- a
+# header truncated mid-word is worse than a terse one, because the reader
+# cannot tell which column they are looking at. The full meaning lives in the
+# header tooltips (see run_panel).
+COLUMNS = ["Pair", "Status", "Time (s)", "Valid", "Total", "Rej. range", "Rej. σ"]
+
+#: Long-form column meanings, shown as header tooltips.
+COLUMN_TOOLTIPS = [
+    "Pair identifier, as listed in the Preview tab",
+    "running / done / error",
+    "Correlation time for this pair",
+    "Vectors that survived validation",
+    "Grid points in total",
+    "Vectors rejected by the local median (universal outlier detection) filter",
+    "Vectors rejected by the field-wide standard-deviation filter",
+]
 
 
 class JobModel(QAbstractTableModel):
@@ -47,8 +63,12 @@ class JobModel(QAbstractTableModel):
         return len(COLUMNS)
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
-        if role == Qt.DisplayRole and orientation == Qt.Horizontal:
+        if orientation != Qt.Horizontal:
+            return None
+        if role == Qt.DisplayRole:
             return COLUMNS[section]
+        if role == Qt.ToolTipRole:
+            return COLUMN_TOOLTIPS[section]
         return None
 
     def data(self, index, role=Qt.DisplayRole):

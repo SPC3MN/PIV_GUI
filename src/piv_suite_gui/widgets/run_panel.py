@@ -52,13 +52,26 @@ class RunPanel(QWidget):
         self.job_model = JobModel()
         self.table_view = QTableView()
         self.table_view.setModel(self.job_model)
-        self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        layout.addWidget(self.table_view)
+        # Pair identifiers vary in length and the numeric columns do not --
+        # stretching every column equally clipped the two widest headers while
+        # leaving the numeric ones half empty. Size the data columns to their
+        # contents and let Pair absorb the slack.
+        header = self.table_view.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setStretchLastSection(False)
+        self.table_view.setAlternatingRowColors(True)
+        self.table_view.verticalHeader().setVisible(False)
+        # The table is the thing being watched; the log is for when something
+        # goes wrong. 3:1 rather than the even split they had, which gave half
+        # the panel to a console that is empty on a healthy run.
+        layout.addWidget(self.table_view, stretch=3)
 
         self.log_console = QPlainTextEdit()
         self.log_console.setReadOnly(True)
         self.log_console.setMaximumBlockCount(5000)
-        layout.addWidget(self.log_console)
+        self.log_console.setPlaceholderText("Run output appears here.")
+        layout.addWidget(self.log_console, stretch=1)
 
     def set_run_enabled(self, enabled: bool):
         self.run_btn.setEnabled(enabled)

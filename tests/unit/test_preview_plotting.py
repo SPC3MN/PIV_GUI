@@ -138,7 +138,12 @@ def test_empty_valid_mask_does_not_raise():
 
 def _axes_scale_ratio(fig):
     """(inches-per-data-unit in y) / (same in x) for the data axes. 1.0 means
-    a circle in the data renders as a circle on paper."""
+    a circle in the data renders as a circle on paper.
+
+    Draws first: with a fixed aspect and an axes_grid1-attached colorbar, the
+    axes' final position is only settled during layout, so reading
+    get_position() beforehand returns a stale box."""
+    fig.canvas.draw()
     ax = fig.axes[0]
     box = ax.get_position()
     fw, fh = fig.get_size_inches()
@@ -181,6 +186,7 @@ def test_a_circular_feature_stays_circular():
                               np.ones_like(u, dtype=bool), "t")
     ax = fig.axes[0]
     # Half-max contour of a radially symmetric blob: equal extent both ways.
+    fig.canvas.draw()
     cs = ax.contour(x, y, u, levels=[0.5])
     pts = np.vstack([p.vertices for p in cs.get_paths()])
     width = np.ptp(pts[:, 0]) * (ax.get_position().width * fig.get_size_inches()[0]
@@ -196,3 +202,17 @@ def test_figure_size_follows_the_requested_canvas_shape():
     x, y, u, v, valid = _planar_field()
     fig = make_preview_figure("planar", x, y, u, v, valid, "t", figsize=(11.0, 4.0))
     assert tuple(fig.get_size_inches()) == pytest.approx((11.0, 4.0))
+
+
+def test_colorbar_stays_proportionate_to_the_plot():
+    """The colorbar annotates the field; it must not compete with it.
+    matplotlib sizes it against the axes BOX, which for a fixed-aspect axes in
+    a taller figure is far bigger than the drawn data -- it rendered full
+    height and roughly a sixth of the plot's width."""
+    x, y, u, v, valid = _wide_field()
+    fig = make_preview_figure("stereo", x, y, u, v, valid, "t", figsize=(8.0, 7.0))
+    fig.canvas.draw()   # positions are only final once laid out
+    data_ax, cbar_ax = fig.axes[0], fig.axes[1]
+    assert cbar_ax.get_position().width < 0.25 * data_ax.get_position().width
+    # ...and no taller than the field it annotates.
+    assert cbar_ax.get_position().height <= data_ax.get_position().height + 1e-6

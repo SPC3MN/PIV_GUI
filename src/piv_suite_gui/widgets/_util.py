@@ -2,7 +2,8 @@
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QAbstractSpinBox, QDoubleSpinBox, QSizePolicy, QToolButton, QVBoxLayout, QWidget,
+    QAbstractSpinBox, QDoubleSpinBox, QLabel, QSizePolicy, QToolButton, QVBoxLayout,
+    QWidget,
 )
 
 
@@ -86,3 +87,15 @@ class CollapsibleSection(QWidget):
     @property
     def is_expanded(self):
         return self.toggle.isChecked()
+
+
+def section_label(text):
+    """A small uppercase label for a control group that no longer has its own
+    titled group box.
+
+    Sections that were folded together (Mode and Backend into Source, say)
+    still need to say what they are; this gives them a header's weight without
+    a card's chrome, which is the whole point of folding them."""
+    label = QLabel(text.upper())
+    label.setObjectName("inlineSectionLabel")
+    return label

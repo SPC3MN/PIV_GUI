@@ -46,6 +46,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 # Hard-coded, not a GUI choice any more -- see this module's docstring.
 MAGNITUDE_CMAP = "turbo"
@@ -102,7 +103,14 @@ def make_preview_figure(mode, x, y, u, v, valid, title, w=None, units="m/s",
     # measured at 1.881x on a real 379x704 stereo grid, i.e. a round vortex
     # rendered 88% taller than wide, which reads as a physically wrong flow.
     ax.set_aspect("equal")
-    fig.colorbar(cs, ax=ax, label=f"|V| ({units})")
+    # The colorbar is tied to the DRAWN axes, not to the axes' bounding box.
+    # fig.colorbar(ax=ax) sizes against the bbox, and a fixed-aspect axes
+    # shrinks inside its bbox to preserve shape -- so the bar kept the bbox's
+    # full height while the field occupied a fraction of it, leaving a bar
+    # taller than the plot it annotates. make_axes_locatable pins it to the
+    # real drawn height at any figure shape.
+    cax = make_axes_locatable(ax).append_axes("right", size="3%", pad=0.12)
+    fig.colorbar(cs, cax=cax, label=f"|V| ({units})")
     if show_vectors:
         ax.quiver(x[valid], y[valid], u[valid], v[valid], color="black", scale=quiver_scale)
     axlabel = ("x (world px)", "y (world px)") if mode == "stereo" else ("pixels", "pixels")

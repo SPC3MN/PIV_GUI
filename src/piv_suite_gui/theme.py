@@ -2,8 +2,9 @@
 look built on charcoal and alabaster, applied globally via
 QApplication.setStyleSheet() rather than styling each widget individually.
 
-Neutral by design -- no accent hue. Charcoal (#5D5E60) and its darker
-text derivative carry every emphasis job (checked controls, focus rings,
+One accent hue (a deep instrument teal), spent only on meaning: the primary
+action, keyboard focus, selection, and the active tab. Everything else is
+cool-biased neutral. Previously charcoal carried every emphasis job (checked controls, focus rings,
 primary buttons, the active tab), so the only non-neutral color in the
 whole app is OK, and it means "this is working" rather than branding.
 
@@ -28,14 +29,23 @@ a future palette swap only touches this one block):
                  still reads against white.
 """
 
-BACKDROP = "#EBE9E9"
+# Neutrals are cool-biased rather than pure grey -- a flat mid-grey reads as
+# unset, and the bias ties them to the accent below. The accent itself is a
+# deep instrument teal, taken from the cold end of the velocity colormap this
+# app renders with, so the chrome and the data belong to the same world. It is
+# spent only where it means something: the primary action, focus, selection,
+# and the active tab.
+BACKDROP = "#E9EBEC"
 PANEL = "#FFFFFF"
-PAPER = "#F6F5F5"
-INK = "#2E2F30"
-ACCENT = "#5D5E60"
-INK_SOFT = "#6C6D6F"
-INK_FAINT = "#9A9B9C"
-LINE = "#D9D7D7"
+PAPER = "#F4F6F7"
+INK = "#1E2529"
+ACCENT = "#0F6E78"
+ACCENT_HOVER = "#12818D"
+ACCENT_PRESSED = "#0B565E"
+ACCENT_WASH = "#E4F0F1"
+INK_SOFT = "#5A666D"
+INK_FAINT = "#93A0A7"
+LINE = "#D3D9DC"
 INK_ON_ACCENT = "#FFFFFF"
 OK = "#2E7D51"
 
@@ -123,7 +133,11 @@ QGroupBox::title {{
     left: 3px;
     top: 1px;
     padding: 0 3px 0 0;
-    color: {ACCENT};
+    /* Muted, NOT the accent. Section titles are structure, and there are a
+       dozen of them -- colouring every one spends the accent on the frame
+       instead of on what the user should act on. The accent stays for the
+       primary action, focus, selection and the active tab. */
+    color: {INK_FAINT};
     font-weight: 700;
 }}
 
@@ -146,8 +160,8 @@ QPushButton[accent="true"] {{
     border: 1px solid {ACCENT};
     font-weight: 600;
 }}
-QPushButton[accent="true"]:hover {{ background-color: #6E6F71; border-color: #6E6F71; }}
-QPushButton[accent="true"]:pressed {{ background-color: #4B4C4E; }}
+QPushButton[accent="true"]:hover {{ background-color: {ACCENT_HOVER}; border-color: {ACCENT_HOVER}; }}
+QPushButton[accent="true"]:pressed {{ background-color: {ACCENT_PRESSED}; }}
 /* Not a faded ACCENT fill: white-on-light-grey is nearly unreadable, so
    a disabled primary button falls back to the ordinary disabled look. */
 QPushButton[accent="true"]:disabled {{ background-color: {PAPER}; color: {INK_FAINT}; border-color: {LINE}; }}
@@ -208,6 +222,39 @@ QTabBar::tab {{
 }}
 QTabBar::tab:selected {{ color: {INK}; border-bottom: 2px solid {ACCENT}; }}
 QTabBar::tab:hover {{ color: {INK}; }}
+
+/* Inline header for a control group that no longer owns a titled card --
+   see widgets/_util.section_label. Same weight as a QGroupBox title so a
+   folded section still reads as a section. */
+QLabel#inlineSectionLabel {{
+    color: {INK_FAINT};
+    font-size: 7pt;
+    font-weight: 600;
+    letter-spacing: 1px;
+}}
+
+/* Disclosure toggle for an Advanced drawer (widgets/_util.CollapsibleSection).
+   Deliberately flat and quiet: it is a way in, not a call to action. */
+QToolButton#disclosure {{
+    background: transparent;
+    border: 1px solid {LINE};
+    border-radius: 3px;
+    padding: 4px 8px;
+    color: {INK_SOFT};
+    font-size: 8.5pt;
+    text-align: left;
+}}
+QToolButton#disclosure:hover {{ background-color: {PAPER}; color: {INK}; }}
+QToolButton#disclosure:checked {{ color: {INK}; border-color: {INK_FAINT}; }}
+
+/* The preview canvas's home. Sunken relative to the panel so an empty plot
+   area reads as "a place a plot goes" rather than as unused window. */
+QFrame#plotArea {{
+    background-color: {PANEL};
+    border: 1px solid {LINE};
+    border-radius: 3px;
+}}
+QLabel#plotPlaceholder {{ color: {INK_FAINT}; }}
 
 QProgressBar {{
     border: 1px solid {LINE};

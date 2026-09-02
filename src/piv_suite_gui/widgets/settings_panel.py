@@ -38,7 +38,7 @@ from piv_suite.config.schema import (
 )
 from piv_suite.perf.autotune import recommended_workers
 
-from ._util import fit_table_to_rows, style_spin
+from ._util import CollapsibleSection, fit_table_to_rows, style_spin
 
 
 class _PassesTable(QGroupBox):
@@ -148,27 +148,39 @@ class SettingsPanel(QWidget):
             "typical PIV particle images.")
         corr_grid.addWidget(QLabel("Δt:"), 0, 0)  # Δt
         corr_grid.addWidget(self.dt_spin, 0, 1)
-        corr_grid.addWidget(QLabel("Subpixel method:"), 1, 0)
-        corr_grid.addWidget(self.subpixel_combo, 1, 1)
+
+        # Method pickers and GPU tiling are expert territory: correct defaults
+        # already, wrong answers available, and nothing a normal run needs to
+        # touch. They keep working exactly as before, one click away.
+        self.advanced_correlation = CollapsibleSection("Advanced — algorithm")
+        adv_grid = QGridLayout()
+        adv_grid.setContentsMargins(0, 0, 0, 0)
+        adv_grid.setSpacing(4)
+        adv_grid.setColumnStretch(1, 1)
+        _adv_host = QWidget()
+        _adv_host.setLayout(adv_grid)
+        self.advanced_correlation.add_widget(_adv_host)
+        adv_grid.addWidget(QLabel("Subpixel method:"), 0,0)
+        adv_grid.addWidget(self.subpixel_combo, 0,1)
 
         self.correlation_method_combo = QComboBox()
         self.correlation_method_combo.addItems(["circular"])
         self.correlation_method_combo.setToolTip("CPU backend only -- ignored on GPU.")
-        corr_grid.addWidget(QLabel("Correlation method:"), 2, 0)
-        corr_grid.addWidget(self.correlation_method_combo, 2, 1)
+        adv_grid.addWidget(QLabel("Correlation method:"), 1,0)
+        adv_grid.addWidget(self.correlation_method_combo, 1,1)
 
         self.deformation_method_combo = QComboBox()
         self.deformation_method_combo.addItems(["symmetric", "second image"])
         self.deformation_method_combo.setToolTip("CPU backend only -- ignored on GPU.")
-        corr_grid.addWidget(QLabel("Deformation method:"), 3, 0)
-        corr_grid.addWidget(self.deformation_method_combo, 3, 1)
+        adv_grid.addWidget(QLabel("Deformation method:"), 2,0)
+        adv_grid.addWidget(self.deformation_method_combo, 2,1)
 
         self.interpolation_order_spin = style_spin(QSpinBox())
         self.interpolation_order_spin.setRange(0, 5)
         self.interpolation_order_spin.setValue(3)
         self.interpolation_order_spin.setToolTip("CPU backend only -- ignored on GPU.")
-        corr_grid.addWidget(QLabel("Interpolation order:"), 4, 0)
-        corr_grid.addWidget(self.interpolation_order_spin, 4, 1)
+        adv_grid.addWidget(QLabel("Interpolation order:"), 3,0)
+        adv_grid.addWidget(self.interpolation_order_spin, 3,1)
 
         self.batch_size_check = QCheckBox("Set GPU batch size:")
         self.batch_size_check.setToolTip("GPU backend only. Unchecked = piv_gpu's own default (process all windows in one batch).")
@@ -178,8 +190,8 @@ class SettingsPanel(QWidget):
         self.batch_size_spin.setValue(64)
         self.batch_size_spin.setToolTip("Number of interrogation windows processed per GPU batch.")
         self.batch_size_spin.setEnabled(False)
-        corr_grid.addWidget(self.batch_size_check, 5, 0)
-        corr_grid.addWidget(self.batch_size_spin, 5, 1)
+        adv_grid.addWidget(self.batch_size_check, 4,0)
+        adv_grid.addWidget(self.batch_size_spin, 4,1)
 
         self.tiling_check = QCheckBox("GPU tiling (large frames)")
         self.tiling_check.setToolTip("Split large frames into a grid of tiles to bound peak GPU memory. GPU backend only.")
@@ -187,11 +199,11 @@ class SettingsPanel(QWidget):
         self.n_tiles_y_spin.setToolTip("Number of tiles to split each frame into along the y (row) axis. GPU backend only.")
         self.n_tiles_x_spin = style_spin(QSpinBox()); self.n_tiles_x_spin.setRange(1, 64); self.n_tiles_x_spin.setValue(1)
         self.n_tiles_x_spin.setToolTip("Number of tiles to split each frame into along the x (column) axis. GPU backend only.")
-        corr_grid.addWidget(self.tiling_check, 6, 0, 1, 2)
-        corr_grid.addWidget(QLabel("n_tiles_y:"), 7, 0)
-        corr_grid.addWidget(self.n_tiles_y_spin, 7, 1)
-        corr_grid.addWidget(QLabel("n_tiles_x:"), 8, 0)
-        corr_grid.addWidget(self.n_tiles_x_spin, 8, 1)
+        adv_grid.addWidget(self.tiling_check, 5,0, 1, 2)
+        adv_grid.addWidget(QLabel("n_tiles_y:"), 6,0)
+        adv_grid.addWidget(self.n_tiles_y_spin, 6,1)
+        adv_grid.addWidget(QLabel("n_tiles_x:"), 7,0)
+        adv_grid.addWidget(self.n_tiles_x_spin, 7,1)
 
         self.tile_margin_check = QCheckBox("Override tile margin (px):")
         self.tile_margin_check.setToolTip(
@@ -203,8 +215,9 @@ class SettingsPanel(QWidget):
         self.tile_margin_spin.setValue(96)
         self.tile_margin_spin.setToolTip("Manual overlap (px) between adjacent tiles, overriding the auto default.")
         self.tile_margin_spin.setEnabled(False)
-        corr_grid.addWidget(self.tile_margin_check, 9, 0)
-        corr_grid.addWidget(self.tile_margin_spin, 9, 1)
+        adv_grid.addWidget(self.tile_margin_check, 8,0)
+        adv_grid.addWidget(self.tile_margin_spin, 8, 1)
+        corr_grid.addWidget(self.advanced_correlation, 1, 0, 1, 2)
         layout.addWidget(corr_box)
 
         # ---- physical units (calibration) ----
@@ -306,7 +319,9 @@ class SettingsPanel(QWidget):
         self.smoothn_p_spin.setEnabled(True)
         val_grid.addWidget(self.smoothn_check, 3, 0)
         val_grid.addWidget(self.smoothn_p_spin, 3, 1)
-        layout.addWidget(val_box)
+        self.advanced_internals = CollapsibleSection("Advanced — per-pass internals")
+        self.advanced_internals.add_widget(val_box)
+        layout.addWidget(self.advanced_internals)
 
         # ---- remove invalid vectors (the SOLE validation step) ----
         post_box = QGroupBox("REMOVE INVALID VECTORS (POST-PROCESSING)")
@@ -430,7 +445,9 @@ class SettingsPanel(QWidget):
         self.n_workers_spin.setEnabled(False)
         perf_grid.addWidget(self.n_workers_check, 0, 0)
         perf_grid.addWidget(self.n_workers_spin, 0, 1)
-        layout.addWidget(perf_box)
+        self.advanced_performance = CollapsibleSection("Advanced — performance")
+        self.advanced_performance.add_widget(perf_box)
+        layout.addWidget(self.advanced_performance)
 
         layout.addStretch(1)
 

@@ -441,15 +441,27 @@ def test_loose_options_show_correct_suffix_fields_per_mode(qtbot):
     assert pp.suffix_cam0_edit.isVisible()
 
 
-def test_mode_and_backend_are_separate_group_boxes(qtbot):
+def test_mode_and_backend_selections_are_independent(qtbot):
+    """Mode and Backend now share a parent widget (both are rows inside the
+    Source section), and QRadioButton auto-exclusivity is PER PARENT -- so
+    without the explicit QButtonGroups, picking CPU would clear Stereo.
+
+    This used to assert that the two lived in different group boxes, which
+    tested the layout rather than the hazard: it failed the moment the panel
+    was reorganised even though the behaviour was still correct. Asserting the
+    behaviour instead protects the same thing and survives a redesign."""
     window = MainWindow()
     qtbot.addWidget(window)
     pp = window.project_panel
-    # planar_radio/stereo_radio and cpu_radio/gpu_radio must live in
-    # different parent group boxes, not one combined box
-    mode_parent = pp.planar_radio.parentWidget()
-    backend_parent = pp.cpu_radio.parentWidget()
-    assert mode_parent is not backend_parent
+
+    pp.stereo_radio.setChecked(True)
+    pp.cpu_radio.setChecked(True)
+    assert pp.stereo_radio.isChecked()   # a backend choice must not clear Mode
+    assert not pp.planar_radio.isChecked()
+
+    pp.planar_radio.setChecked(True)
+    assert pp.cpu_radio.isChecked()      # ...and a Mode choice must not clear Backend
+    assert not pp.stereo_radio.isChecked()
 
 
 def test_validation_group_is_user_editable(qtbot):
