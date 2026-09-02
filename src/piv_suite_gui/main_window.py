@@ -31,7 +31,11 @@ from piv_suite_gui.widgets.run_panel import RunPanel
 from piv_suite_gui.widgets.settings_panel import SettingsPanel
 
 LEFT_PANEL_WIDTH = 440
-RIGHT_PANEL_WIDTH = 640
+# The preview plot is the point of the right-hand side, and it holds a real
+# aspect ratio now -- a field wider than it is tall gets letterboxed in a
+# narrow pane. 820 gives it room to be read at a glance without the user
+# resizing on every launch.
+RIGHT_PANEL_WIDTH = 820
 INITIAL_WINDOW_WIDTH = LEFT_PANEL_WIDTH + RIGHT_PANEL_WIDTH
 
 
@@ -39,7 +43,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("PIV Testing")
-        self.resize(INITIAL_WINDOW_WIDTH, 860)
+        self.resize(INITIAL_WINDOW_WIDTH, 900)
+        # Below this the left rail's own controls start clipping.
+        self.setMinimumSize(900, 620)
         self._build_ui()
 
     def _build_ui(self):
