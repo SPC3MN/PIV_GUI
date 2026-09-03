@@ -23,6 +23,13 @@ REAL_DUAL_PLANAR_SET = r"D:\Truck_PIV_Round4\Loaded_CFD_Truck\X_150_mm_Y_0_mm.se
 REAL_STEREO_SET = (
     r"J:\Final_Stereo\Swirl\On Time=0.7_Burst On Time=0.0_Burst Off Time=0.0.set"
 )
+# A real SINGLE-camera planar project whose calibration nonetheless declares
+# FieldOfView="SideBySideStereoVolume" -- see
+# test_single_camera_side_by_side_stereo_volume_is_planar.
+REAL_SINGLE_CAMERA_STEREO_FOV_SET = (
+    r"D:\messy_data\PIV_Samples\Planar"
+    r"\On Time=3.0_Burst On Time=1.5_Burst Off Time=1.5.set"
+)
 
 _SIDE_BY_SIDE_2D_XML = """<?xml version="1.0"?>
 <Calibration Version="2" CalibrationIdentifier="test">
@@ -93,6 +100,30 @@ def test_falls_back_to_planar_for_unrecognized_field_of_view(tmp_path):
     assert detect_project_type_from_set(str(recording)) == "planar"
 
 
+def test_single_camera_side_by_side_stereo_volume_is_planar(tmp_path):
+    """FieldOfView describes how a project was CALIBRATED, not how many
+    cameras it has. A real single-camera planar recording
+    (PIV_Samples/Planar, calibration 260722_200230) declares
+    "SideBySideStereoVolume" because it was calibrated with the same 3D
+    dual-plane target as its stereo sibling -- and detecting that as
+    stereo put the GUI's Mode radio on Stereo, whereupon calibration
+    extraction failed with "neither a 'Polynomial3rdOrder' nor a
+    'PinholeOpenCV' ... for both cameras": an error about the wrong thing,
+    on a project with a perfectly good one-camera Polynomial3rdOrder."""
+    xml = _SIDE_BY_SIDE_STEREO_XML.replace(
+        '<CoordinateMapper CameraIdentifier="2" Type="Polynomial3rdOrder" GroupId="1"/>', "")
+    _root, recording = _write_project(tmp_path, xml)
+    assert detect_project_type_from_set(str(recording)) == "planar"
+
+
+def test_single_camera_side_by_side_2d_is_planar(tmp_path):
+    """Same guard on the dual-planar branch: one mapper is one camera."""
+    xml = _SIDE_BY_SIDE_2D_XML.replace(
+        '<CoordinateMapper CameraIdentifier="2" Type="Polynomial3rdOrder" GroupId="1"/>', "")
+    _root, recording = _write_project(tmp_path, xml)
+    assert detect_project_type_from_set(str(recording)) == "planar"
+
+
 def test_never_raises_on_unparseable_calibration_xml(tmp_path):
     root = tmp_path / "Project"
     (root / "Properties" / "Calibration").mkdir(parents=True)
@@ -115,3 +146,9 @@ def test_detects_dual_planar_for_real_truck_set():
                      reason="real stereo project not available on this machine")
 def test_detects_stereo_for_real_swirl_set():
     assert detect_project_type_from_set(REAL_STEREO_SET) == "stereo"
+
+
+@pytest.mark.skipif(not os.path.exists(REAL_SINGLE_CAMERA_STEREO_FOV_SET),
+                     reason="real single-camera planar sample not available on this machine")
+def test_detects_planar_for_real_single_camera_stereo_field_of_view_set():
+    assert detect_project_type_from_set(REAL_SINGLE_CAMERA_STEREO_FOV_SET) == "planar"

@@ -1078,6 +1078,19 @@ def _read_field_of_view(calibration_xml_path):
     return cs.attrib.get("FieldOfView") if cs is not None else None
 
 
+def _count_calibrated_cameras(calibration_xml_path):
+    """How many cameras this calibration snapshot actually describes --
+    one <CoordinateMapper> per camera. The FieldOfView string alone is NOT
+    enough to tell a two-camera geometry from a one-camera one: a real
+    single-camera planar project (D:\\messy_data\\PIV_Samples\\Planar,
+    calibration 260722_200230, SourceSetPath J:/Final_Planar_Swirl) carries
+    FieldOfView="SideBySideStereoVolume" with exactly ONE CoordinateMapper,
+    because it was calibrated with the same 3D dual-plane target and
+    dialog as its stereo sibling. Returns 0 if the file has no mappers."""
+    root = ET.parse(calibration_xml_path).getroot()
+    return len(root.findall(".//CoordinateMapper"))
+
+
 def detect_project_type_from_set(set_path, multiset_index=0):
     """Best-effort: which acquisition geometry does this DaVis .set
     project's OWN calibration describe -- "planar" (plain single-camera,
@@ -1102,6 +1115,20 @@ def detect_project_type_from_set(set_path, multiset_index=0):
     means the user picks the right radio themselves, same as every other
     auto-extracted/auto-guessed field in this app.
 
+    A RECOGNIZED FieldOfView IS NOT ON ITS OWN ENOUGH, and that is not a
+    theoretical worry: a real single-camera planar project
+    (D:\\messy_data\\PIV_Samples\\Planar, calibration 260722_200230) writes
+    FieldOfView="SideBySideStereoVolume" with exactly ONE CoordinateMapper
+    -- calibrated with the same 3D dual-plane target and dialog its stereo
+    sibling used, which is what sets that string. Reading FieldOfView alone
+    put the GUI's Mode radio on Stereo for that project, and the stereo
+    calibration read then failed with "neither a 'Polynomial3rdOrder' nor a
+    'PinholeOpenCV' ... for both cameras" -- a real error message about the
+    wrong thing entirely, on a project whose calibration is a perfectly
+    good Polynomial3rdOrder for the one camera it has. Both two-camera
+    answers therefore also require two CoordinateMappers; anything with
+    fewer is planar regardless of what FieldOfView says.
+
     Deliberately does NOT try to distinguish "genuinely no calibration"
     from "unrecognized FieldOfView" -- both collapse to "planar" here,
     since a real angled-stereo/dual-planar project always writes one of
@@ -1118,7 +1145,10 @@ def detect_project_type_from_set(set_path, multiset_index=0):
         return "planar"
     try:
         field_of_view = _read_field_of_view(calibration_xml)
+        n_cameras = _count_calibrated_cameras(calibration_xml)
     except ET.ParseError:
+        return "planar"
+    if n_cameras < 2:
         return "planar"
     if field_of_view == "SideBySide2D":
         return "dual_planar"
@@ -1149,7 +1179,11 @@ def detect_dual_planar_from_set(set_path, multiset_index=0):
     if not os.path.isfile(calibration_xml):
         return False
     try:
-        return _read_field_of_view(calibration_xml) == "SideBySide2D"
+        # Two CoordinateMappers required, same reason detect_project_type_
+        # from_set checks: FieldOfView reflects how the project was
+        # CALIBRATED, not how many cameras it actually has.
+        return (_read_field_of_view(calibration_xml) == "SideBySide2D"
+                and _count_calibrated_cameras(calibration_xml) >= 2)
     except ET.ParseError:
         return False
 
