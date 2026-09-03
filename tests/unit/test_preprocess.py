@@ -87,6 +87,17 @@ def test_min_max_filter_improves_particle_to_background_contrast():
     assert contrast(min_max_filter(image, 4)) > contrast(image)
 
 
+def test_min_max_filter_does_not_mutate_its_input():
+    """min_max_filter builds its result with in-place arithmetic to keep peak
+    memory down on real 4096x3008 frames -- which is only safe as long as none
+    of it lands on the caller's array. apply_preprocess_pair hands it frames
+    the caller still holds."""
+    image = np.random.RandomState(2).rand(64, 64) * 200 + 10
+    before = image.copy()
+    min_max_filter(image, 4)
+    assert np.array_equal(image, before)
+
+
 def test_min_max_filter_survives_a_constant_frame():
     """A frame with no contrast anywhere makes p99.5(RangeL) zero, which
     would put a 0 in the denominator."""

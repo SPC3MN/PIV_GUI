@@ -94,18 +94,28 @@ def min_max_filter(image, length, clip_fraction=None):
 
     from scipy.ndimage import minimum_filter, maximum_filter
 
+    # Written in-place from here down. A real frame here is 4096x3008 float64
+    # (98 MB), several are alive at once per worker process, and this app runs
+    # a process pool sized to the core count -- the obvious expression-per-line
+    # form holds six full-size arrays where three will do, which is ~300 MB per
+    # frame of avoidable peak on exactly the machines that are already tight.
     min_l = minimum_filter(image, size=length, mode="nearest")
-    max_l = maximum_filter(image, size=length, mode="nearest")
-    range_l = max_l - min_l
+    range_l = maximum_filter(image, size=length, mode="nearest")
+    range_l -= min_l
 
-    # A frame with no contrast anywhere (all-constant) has p99.5 == 0, which
-    # would make the floor 0 and the division undefined again -- fall back to
-    # 1.0 there, which returns the (identically zero) numerator unchanged
-    # rather than inf/NaN.
+    # Computed BEFORE the floor is applied -- p99.5 of the raw local range is
+    # the "typical particle contrast" the floor is a fraction of. A frame with
+    # no contrast anywhere (all-constant) makes that 0, which would put a 0 in
+    # the denominator; 1.0 there returns the identically-zero numerator
+    # unchanged rather than inf/NaN.
     floor = clip_fraction * float(np.percentile(range_l, 99.5))
     if not floor > 0:
         floor = 1.0
-    return (image - min_l) / np.maximum(range_l, floor)
+    np.maximum(range_l, floor, out=range_l)
+
+    out = image - min_l
+    out /= range_l
+    return out
 
 
 def apply_preprocess_pair(frame_a, frame_b, settings):
