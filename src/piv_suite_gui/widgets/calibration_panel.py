@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 
 from piv_suite.config.schema import CameraMappingSettings, StereoSettings
 
-from ._util import CollapsibleSection, fit_table_to_rows, style_spin
+from ._util import fit_table_to_rows, style_spin
 
 COEF_KEYS = ("1", "s", "s2", "s3", "t", "t2", "t3", "st", "s2t", "t2s")
 # Display-only superscript notation for the polynomial table's row headers
@@ -187,6 +187,13 @@ class CalibrationPanel(QWidget):
     # selected input path (this panel has no reference to it itself).
     load_from_set_requested = Signal()
 
+    # Emitted by set_problem() when there's a blocking calibration problem
+    # to show. This panel no longer owns its own Advanced disclosure (see
+    # advanced_widget()) -- main_window owns the single consolidated one
+    # and expands it on this signal, same effect as the old self.advanced.
+    # set_expanded(True) call.
+    advanced_expand_requested = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         # DaVis's PinholeOpenCV calibration, when the loaded project has that
@@ -246,12 +253,20 @@ class CalibrationPanel(QWidget):
         # so the 40-odd coefficient fields only matter for data that has no
         # DaVis calibration -- and presenting them by default made a rarely
         # used fallback the most prominent thing on the panel.
-        # A PEER of the camera card, not a child of it. The drawer holds the
-        # world grid and the viewing-angle overrides as well as the coefficient
-        # forms, and neither of those is a camera mapping -- nesting them made
-        # the CAMERA CALIBRATION card's border run down the whole panel around
-        # sections that are not camera calibration.
-        self.advanced = CollapsibleSection("Advanced — calibration")
+        #
+        # Not this panel's own disclosure any more -- main_window embeds
+        # advanced_widget()'s return into ONE consolidated Advanced section
+        # at the bottom of the left rail, alongside SettingsPanel's own
+        # advanced content, instead of every panel drawing its own
+        # separate "Advanced" toggle. The drawer holds the world grid and
+        # the viewing-angle overrides as well as the coefficient forms,
+        # and neither of those is a camera mapping -- nesting them under
+        # CAMERA CALIBRATION made that card's border run down the whole
+        # panel around sections that are not camera calibration.
+        self._advanced_container = QWidget()
+        adv_layout = QVBoxLayout(self._advanced_container)
+        adv_layout.setContentsMargins(0, 0, 0, 0)
+        adv_layout.setSpacing(6)
 
         cam_tabs = QTabWidget()
         self.cam0_form = _CameraMappingForm("cam0")
@@ -259,8 +274,7 @@ class CalibrationPanel(QWidget):
         cam_tabs.addTab(self.cam0_form, "cam0")
         cam_tabs.addTab(self.cam1_form, "cam1")
         layout.addWidget(cam_box)
-        layout.addWidget(self.advanced)
-        self.advanced.add_widget(cam_tabs)
+        adv_layout.addWidget(cam_tabs)
 
         geom_box = QGroupBox("WORLD GRID / DEWARP")
         geom_grid = QGridLayout(geom_box)
@@ -301,7 +315,7 @@ class CalibrationPanel(QWidget):
         geom_grid.addWidget(self.dewarp_order_spin, 2, 1)
         geom_grid.addWidget(self.sheet_z_mm_check, 3, 0)
         geom_grid.addWidget(self.sheet_z_mm_spin, 3, 1)
-        self.advanced.add_widget(geom_box)
+        adv_layout.addWidget(geom_box)
 
         angle_box = QGroupBox("STEREO VIEWING ANGLES (DEG)")
         angle_box.setToolTip(
@@ -359,8 +373,15 @@ class CalibrationPanel(QWidget):
         ], start=3):
             angle_grid.addWidget(QLabel(label), i, 0)
             angle_grid.addWidget(w, i, 1)
-        self.advanced.add_widget(angle_box)
+        adv_layout.addWidget(angle_box)
         layout.addStretch(1)
+
+    def advanced_widget(self) -> QWidget:
+        """The camera-coefficient tabs, world grid/dewarp, and viewing-
+        angle override controls, as one widget for main_window to embed
+        in the single consolidated Advanced disclosure -- see this
+        panel's own _build_ui comment."""
+        return self._advanced_container
 
     @staticmethod
     def _angle_spin(default):
@@ -372,8 +393,9 @@ class CalibrationPanel(QWidget):
     def set_problem(self, text):
         """Show a blocking calibration problem, or clear it with None/"".
 
-        Opens the Advanced drawer alongside it. Every one of these messages
-        ends by telling the user to "enter calibration manually on the
+        Requests the consolidated Advanced drawer open alongside it (see
+        advanced_expand_requested). Every one of these messages ends by
+        telling the user to "enter calibration manually on the
         Calibration panel" -- and manual entry is exactly what the drawer
         hides, so leaving it shut points the user at a control they cannot
         see. A remedy the reader cannot reach is not a remedy."""
@@ -381,7 +403,7 @@ class CalibrationPanel(QWidget):
         self.problem_label.setVisible(bool(text))
         self.model_label.setVisible(not text)
         if text:
-            self.advanced.set_expanded(True)
+            self.advanced_expand_requested.emit()
 
     def get_settings(self) -> StereoSettings:
         return StereoSettings(
@@ -405,7 +427,7 @@ class CalibrationPanel(QWidget):
     def set_settings(self, settings: StereoSettings):
         """Push extracted/auto-loaded stereo calibration into the form,
         authoritatively overwriting whatever was there before -- mirrors
-        settings_panel.set_calibration_settings' pattern for the planar
+        project_panel.set_calibration_settings' pattern for the planar
         case."""
         self._cam0_pinhole = settings.cam0_pinhole
         self._cam1_pinhole = settings.cam1_pinhole

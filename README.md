@@ -98,12 +98,13 @@ Backend and mode are auto-detected from which keys are present.
   preview figures for the GUI.
 - `piv_suite/cli/` -- the unified command-line entry point.
 - `piv_suite_gui/` -- the PySide6 desktop GUI. The left rail carries the
-  everyday flow top to bottom (Source, Output, Camera calibration, then the
-  processing settings); the right side is Preview and Run. Settings that are
-  real but rarely touched -- hand-entered calibration coefficients, algorithm
-  method pickers, GPU tiling, per-pass internals, worker count -- sit in
-  collapsed "Advanced" disclosures rather than competing with the flow.
-  Batch runs happen on a `QThread` worker.
+  everyday flow top to bottom (Source, Physical units, Output, Camera
+  calibration, then the processing settings); the right side is Preview and
+  Run. Settings that are real but rarely touched -- hand-entered calibration
+  coefficients, algorithm method pickers, GPU tiling, per-pass internals,
+  worker count -- live in ONE consolidated "Advanced" disclosure at the
+  bottom of the left rail rather than several scattered ones competing with
+  the flow. Batch runs happen on a `QThread` worker.
 
 ## Known limitations
 

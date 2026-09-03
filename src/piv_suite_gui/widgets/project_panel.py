@@ -12,12 +12,14 @@ Layout notes:
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QFileDialog, QGridLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QPushButton, QRadioButton, QSizePolicy,
-    QSpinBox, QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QGridLayout,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QRadioButton,
+    QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
 )
 
-from piv_suite.config.schema import DualPlanarSettings, PreprocessSettings, ProjectSettings
+from piv_suite.config.schema import (
+    CalibrationSettings, DualPlanarSettings, PreprocessSettings, ProjectSettings,
+)
 from piv_suite.engines.registry import is_gpu_available
 
 from ._util import section_label, style_spin
@@ -301,6 +303,42 @@ class ProjectPanel(QWidget):
 
         layout.addWidget(input_box)
 
+        # ---- physical units (calibration) -- right below project
+        # selection, not gated behind an on/off toggle. Both fields
+        # matter for every real workflow: a .set project auto-fills them
+        # the moment it's selected (see main_window._extract_calibration_
+        # for_current_mode), and a loose-file project needs them typed in
+        # before the output means anything -- there is no "I deliberately
+        # want px/frame" use case common enough to earn a checkbox click
+        # ahead of it. ----
+        units_box = QGroupBox("PHYSICAL UNITS")
+        units_grid = QGridLayout(units_box)
+        units_grid.setContentsMargins(6, 6, 6, 6)
+        units_grid.setSpacing(4)
+        units_grid.setColumnStretch(1, 1)
+
+        self.pixel_pitch_spin = style_spin(QDoubleSpinBox(), decimals=6)
+        self.pixel_pitch_spin.setRange(1e-9, 1e6)
+        self.pixel_pitch_spin.setValue(1.0)
+        self.pixel_pitch_spin.setToolTip(
+            "Physical size of one pixel, in mm -- multiplies px/frame "
+            "displacements into mm/frame. Auto-filled from the selected "
+            ".set project's own scale where available.")
+        units_grid.addWidget(QLabel("Pixel pitch (mm/px):"), 0, 0)
+        units_grid.addWidget(self.pixel_pitch_spin, 0, 1)
+
+        self.frame_dt_spin = style_spin(QDoubleSpinBox(), decimals=6)
+        self.frame_dt_spin.setRange(1e-9, 1e6)
+        self.frame_dt_spin.setValue(1.0)
+        self.frame_dt_spin.setToolTip(
+            "Real time between frame A and frame B, in seconds -- divides "
+            "mm/frame into a true velocity per second. Auto-filled from "
+            "the selected .set project's own acquisition timing where "
+            "available.")
+        units_grid.addWidget(QLabel("Frame Δt (s):"), 1, 0)
+        units_grid.addWidget(self.frame_dt_spin, 1, 1)
+        layout.addWidget(units_box)
+
         # ---- output ----
         out_box = QGroupBox("OUTPUT")
         out_grid = QGridLayout(out_box)
@@ -395,6 +433,27 @@ class ProjectPanel(QWidget):
             min_max_filter_enabled=self.min_max_check.isChecked(),
             min_max_filter_length=self.min_max_length_spin.value(),
         )
+
+    def get_calibration_settings(self) -> CalibrationSettings:
+        return CalibrationSettings(
+            pixel_pitch_mm=self.pixel_pitch_spin.value(),
+            frame_dt_s=self.frame_dt_spin.value(),
+        )
+
+    def set_calibration_settings(self, settings: CalibrationSettings):
+        """Push auto-extracted calibration into the form -- called by
+        main_window after a .set path is (re)selected and
+        davis_set.read_calibration_from_set runs. A field the .set
+        couldn't supply is left at whatever value was already showing --
+        there is no "unset" state to fall back to any more (see this
+        panel's PHYSICAL UNITS section comment), so the honest thing is to
+        leave the last real number in place and let main_window's own
+        status-bar message ("couldn't auto-extract ... fill in manually")
+        say so, rather than silently reset to the 1.0 placeholder."""
+        if settings.pixel_pitch_mm is not None:
+            self.pixel_pitch_spin.setValue(settings.pixel_pitch_mm)
+        if settings.frame_dt_s is not None:
+            self.frame_dt_spin.setValue(settings.frame_dt_s)
 
     def get_dual_planar_settings(self) -> DualPlanarSettings:
         """The last auto-extracted DaVis SideBySide2D calibration (see

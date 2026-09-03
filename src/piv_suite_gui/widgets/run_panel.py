@@ -97,7 +97,7 @@ class RunPanel(QWidget):
         correlation = main_window.settings_panel.get_correlation_settings()
         validation = main_window.settings_panel.get_validation_settings()
         post = main_window.settings_panel.get_postprocess_settings()
-        calibration = main_window.settings_panel.get_calibration_settings()
+        calibration = main_window.project_panel.get_calibration_settings()
         performance = main_window.settings_panel.get_performance_settings()
 
         from piv_suite.config.schema import ProjectConfig

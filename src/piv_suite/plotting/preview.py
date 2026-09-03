@@ -50,6 +50,16 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 # Hard-coded, not a GUI choice any more -- see this module's docstring.
 MAGNITUDE_CMAP = "turbo"
+# Number of filled-contour bands. 21 read as visibly banded/stepped on a
+# smooth real field; 41 halves the per-band jump for the same auto-scaled
+# range while staying cheap to render at preview size.
+CONTOUR_LEVELS = 41
+# Arrows drawn along the LONGER grid axis when the quiver overlay is on.
+# One arrow per correlation cell solid-fills the plot (a real 373x509 grid
+# is ~190,000 arrows) and reads as a black smear, not a flow field -- this
+# decimates to a density an eye can actually follow regardless of the
+# underlying grid's own resolution.
+QUIVER_TARGET_ARROWS = 25
 
 
 def _auto_range(masked_data):
@@ -66,8 +76,47 @@ def _auto_range(masked_data):
     return vmin, vmax
 
 
+def _draw_direction_quiver(ax, x, y, u, v, valid):
+    """Direction-only flow-arrow overlay: decimated to a fixed on-screen
+    density and normalized to unit length, so it reads as "which way" on
+    top of the contour's already-established "how fast" rather than
+    fighting it for the same visual channel.
+
+    Density: one arrow per correlation cell solid-fills the plot for any
+    real grid (373x509 is ~190,000 cells) -- decimated to
+    QUIVER_TARGET_ARROWS along the grid's longer axis regardless of the
+    underlying resolution, so a coarse and a fine grid read the same.
+
+    Length: normalized to 1 before plotting -- overlaying the RAW (u, v)
+    here would scale each arrow by the same magnitude the contour already
+    shows in color, and at any single fixed scale a real field's spread
+    (a handful of fast cells against a slow background) makes it
+    unreadable at both ends: tiny arrows everywhere, or a few blowing off
+    the plot. `scale_units="xy"` + `scale` computed from the DECIMATED
+    grid's own spacing keeps neighbouring unit arrows from overlapping
+    regardless of the field's physical units (raw px, mm, world px)."""
+    ny, nx = x.shape
+    stride = max(1, max(ny, nx) // QUIVER_TARGET_ARROWS)
+    xs, ys = x[::stride, ::stride], y[::stride, ::stride]
+    us, vs = u[::stride, ::stride], v[::stride, ::stride]
+    valid_s = valid[::stride, ::stride]
+
+    mag = np.hypot(us, vs)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        un = np.where(mag > 0, us / mag, 0.0)
+        vn = np.where(mag > 0, vs / mag, 0.0)
+
+    dx = float(np.median(np.abs(np.diff(x[0, :])))) if nx > 1 else 1.0
+    spacing = dx * stride
+    # 80% of the decimated spacing -- close to filling each cell without
+    # neighbouring arrowheads touching.
+    scale = 1.0 / (0.8 * spacing) if spacing > 0 else 1.0
+    ax.quiver(xs[valid_s], ys[valid_s], un[valid_s], vn[valid_s],
+              color="black", pivot="mid", angles="xy", scale_units="xy", scale=scale)
+
+
 def make_preview_figure(mode, x, y, u, v, valid, title, w=None, units="m/s",
-                         show_vectors=False, quiver_scale=1000, figsize=(7, 6)):
+                         show_vectors=False, figsize=(7, 6)):
     """Build (not save/show) a matplotlib Figure showing ONE velocity-
     magnitude field for the GUI to embed directly. mode is "planar" or
     "stereo" -- used only to label the axes (stereo's grid is DaVis's
@@ -80,9 +129,18 @@ def make_preview_figure(mode, x, y, u, v, valid, title, w=None, units="m/s",
     stereo distinction for the actual math, matching what the caller has
     on hand; `mode` only affects the axis label text.
 
-    show_vectors overlays a quiver of the in-plane (u, v) direction on
-    top of the magnitude contour -- always ON TOP, never an alternative
-    to it (there's no contour-off mode any more; magnitude IS the plot).
+    show_vectors overlays a DIRECTION-ONLY quiver (see
+    _draw_direction_quiver) of the in-plane (u, v) field on top of the
+    magnitude contour -- always ON TOP, never an alternative to it
+    (there's no contour-off mode any more; magnitude IS the plot).
+    Magnitude is the contour's job; the quiver's only remaining job is
+    which way it's going, so it draws unit-length arrows rather than
+    ones scaled by a magnitude the color already shows -- a fixed
+    `quiver_scale` mixed the two and was unreadable at either end of a
+    real field's speed range (a few fast cells make everything else
+    invisible, or fill the axes on their own). No `quiver_scale`
+    parameter any more: arrow length is derived from the (decimated)
+    grid's own spacing instead of a caller-tuned constant.
 
     figsize only matters to callers that render this figure directly (tests,
     or anything saving a PNG). It does NOT drive the GUI: FigureCanvasQTAgg
@@ -92,7 +150,7 @@ def make_preview_figure(mode, x, y, u, v, valid, title, w=None, units="m/s",
     magnitude = np.sqrt(u**2 + v**2) if w is None else np.sqrt(u**2 + v**2 + w**2)
     masked = np.ma.masked_where(~valid, magnitude)
     vmin, vmax = _auto_range(masked)
-    levels = np.linspace(vmin, vmax, 21)
+    levels = np.linspace(vmin, vmax, CONTOUR_LEVELS)
 
     # constrained layout, not tight_layout. With a fixed aspect the axes
     # shrinks inside its box to preserve shape, and tight_layout's default
@@ -119,7 +177,7 @@ def make_preview_figure(mode, x, y, u, v, valid, title, w=None, units="m/s",
     cax = make_axes_locatable(ax).append_axes("right", size="3%", pad=0.12)
     fig.colorbar(cs, cax=cax, label=f"|V| ({units})")
     if show_vectors:
-        ax.quiver(x[valid], y[valid], u[valid], v[valid], color="black", scale=quiver_scale)
+        _draw_direction_quiver(ax, x, y, u, v, valid)
     axlabel = ("x (world px)", "y (world px)") if mode == "stereo" else ("pixels", "pixels")
     ax.set_xlabel(axlabel[0])
     ax.set_ylabel(axlabel[1])

@@ -55,12 +55,12 @@ def test_preview_shows_progress_bar_while_running_and_hides_after(qtbot):
         "project_panel": type("P", (), {
             "get_project_settings": lambda self: type("S", (), {"mode": "planar", "dual_camera": False})(),
             "get_preprocess_settings": lambda self: None,
+            "get_calibration_settings": lambda self: None,
         })(),
         "settings_panel": type("SP", (), {
             "get_correlation_settings": lambda self: None,
             "get_validation_settings": lambda self: None,
             "get_postprocess_settings": lambda self: None,
-            "get_calibration_settings": lambda self: None,
         })(),
     })()
     panel.pair_combo.addItem("0000")  # skip _refresh_pairs -- the fake window has no real project I/O
@@ -106,12 +106,12 @@ def test_range_preview_clamps_count_and_shows_determinate_progress(qtbot):
         "project_panel": type("P", (), {
             "get_project_settings": lambda self: type("S", (), {"mode": "planar", "dual_camera": False})(),
             "get_preprocess_settings": lambda self: None,
+            "get_calibration_settings": lambda self: None,
         })(),
         "settings_panel": type("SP", (), {
             "get_correlation_settings": lambda self: None,
             "get_validation_settings": lambda self: None,
             "get_postprocess_settings": lambda self: None,
-            "get_calibration_settings": lambda self: None,
         })(),
     })()
     # only 3 pairs actually exist -- range_count_spin below deliberately
@@ -401,6 +401,56 @@ def test_calibration_panel_hidden_until_stereo_selected(qtbot):
     assert window.calibration_panel.isVisible()
 
 
+def test_calibration_advanced_block_hidden_together_with_calibration_panel(qtbot):
+    # The stereo-only calibration controls (camera coefficients, world
+    # grid, viewing angles) moved out of calibration_panel into the
+    # consolidated Advanced section (main_window._build_ui), but must
+    # still hide/show in lockstep with calibration_panel itself -- a
+    # planar project has no business showing them just because they now
+    # live in a shared drawer with SettingsPanel's own advanced content.
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    window.advanced_section.set_expanded(True)  # isolate this widget's own
+    # visible flag from the disclosure's own separate collapsed/expanded state
+    block = window._calibration_advanced_widget
+    assert not block.isVisible()
+    window.project_panel.stereo_radio.setChecked(True)
+    assert block.isVisible()
+    window.project_panel.planar_radio.setChecked(True)
+    assert not block.isVisible()
+
+
+def test_advanced_section_is_one_disclosure_at_the_bottom_of_the_left_rail(qtbot):
+    # ONE consolidated Advanced disclosure, not several scattered ones --
+    # and it sits after project/calibration/settings in the left rail's
+    # own layout, i.e. at the bottom, not interleaved with everyday
+    # controls.
+    window = MainWindow()
+    qtbot.addWidget(window)
+    left_layout = window.project_panel.parentWidget().layout()
+    indices = {
+        window.project_panel: None, window.calibration_panel: None,
+        window.settings_panel: None, window.advanced_section: None,
+    }
+    for i in range(left_layout.count()):
+        w = left_layout.itemAt(i).widget()
+        if w in indices:
+            indices[w] = i
+    assert indices[window.advanced_section] > indices[window.project_panel]
+    assert indices[window.advanced_section] > indices[window.calibration_panel]
+    assert indices[window.advanced_section] > indices[window.settings_panel]
+    assert window.advanced_section.is_expanded is False  # collapsed by default
+
+
+def test_advanced_section_expands_on_blocking_calibration_problem(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    assert window.advanced_section.is_expanded is False
+    window.calibration_panel.set_problem("something is wrong")
+    assert window.advanced_section.is_expanded is True
+
+
 def test_calibration_panel_default_settings(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)
@@ -538,20 +588,22 @@ def test_std_dev_filter_still_present(qtbot):
 def test_double_spinboxes_use_two_decimals_except_deliberate_high_precision_fields(qtbot):
     # style_spin()'s uniform 2-decimal default is right for most fields,
     # but was wrong for a few real-valued PIV inputs that legitimately
-    # need finer precision (dt, calibration values, sig2noise threshold,
-    # smoothn_p) -- a 2-decimal cap made sub-0.01 values impossible to
-    # enter at all, not just imprecise. Those fields deliberately override
-    # decimals; everything else still gets the uniform 2-decimal default.
+    # need finer precision (calibration values, smoothn_p) -- a 2-decimal
+    # cap made sub-0.01 values impossible to enter at all, not just
+    # imprecise. Those fields deliberately override decimals; everything
+    # else still gets the uniform 2-decimal default.
     window = MainWindow()
     qtbot.addWidget(window)
     from PySide6.QtWidgets import QDoubleSpinBox
     high_precision = {
-        window.settings_panel.dt_spin,
-        window.settings_panel.pixel_pitch_spin,
-        window.settings_panel.frame_dt_spin,
+        window.project_panel.pixel_pitch_spin,
+        window.project_panel.frame_dt_spin,
         window.settings_panel.smoothn_p_spin,
     }
-    for panel in (window.project_panel, window.settings_panel, window.calibration_panel):
+    # calibration_panel's own numeric fields live under advanced_section now
+    # (see main_window._build_ui's Advanced-section comment), not as direct
+    # children of calibration_panel any more.
+    for panel in (window.project_panel, window.settings_panel, window.advanced_section):
         for spin in panel.findChildren(QDoubleSpinBox):
             if spin in high_precision:
                 assert spin.decimals() > 2, f"{spin} expected to override the 2-decimal default"
@@ -559,21 +611,28 @@ def test_double_spinboxes_use_two_decimals_except_deliberate_high_precision_fiel
                 assert spin.decimals() == 2, f"{spin} has {spin.decimals()} decimals, expected 2"
 
 
-def test_calibration_settings_default_unset_but_settable(qtbot):
-    # CalibrationSettings (pixel_pitch_mm, frame_dt_s) previously had no
-    # GUI control anywhere, silently locking every GUI result to px/frame.
+def test_calibration_settings_are_always_real_numbers_not_gated_by_a_toggle(qtbot):
+    # Pixel pitch / frame Δt used to be checkbox-gated on SettingsPanel
+    # (CalibrationSettings' own pixel_pitch_mm=None/frame_dt_s=None meant
+    # "keep px/frame units"), but every real workflow either auto-fills
+    # both from the selected .set the moment it's chosen or needs them
+    # typed in before the output means anything -- there is no common "I
+    # deliberately want px/frame" GUI use case that earns a click ahead of
+    # it. Both fields are now plain, always-enabled spin boxes on
+    # ProjectPanel (right below project selection) that always return a
+    # real number.
     window = MainWindow()
     qtbot.addWidget(window)
-    sp = window.settings_panel
-    default = sp.get_calibration_settings()
-    assert default.pixel_pitch_mm is None
-    assert default.frame_dt_s is None
+    pp = window.project_panel
+    default = pp.get_calibration_settings()
+    assert default.pixel_pitch_mm is not None
+    assert default.frame_dt_s is not None
+    assert pp.pixel_pitch_spin.isEnabled()
+    assert pp.frame_dt_spin.isEnabled()
 
-    sp.pixel_pitch_check.setChecked(True)
-    sp.pixel_pitch_spin.setValue(0.012345)
-    sp.frame_dt_check.setChecked(True)
-    sp.frame_dt_spin.setValue(0.002)
-    settings = sp.get_calibration_settings()
+    pp.pixel_pitch_spin.setValue(0.012345)
+    pp.frame_dt_spin.setValue(0.002)
+    settings = pp.get_calibration_settings()
     assert settings.pixel_pitch_mm == pytest.approx(0.012345)
     assert settings.frame_dt_s == pytest.approx(0.002)
 
@@ -616,19 +675,18 @@ def test_correlation_settings_exposes_all_calculation_fields(qtbot):
 
 
 def test_run_panel_populates_calibration_in_config(qtbot):
-    # run_panel._start_run must attach the settings panel's calibration
+    # run_panel._start_run must attach the project panel's calibration
     # settings to the assembled ProjectConfig -- confirmed missing before
     # (ProjectConfig.calibration stayed at its default, unset, forever).
     window = MainWindow()
     qtbot.addWidget(window)
-    window.settings_panel.pixel_pitch_check.setChecked(True)
-    window.settings_panel.pixel_pitch_spin.setValue(0.05)
+    window.project_panel.pixel_pitch_spin.setValue(0.05)
 
     project = window.project_panel.get_project_settings()
     correlation = window.settings_panel.get_correlation_settings()
     validation = window.settings_panel.get_validation_settings()
     post = window.settings_panel.get_postprocess_settings()
-    calibration = window.settings_panel.get_calibration_settings()
+    calibration = window.project_panel.get_calibration_settings()
 
     from piv_suite.config.schema import ProjectConfig
     config = ProjectConfig(project=project, correlation=correlation,
@@ -668,9 +726,12 @@ def test_spin_boxes_have_no_counter_buttons(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)
     from PySide6.QtWidgets import QAbstractSpinBox, QDoubleSpinBox, QSpinBox
-    # project_panel has no spin boxes (only text/combo/radio fields) --
-    # settings_panel and calibration_panel are where every numeric field lives
-    for panel in (window.settings_panel, window.calibration_panel):
+    # project_panel now also owns the physical-units spins (pixel pitch,
+    # frame dt); calibration_panel's own numeric fields (camera mapping
+    # coefficients, world grid, viewing angles) live under the
+    # consolidated advanced_section, not as its own direct children, any
+    # more -- see main_window._build_ui's Advanced-section comment.
+    for panel in (window.project_panel, window.settings_panel, window.advanced_section):
         spins = panel.findChildren(QSpinBox) + panel.findChildren(QDoubleSpinBox)
         assert spins, f"{panel} has no spin boxes to check"
         for spin in spins:
@@ -719,11 +780,9 @@ def test_main_window_extracts_calibration_when_set_path_selected(qtbot, monkeypa
     window.project_panel.input_path_edit.setText(str(set_path))
     window.project_panel.input_path_edit.editingFinished.emit()
 
-    sp = window.settings_panel
-    assert sp.pixel_pitch_check.isChecked()
-    assert sp.pixel_pitch_spin.value() == pytest.approx(0.05)
-    assert sp.frame_dt_check.isChecked()
-    assert sp.frame_dt_spin.value() == pytest.approx(0.0007)
+    pp = window.project_panel
+    assert pp.pixel_pitch_spin.value() == pytest.approx(0.05)
+    assert pp.frame_dt_spin.value() == pytest.approx(0.0007)
 
 
 def test_calibration_extraction_overwrites_prior_manual_edit(qtbot, monkeypatch, tmp_path):
@@ -735,9 +794,8 @@ def test_calibration_extraction_overwrites_prior_manual_edit(qtbot, monkeypatch,
 
     window = MainWindow()
     qtbot.addWidget(window)
-    sp = window.settings_panel
-    sp.pixel_pitch_check.setChecked(True)
-    sp.pixel_pitch_spin.setValue(1.0)  # stale manual value
+    pp = window.project_panel
+    pp.pixel_pitch_spin.setValue(1.0)  # stale manual value
 
     monkeypatch.setattr(mw, "read_calibration_from_set",
                          lambda path, idx: CalibrationSettings(pixel_pitch_mm=0.0514883, frame_dt_s=0.0007))
@@ -745,10 +803,16 @@ def test_calibration_extraction_overwrites_prior_manual_edit(qtbot, monkeypatch,
     window.project_panel.input_path_edit.editingFinished.emit()
 
     # pixel_pitch_spin only has 6-decimal precision (style_spin decimals=6)
-    assert sp.pixel_pitch_spin.value() == pytest.approx(0.0514883, abs=1e-6)
+    assert pp.pixel_pitch_spin.value() == pytest.approx(0.0514883, abs=1e-6)
 
 
-def test_calibration_extraction_clears_field_that_could_not_be_extracted(qtbot, monkeypatch, tmp_path):
+def test_calibration_extraction_leaves_field_that_could_not_be_extracted_unchanged(qtbot, monkeypatch, tmp_path):
+    # There is no "unset" state to fall back to any more (no gating
+    # checkbox -- see ProjectPanel.set_calibration_settings' own
+    # docstring): a field the .set couldn't supply keeps whatever value
+    # was already showing, and main_window's own status-bar message says
+    # extraction was incomplete, rather than the field silently reverting
+    # to the 1.0 placeholder.
     import piv_suite_gui.main_window as mw
     from piv_suite.config.schema import CalibrationSettings
 
@@ -757,17 +821,17 @@ def test_calibration_extraction_clears_field_that_could_not_be_extracted(qtbot, 
 
     window = MainWindow()
     qtbot.addWidget(window)
-    sp = window.settings_panel
-    sp.frame_dt_check.setChecked(True)
-    sp.frame_dt_spin.setValue(0.002)  # stale manual value
+    pp = window.project_panel
+    pp.frame_dt_spin.setValue(0.002)  # a real prior value
 
     monkeypatch.setattr(mw, "read_calibration_from_set",
                          lambda path, idx: CalibrationSettings(pixel_pitch_mm=0.05, frame_dt_s=None))
     window.project_panel.input_path_edit.setText(str(set_path))
     window.project_panel.input_path_edit.editingFinished.emit()
 
-    assert sp.pixel_pitch_check.isChecked()
-    assert not sp.frame_dt_check.isChecked()  # couldn't extract -> authoritative, cleared
+    assert pp.pixel_pitch_spin.value() == pytest.approx(0.05)
+    assert pp.frame_dt_spin.value() == pytest.approx(0.002)  # unsupplied -> left alone
+    assert window.statusBar().currentMessage()  # still says extraction was incomplete
 
 
 def test_calibration_extraction_failure_shows_status_and_does_not_crash(qtbot, monkeypatch, tmp_path):
@@ -801,20 +865,18 @@ def test_calibration_extraction_skipped_in_loose_mode(qtbot, monkeypatch, tmp_pa
     assert called == []
 
 
-def test_settings_panel_set_calibration_clears_unsupplied_fields(qtbot):
+def test_project_panel_set_calibration_leaves_unsupplied_fields_unchanged(qtbot):
     from piv_suite.config.schema import CalibrationSettings
 
     window = MainWindow()
     qtbot.addWidget(window)
-    sp = window.settings_panel
-    sp.frame_dt_check.setChecked(True)
-    sp.frame_dt_spin.setValue(0.002)
+    pp = window.project_panel
+    pp.frame_dt_spin.setValue(0.002)  # a real prior value
 
-    sp.set_calibration_settings(CalibrationSettings(pixel_pitch_mm=0.02, frame_dt_s=None))
+    pp.set_calibration_settings(CalibrationSettings(pixel_pitch_mm=0.02, frame_dt_s=None))
 
-    assert sp.pixel_pitch_check.isChecked()
-    assert sp.pixel_pitch_spin.value() == pytest.approx(0.02)
-    assert not sp.frame_dt_check.isChecked()
+    assert pp.pixel_pitch_spin.value() == pytest.approx(0.02)
+    assert pp.frame_dt_spin.value() == pytest.approx(0.002)  # unsupplied -> left alone
 
 
 def _fake_stereo_settings(z0=1.0, z1=-2.0):
@@ -1285,9 +1347,12 @@ def test_calibration_labels_use_math_notation(qtbot):
     assert cam0.coef_table.verticalHeaderItem(2).text() == "s²"  # "s2" -> s²
     assert cam0.coef_table.verticalHeaderItem(8).text() == "s²t"  # "s2t" -> s²t
 
-    cp = window.calibration_panel
+    # The viewing-angle controls live under the consolidated Advanced
+    # section now (see main_window._build_ui), not as direct children of
+    # calibration_panel any more.
     from PySide6.QtWidgets import QLabel
-    angle_labels = {lbl.text() for lbl in cp.findChildren(QLabel)} & {"α₁:", "α₂:", "β₁:", "β₂:"}
+    angle_labels = {lbl.text() for lbl in window.advanced_section.findChildren(QLabel)} \
+        & {"α₁:", "α₂:", "β₁:", "β₂:"}
     assert angle_labels == {"α₁:", "α₂:", "β₁:", "β₂:"}
 
 

@@ -24,6 +24,7 @@ from piv_suite.io.davis_set import (
     read_dual_planar_calibration_from_set, read_stereo_calibration_from_set,
     resolve_set_paths,
 )
+from piv_suite_gui.widgets._util import CollapsibleSection
 from piv_suite_gui.widgets.calibration_panel import CalibrationPanel
 from piv_suite_gui.widgets.header_bar import HeaderBar
 from piv_suite_gui.widgets.preview_panel import PreviewPanel
@@ -97,10 +98,32 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.calibration_panel)
         left_layout.addWidget(self.settings_panel)
 
-        # calibration only matters in stereo mode -- hide it otherwise
+        # ONE consolidated Advanced disclosure at the bottom of the left
+        # rail, not three-plus scattered ones (SettingsPanel used to draw
+        # its own "Advanced — algorithm"/"— per-pass internals"/
+        # "— performance" toggles inline, and CalibrationPanel a fourth
+        # "Advanced — calibration" one peer to its camera card). Each
+        # panel still owns and builds its own advanced controls
+        # (advanced_widget()); this just embeds them together in one
+        # place instead of asking the user to know which of several
+        # collapsed drawers a given setting lives behind.
+        self.advanced_section = CollapsibleSection("ADVANCED")
+        self._calibration_advanced_widget = self.calibration_panel.advanced_widget()
+        self.advanced_section.add_widget(self._calibration_advanced_widget)
+        self.advanced_section.add_widget(self.settings_panel.advanced_widget())
+        left_layout.addWidget(self.advanced_section)
+
+        # calibration only matters in stereo mode -- hide it (and its
+        # Advanced sub-block) otherwise
         self.calibration_panel.setVisible(self.project_panel.is_stereo)
-        self.project_panel.planar_radio.toggled.connect(
-            lambda checked: self.calibration_panel.setVisible(not checked))
+        self._calibration_advanced_widget.setVisible(self.project_panel.is_stereo)
+        self.project_panel.planar_radio.toggled.connect(self._on_planar_toggled)
+
+        # A blocking calibration problem is buried in a collapsed drawer
+        # otherwise -- open it so the fix is visible next to the message
+        # that names it (see CalibrationPanel.set_problem's docstring).
+        self.calibration_panel.advanced_expand_requested.connect(
+            lambda: self.advanced_section.set_expanded(True))
 
         # GPU-only settings (batch size, tiling) are greyed out on CPU and
         # vice versa (correlation method, deformation method, etc.) --
@@ -163,6 +186,15 @@ class MainWindow(QMainWindow):
         # batch is in flight), and the header mirrors its state.
         self.run_panel.run_enabled_changed.connect(self.header.set_run_enabled)
         self.header.run_requested.connect(self._run_from_header)
+
+    def _on_planar_toggled(self, checked):
+        """Calibration only matters in stereo mode -- hides both the
+        CAMERA CALIBRATION card (calibration_panel itself) and its
+        Advanced sub-block inside the consolidated Advanced section
+        together, so a planar project never shows stereo-only controls
+        in either place."""
+        self.calibration_panel.setVisible(not checked)
+        self._calibration_advanced_widget.setVisible(not checked)
 
     def _resolve_set_for_extraction(self, path):
         """Shared .set-mode-only guard/resolution used by both
@@ -247,7 +279,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             messages.append(f"Couldn't auto-extract calibration from '{base}': {e}")
         else:
-            self.settings_panel.set_calibration_settings(calibration)
+            self.project_panel.set_calibration_settings(calibration)
             parts = []
             if calibration.pixel_pitch_mm is not None:
                 parts.append(f"pixel pitch {calibration.pixel_pitch_mm:.6g} mm/px")

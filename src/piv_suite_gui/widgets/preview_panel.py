@@ -357,7 +357,7 @@ class PreviewPanel(QWidget):
             correlation = main_window.settings_panel.get_correlation_settings()
             validation = main_window.settings_panel.get_validation_settings()
             post = main_window.settings_panel.get_postprocess_settings()
-            calibration = main_window.settings_panel.get_calibration_settings()
+            calibration = main_window.project_panel.get_calibration_settings()
             stereo_settings = main_window.calibration_panel.get_settings() if project.mode == "stereo" else None
             dual_planar_settings = (main_window.project_panel.get_dual_planar_settings()
                                      if project.dual_camera else None)

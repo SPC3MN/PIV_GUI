@@ -109,6 +109,73 @@ def test_vectors_toggle_adds_a_quiver_without_extra_axes():
     assert len(fig_off.axes) == len(fig_on.axes) == 2
 
 
+def test_quiver_arrows_are_normalized_to_unit_length():
+    """The quiver overlay shows DIRECTION only -- magnitude is the
+    contour's job. A raw (u, v) quiver scales each arrow by the same
+    speed the color already encodes, which is unreadable at both ends of
+    a real field's range (a few fast cells dwarf a slow background at any
+    fixed scale). Every plotted arrow must therefore have the same
+    on-screen length regardless of its own (u, v) magnitude."""
+    ny, nx = 20, 30
+    x, y = np.meshgrid(np.arange(nx, dtype=float), np.arange(ny, dtype=float))
+    rng = np.random.RandomState(0)
+    # Wildly different magnitudes across the field -- some cells 100x
+    # others -- so a length bug would show up as very different arrow
+    # lengths, not just a uniform scale-factor difference.
+    u = rng.uniform(-100, 100, size=(ny, nx))
+    v = rng.uniform(-1, 1, size=(ny, nx))
+    valid = np.ones((ny, nx), dtype=bool)
+
+    fig = make_preview_figure("planar", x, y, u, v, valid, title="t", show_vectors=True)
+    quiver = next(c for c in fig.axes[0].get_children() if isinstance(c, Quiver))
+    plotted_u, plotted_v = quiver.U, quiver.V
+    lengths = np.hypot(plotted_u, plotted_v)
+    assert lengths.size > 0
+    assert lengths == pytest.approx(1.0)
+
+
+def test_quiver_decimates_a_fine_grid_to_a_readable_density():
+    """One arrow per correlation cell solid-fills the plot on a real grid
+    (373x509 is ~190,000 cells) -- must be decimated to something an eye
+    can follow, well under the number of underlying cells."""
+    from piv_suite.plotting.preview import QUIVER_TARGET_ARROWS
+
+    ny, nx = 200, 300
+    x, y = np.meshgrid(np.arange(nx, dtype=float), np.arange(ny, dtype=float))
+    u = np.ones((ny, nx))
+    v = np.zeros((ny, nx))
+    valid = np.ones((ny, nx), dtype=bool)
+
+    fig = make_preview_figure("planar", x, y, u, v, valid, title="t", show_vectors=True)
+    quiver = next(c for c in fig.axes[0].get_children() if isinstance(c, Quiver))
+    n_arrows = quiver.U.size
+    assert n_arrows < ny * nx
+    # Roughly QUIVER_TARGET_ARROWS along the longer (here: x) axis --
+    # generous bounds since integer stride rounding won't hit it exactly.
+    assert QUIVER_TARGET_ARROWS * 0.5 <= n_arrows ** 0.5 * (nx / ny) ** 0.5 <= QUIVER_TARGET_ARROWS * 2
+
+
+def test_quiver_survives_a_single_column_grid():
+    """np.diff on a 1-wide grid is empty -- must not raise/NaN out. Exercises
+    _draw_direction_quiver directly: make_preview_figure's own contourf
+    call already requires at least a 2x2 grid, independent of the quiver."""
+    import matplotlib.pyplot as plt
+
+    from piv_suite.plotting.preview import _draw_direction_quiver
+
+    x, y = np.meshgrid(np.arange(1, dtype=float), np.arange(5, dtype=float))
+    u = np.ones((5, 1))
+    v = np.zeros((5, 1))
+    valid = np.ones((5, 1), dtype=bool)
+    fig, ax = plt.subplots()
+    try:
+        _draw_direction_quiver(ax, x, y, u, v, valid)
+        quiver = next(c for c in ax.get_children() if isinstance(c, Quiver))
+        assert np.isfinite(quiver.U).all() and np.isfinite(quiver.V).all()
+    finally:
+        plt.close(fig)
+
+
 def test_auto_range_scales_to_data_min_max():
     data = np.ma.masked_array(np.arange(4, dtype=float), mask=False)
     assert _auto_range(data) == (0.0, 3.0)

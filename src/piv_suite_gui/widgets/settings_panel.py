@@ -1,6 +1,14 @@
-"""Settings panel: multi-pass window/overlap schedule, correlation
-controls, per-pass internal stability fill, physical-unit calibration,
-and the "remove invalid vectors" post-processing step.
+"""Settings panel: multi-pass window/overlap schedule, per-pass internal
+stability fill, the "remove invalid vectors" post-processing step, and
+(behind Advanced -- see advanced_widget()) the correlation algorithm
+pickers, GPU tiling, and worker-process limit.
+
+Physical-unit calibration (pixel pitch / frame Δt) lives on ProjectPanel
+now, right below where the project is selected -- not here. It used to be
+a checkbox-gated pair of fields in a "PHYSICAL UNITS" box on this panel,
+but every real workflow either auto-extracts both from the selected .set
+or needs them filled in before anything downstream is meaningful, so
+gating them behind an on/off toggle only added a click nobody needed.
 
 Two DIFFERENT groups look superficially similar (both have a "smoothn"/
 "smooth" and a fill/replace concept) but serve entirely different
@@ -33,12 +41,12 @@ from PySide6.QtWidgets import (
 )
 
 from piv_suite.config.schema import (
-    CalibrationSettings, CorrelationSettings, PassSettings, PerformanceSettings,
+    CorrelationSettings, PassSettings, PerformanceSettings,
     PostProcessSettings, RangeFilterSettings, ValidationSettings,
 )
 from piv_suite.perf.autotune import recommended_workers
 
-from ._util import CollapsibleSection, fit_table_to_rows, style_spin
+from ._util import fit_table_to_rows, style_spin
 
 #: The only correlation method this app supports -- see where it is displayed.
 CORRELATION_METHOD = "circular"
@@ -125,46 +133,23 @@ class SettingsPanel(QWidget):
         self.passes_table = _PassesTable()
         layout.addWidget(self.passes_table)
 
-        # ---- correlation ----
-        corr_box = QGroupBox("CORRELATION")
-        corr_grid = QGridLayout(corr_box)
-        corr_grid.setContentsMargins(6, 6, 6, 6)
-        corr_grid.setSpacing(4)
-        corr_grid.setColumnStretch(1, 1)
-        # decimals=6 (not the shared style_spin default of 2) -- a 2-decimal
-        # cap made any dt below 0.01 (e.g. real microsecond-scale PIV
-        # timings) impossible to enter at all, not just imprecise.
-        self.dt_spin = style_spin(QDoubleSpinBox(), decimals=6)
-        self.dt_spin.setRange(1e-6, 1e6)
-        self.dt_spin.setValue(1.0)
-        self.dt_spin.setToolTip(
-            "Time between frame A and frame B, in the correlation's own "
-            "time unit (not necessarily seconds) -- results come out in "
-            "px/dt. Not the same as the 'Frame Δt (s)' calibration field "
-            "below, which additionally converts px/frame to physical "
-            "units.")
+        # ---- algorithm (Advanced) -- method pickers and GPU tiling are
+        # expert territory: correct defaults already, wrong answers
+        # available, and nothing a normal run needs to touch. ----
+        algo_box = QGroupBox("ALGORITHM")
+        adv_grid = QGridLayout(algo_box)
+        adv_grid.setContentsMargins(6, 6, 6, 6)
+        adv_grid.setSpacing(4)
+        adv_grid.setColumnStretch(1, 1)
+
         self.subpixel_combo = QComboBox()
         self.subpixel_combo.addItems(["gaussian", "centroid", "parabolic"])
         self.subpixel_combo.setToolTip(
             "Peak-fitting method used to refine each correlation peak to "
             "sub-pixel accuracy. 'gaussian' is the standard choice for "
             "typical PIV particle images.")
-        corr_grid.addWidget(QLabel("Δt:"), 0, 0)  # Δt
-        corr_grid.addWidget(self.dt_spin, 0, 1)
-
-        # Method pickers and GPU tiling are expert territory: correct defaults
-        # already, wrong answers available, and nothing a normal run needs to
-        # touch. They keep working exactly as before, one click away.
-        self.advanced_correlation = CollapsibleSection("Advanced — algorithm")
-        adv_grid = QGridLayout()
-        adv_grid.setContentsMargins(0, 0, 0, 0)
-        adv_grid.setSpacing(4)
-        adv_grid.setColumnStretch(1, 1)
-        _adv_host = QWidget()
-        _adv_host.setLayout(adv_grid)
-        self.advanced_correlation.add_widget(_adv_host)
-        adv_grid.addWidget(QLabel("Subpixel method:"), 0,0)
-        adv_grid.addWidget(self.subpixel_combo, 0,1)
+        adv_grid.addWidget(QLabel("Subpixel method:"), 0, 0)
+        adv_grid.addWidget(self.subpixel_combo, 0, 1)
 
         # A LABEL, not a one-item combo. Zero-padded ("linear") correlation was
         # removed because it needs a normalization this app never applies and
@@ -177,21 +162,28 @@ class SettingsPanel(QWidget):
             "Circular (unpadded) FFT cross-correlation. Not a choice: openpiv's "
             "zero-padded alternative needs a normalization this app does not "
             "apply, and measures far worse at every displacement.")
-        adv_grid.addWidget(QLabel("Correlation method:"), 1,0)
-        adv_grid.addWidget(self.correlation_method_value, 1,1)
+        adv_grid.addWidget(QLabel("Correlation method:"), 1, 0)
+        adv_grid.addWidget(self.correlation_method_value, 1, 1)
 
         self.deformation_method_combo = QComboBox()
         self.deformation_method_combo.addItems(["symmetric", "second image"])
         self.deformation_method_combo.setToolTip("CPU backend only -- ignored on GPU.")
-        adv_grid.addWidget(QLabel("Deformation method:"), 2,0)
-        adv_grid.addWidget(self.deformation_method_combo, 2,1)
+        adv_grid.addWidget(QLabel("Deformation method:"), 2, 0)
+        adv_grid.addWidget(self.deformation_method_combo, 2, 1)
 
         self.interpolation_order_spin = style_spin(QSpinBox())
         self.interpolation_order_spin.setRange(0, 5)
         self.interpolation_order_spin.setValue(3)
-        self.interpolation_order_spin.setToolTip("CPU backend only -- ignored on GPU.")
-        adv_grid.addWidget(QLabel("Interpolation order:"), 3,0)
-        adv_grid.addWidget(self.interpolation_order_spin, 3,1)
+        self.interpolation_order_spin.setToolTip(
+            "CPU backend only -- ignored on GPU. 3 measured best on real "
+            "data: order 5 reduces sub-pixel bias only below the noise "
+            "floor of agreement with DaVis (22.18 vs 22.21 mm/s mean|diff|) "
+            "while costing 14-21% more runtime; order 1 (bilinear) is a "
+            "real regression (0.0412 px worst-case bias vs 0.0145 at "
+            "order 3). See CorrelationSettings.interpolation_order's own "
+            "comment for the full sweep.")
+        adv_grid.addWidget(QLabel("Interpolation order:"), 3, 0)
+        adv_grid.addWidget(self.interpolation_order_spin, 3, 1)
 
         self.batch_size_check = QCheckBox("Set GPU batch size:")
         self.batch_size_check.setToolTip("GPU backend only. Unchecked = piv_gpu's own default (process all windows in one batch).")
@@ -201,8 +193,8 @@ class SettingsPanel(QWidget):
         self.batch_size_spin.setValue(64)
         self.batch_size_spin.setToolTip("Number of interrogation windows processed per GPU batch.")
         self.batch_size_spin.setEnabled(False)
-        adv_grid.addWidget(self.batch_size_check, 4,0)
-        adv_grid.addWidget(self.batch_size_spin, 4,1)
+        adv_grid.addWidget(self.batch_size_check, 4, 0)
+        adv_grid.addWidget(self.batch_size_spin, 4, 1)
 
         self.tiling_check = QCheckBox("GPU tiling (large frames)")
         self.tiling_check.setToolTip("Split large frames into a grid of tiles to bound peak GPU memory. GPU backend only.")
@@ -210,11 +202,11 @@ class SettingsPanel(QWidget):
         self.n_tiles_y_spin.setToolTip("Number of tiles to split each frame into along the y (row) axis. GPU backend only.")
         self.n_tiles_x_spin = style_spin(QSpinBox()); self.n_tiles_x_spin.setRange(1, 64); self.n_tiles_x_spin.setValue(1)
         self.n_tiles_x_spin.setToolTip("Number of tiles to split each frame into along the x (column) axis. GPU backend only.")
-        adv_grid.addWidget(self.tiling_check, 5,0, 1, 2)
-        adv_grid.addWidget(QLabel("n_tiles_y:"), 6,0)
-        adv_grid.addWidget(self.n_tiles_y_spin, 6,1)
-        adv_grid.addWidget(QLabel("n_tiles_x:"), 7,0)
-        adv_grid.addWidget(self.n_tiles_x_spin, 7,1)
+        adv_grid.addWidget(self.tiling_check, 5, 0, 1, 2)
+        adv_grid.addWidget(QLabel("n_tiles_y:"), 6, 0)
+        adv_grid.addWidget(self.n_tiles_y_spin, 6, 1)
+        adv_grid.addWidget(QLabel("n_tiles_x:"), 7, 0)
+        adv_grid.addWidget(self.n_tiles_x_spin, 7, 1)
 
         self.tile_margin_check = QCheckBox("Override tile margin (px):")
         self.tile_margin_check.setToolTip(
@@ -226,51 +218,12 @@ class SettingsPanel(QWidget):
         self.tile_margin_spin.setValue(96)
         self.tile_margin_spin.setToolTip("Manual overlap (px) between adjacent tiles, overriding the auto default.")
         self.tile_margin_spin.setEnabled(False)
-        adv_grid.addWidget(self.tile_margin_check, 8,0)
+        adv_grid.addWidget(self.tile_margin_check, 8, 0)
         adv_grid.addWidget(self.tile_margin_spin, 8, 1)
-        corr_grid.addWidget(self.advanced_correlation, 1, 0, 1, 2)
-        layout.addWidget(corr_box)
 
-        # ---- physical units (calibration) ----
-        cal_box = QGroupBox("PHYSICAL UNITS")
-        cal_box.setToolTip(
-            "Unset = results stay in px/frame (px/frame for stereo's U/V/W "
-            "too, unless world_scale_px_per_mm on the Calibration tab "
-            "already converts in-plane units).")
-        cal_grid = QGridLayout(cal_box)
-        cal_grid.setContentsMargins(6, 6, 6, 6)
-        cal_grid.setSpacing(4)
-
-        self.pixel_pitch_check = QCheckBox("Pixel pitch (mm/px):")
-        self.pixel_pitch_check.setToolTip(
-            "Physical size of one pixel in mm -- multiplies px/frame "
-            "displacements into mm/frame. Leave unchecked to keep results "
-            "in px/frame.")
-        self.pixel_pitch_check.toggled.connect(lambda c: self.pixel_pitch_spin.setEnabled(c))
-        self.pixel_pitch_spin = style_spin(QDoubleSpinBox(), decimals=6)
-        self.pixel_pitch_spin.setRange(1e-9, 1e6)
-        self.pixel_pitch_spin.setToolTip("Physical size of one pixel, in mm.")
-        self.pixel_pitch_spin.setEnabled(False)
-        cal_grid.addWidget(self.pixel_pitch_check, 0, 0)
-        cal_grid.addWidget(self.pixel_pitch_spin, 0, 1)
-
-        self.frame_dt_check = QCheckBox("Frame Δt (s):")
-        self.frame_dt_check.setToolTip(
-            "Real time between frame A and frame B, in seconds -- divides "
-            "mm/frame (or px/frame) into a true velocity per second. "
-            "Combine with Pixel pitch above for full px -> physical-unit "
-            "velocity conversion.")
-        self.frame_dt_check.toggled.connect(lambda c: self.frame_dt_spin.setEnabled(c))
-        self.frame_dt_spin = style_spin(QDoubleSpinBox(), decimals=6)
-        self.frame_dt_spin.setRange(1e-9, 1e6)
-        self.frame_dt_spin.setToolTip("Real time between frame A and frame B, in seconds.")
-        self.frame_dt_spin.setEnabled(False)
-        cal_grid.addWidget(self.frame_dt_check, 1, 0)
-        cal_grid.addWidget(self.frame_dt_spin, 1, 1)
-        layout.addWidget(cal_box)
-
-        # ---- per-pass internal stability fill (runs inside the multi-
-        # pass loop -- does NOT reject/validate vectors, see tooltip) ----
+        # ---- per-pass internal stability fill (Advanced) -- runs inside
+        # the multi-pass loop -- does NOT reject/validate vectors, see
+        # tooltip ----
         val_box = QGroupBox("PER-PASS STABILITY (INTERNAL)")
         val_box.setToolTip(
             "Runs BETWEEN multi-pass iterations, feeding the next (finer) "
@@ -325,14 +278,16 @@ class SettingsPanel(QWidget):
         self.smoothn_check.toggled.connect(lambda c: self.smoothn_p_spin.setEnabled(c))
         self.smoothn_p_spin = style_spin(QDoubleSpinBox(), decimals=4)
         self.smoothn_p_spin.setRange(0.0, 100.0)
-        self.smoothn_p_spin.setValue(15.0)
+        # 0.75, NOT 15.0 -- see ValidationSettings.smoothn_p's own comment
+        # for the ground-truth re-measurement (against known displacement,
+        # not DaVis's own post-denoised output) that replaced 15.0 with
+        # this. 15.0 measured 1.5x-4.9x WORSE RMS error on every field
+        # with real spatial structure.
+        self.smoothn_p_spin.setValue(0.75)
         self.smoothn_p_spin.setToolTip("smoothn's own smoothing strength parameter -- higher = smoother.")
         self.smoothn_p_spin.setEnabled(True)
         val_grid.addWidget(self.smoothn_check, 3, 0)
         val_grid.addWidget(self.smoothn_p_spin, 3, 1)
-        self.advanced_internals = CollapsibleSection("Advanced — per-pass internals")
-        self.advanced_internals.add_widget(val_box)
-        layout.addWidget(self.advanced_internals)
 
         # ---- remove invalid vectors (the SOLE validation step) ----
         post_box = QGroupBox("REMOVE INVALID VECTORS (POST-PROCESSING)")
@@ -340,7 +295,7 @@ class SettingsPanel(QWidget):
             "The only place vectors are ever marked invalid -- runs once, "
             "after the final field is produced. Nothing during "
             "calculation itself rejects a vector (see 'Per-pass stability "
-            "(internal)' above).")
+            "(internal)' under Advanced).")
         post_grid = QGridLayout(post_box)
         post_grid.setContentsMargins(6, 6, 6, 6)
         post_grid.setSpacing(4)
@@ -429,7 +384,7 @@ class SettingsPanel(QWidget):
 
         layout.addWidget(post_box)
 
-        # ---- performance (Tier 3: cross-pair parallelism) ----
+        # ---- performance (Advanced -- Tier 3: cross-pair parallelism) ----
         perf_box = QGroupBox("PERFORMANCE")
         perf_box.setToolTip(
             "Planar CPU batch runs process independent frame pairs across "
@@ -456,11 +411,28 @@ class SettingsPanel(QWidget):
         self.n_workers_spin.setEnabled(False)
         perf_grid.addWidget(self.n_workers_check, 0, 0)
         perf_grid.addWidget(self.n_workers_spin, 0, 1)
-        self.advanced_performance = CollapsibleSection("Advanced — performance")
-        self.advanced_performance.add_widget(perf_box)
-        layout.addWidget(self.advanced_performance)
+
+        # ONE advanced container, not three separate disclosures -- see
+        # main_window._build_ui, which embeds this (alongside
+        # CalibrationPanel.advanced_widget()) into the single Advanced
+        # section at the bottom of the left rail. Built here, not added
+        # to `layout` directly: this panel's own visible surface is just
+        # the window schedule and the post-processing box above.
+        self._advanced_container = QWidget()
+        adv_layout = QVBoxLayout(self._advanced_container)
+        adv_layout.setContentsMargins(0, 0, 0, 0)
+        adv_layout.setSpacing(6)
+        adv_layout.addWidget(algo_box)
+        adv_layout.addWidget(val_box)
+        adv_layout.addWidget(perf_box)
 
         layout.addStretch(1)
+
+    def advanced_widget(self) -> QWidget:
+        """The algorithm/per-pass-internals/performance controls, as one
+        widget for main_window to embed in the single consolidated
+        Advanced disclosure -- see this panel's own _build_ui comment."""
+        return self._advanced_container
 
     def set_backend(self, backend):
         """Grey out whichever group of fields doesn't apply to the
@@ -495,7 +467,18 @@ class SettingsPanel(QWidget):
     def get_correlation_settings(self) -> CorrelationSettings:
         return CorrelationSettings(
             passes=self.passes_table.get_passes(),
-            dt=self.dt_spin.value(),
+            # Not a GUI control. openpiv's own PIVSettings.dt convention
+            # divides the raw pixel displacement by this before anything
+            # else sees it, producing px/dt instead of px/frame -- but
+            # this app's physical-unit conversion runs entirely through a
+            # SEPARATE, dedicated path instead (ProjectPanel's Pixel
+            # pitch/Frame Δt -> processing.postprocess.apply_calibration),
+            # so nothing in this codebase, any test, or any real .set
+            # workflow ever sets dt to anything but 1.0 -- confirmed by
+            # searching every real call site. A control with no scenario
+            # that changes it is not a control, just a place to
+            # accidentally type the wrong number.
+            dt=1.0,
             correlation_method=CORRELATION_METHOD,
             subpixel_method=self.subpixel_combo.currentText(),
             deformation_method=self.deformation_method_combo.currentText(),
@@ -515,27 +498,6 @@ class SettingsPanel(QWidget):
             smoothn=self.smoothn_check.isChecked(),
             smoothn_p=self.smoothn_p_spin.value(),
         )
-
-    def get_calibration_settings(self) -> CalibrationSettings:
-        return CalibrationSettings(
-            pixel_pitch_mm=self.pixel_pitch_spin.value() if self.pixel_pitch_check.isChecked() else None,
-            frame_dt_s=self.frame_dt_spin.value() if self.frame_dt_check.isChecked() else None,
-        )
-
-    def set_calibration_settings(self, settings: CalibrationSettings):
-        """Push auto-extracted calibration into the form -- called by
-        main_window after a .set path is (re)selected and
-        davis_set.read_calibration_from_set runs. A field the .set
-        couldn't supply is cleared/unchecked (not left at a stale prior
-        value): "couldn't extract" is authoritative for the newly
-        selected project, same as a field it did supply overwriting
-        whatever was there before."""
-        self.pixel_pitch_check.setChecked(settings.pixel_pitch_mm is not None)
-        if settings.pixel_pitch_mm is not None:
-            self.pixel_pitch_spin.setValue(settings.pixel_pitch_mm)
-        self.frame_dt_check.setChecked(settings.frame_dt_s is not None)
-        if settings.frame_dt_s is not None:
-            self.frame_dt_spin.setValue(settings.frame_dt_s)
 
     def get_performance_settings(self) -> PerformanceSettings:
         return PerformanceSettings(
