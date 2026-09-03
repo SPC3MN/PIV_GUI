@@ -371,10 +371,31 @@ class PreprocessSettings:
     raw pixel grid, not the calibrated/mapped one). Removes local
     background intensity level and normalizes local contrast over a
     window of min_max_filter_length pixels (see processing/preprocess.py
-    for the exact 5-step formula). Off by default -- unlike the
-    validation filters, this changes the input images themselves, so
-    it's opt-in."""
-    min_max_filter_enabled: bool = False
+    for the exact formula).
+
+    ON by default, which is a reversal. It was opt-in on the reasoning
+    that "unlike the validation filters, this changes the input images
+    themselves" -- defensible while the filter was the noise-amplifying
+    version min_max_filter's docstring describes, where opt-in was the
+    only thing limiting the damage. With the clipped formula it is the
+    single largest contributor to agreement with DaVis on real data, on
+    BOTH geometries, measured against DaVis's own vectors on the same
+    frames with everything else held fixed:
+
+                    density  corr(U)  corr(V)  corr(W)  mean|diff|
+        planar off   98.2%    0.962    0.951      --     15.4 mm/s
+        planar on    99.4%    0.992    0.990      --      9.5
+        stereo off   89.0%    0.963    0.957    0.973    16.0
+        stereo on    90.7%    0.987    0.988    0.991    10.9
+
+    DaVis itself enables it on both of these recordings (JobHistory.xml:
+    useMinMaxFilter=true, minMaxFilterLength=4), so matching LaVision was
+    never possible with it off.
+
+    The length is barely sensitive: L=4 and L=5 measured corr(U) 0.992 /
+    corr(V) 0.990 vs 0.992 / 0.991 and mean|diff| 9.53 vs 9.21 mm/s on the
+    same planar pairs, so 5 stays."""
+    min_max_filter_enabled: bool = True
     min_max_filter_length: int = 5   # L, in pixels
 
 

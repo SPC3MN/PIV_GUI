@@ -355,6 +355,23 @@ def test_project_panel_default_settings(qtbot):
     assert settings.input_mode == "set"
 
 
+def test_project_panel_preprocess_defaults_match_canonical_schema(qtbot):
+    """The min/max filter's default is a measured choice, not a cosmetic
+    one (see config.schema.PreprocessSettings' docstring), so a GUI that
+    silently starts with it off would hand every new user the worse
+    configuration while the schema claims otherwise."""
+    from piv_suite.config.schema import PreprocessSettings
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    got = window.project_panel.get_preprocess_settings()
+    canonical = PreprocessSettings()
+    assert got.min_max_filter_enabled is canonical.min_max_filter_enabled
+    assert got.min_max_filter_length == canonical.min_max_filter_length
+    # The length spin has to be usable when the box starts checked.
+    assert window.project_panel.min_max_length_spin.isEnabled() is True
+
+
 def test_settings_panel_default_passes_match_canonical_schema(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)

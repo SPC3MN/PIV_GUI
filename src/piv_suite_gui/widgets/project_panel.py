@@ -200,14 +200,19 @@ class ProjectPanel(QWidget):
             "LaVision-style sliding min/max background removal + local "
             "contrast normalization, applied to each raw frame before "
             "correlation. For stereo, applied per-camera BEFORE "
-            "dewarping.")
+            "dewarping. On by default: on real DaVis recordings this is "
+            "the single largest contributor to matching DaVis's own "
+            "vectors -- see config.schema.PreprocessSettings.")
+        # Checked to match PreprocessSettings' own default (see its
+        # docstring for the real-data measurements behind that default).
+        self.min_max_check.setChecked(True)
         self.min_max_length_spin = style_spin(QSpinBox())
         self.min_max_length_spin.setRange(1, 10000)
         self.min_max_length_spin.setValue(5)
         self.min_max_length_spin.setToolTip(
             "L, in pixels -- the sliding window size for the min/max "
-            "filter's background-removal and local-contrast steps.")
-        self.min_max_length_spin.setEnabled(False)
+            "filter's background-removal and local-contrast steps. "
+            "Barely sensitive: 4 and 5 agree with DaVis equally well.")
         self.min_max_check.toggled.connect(self.min_max_length_spin.setEnabled)
         prep_layout.addWidget(self.min_max_check)
         prep_layout.addWidget(self.min_max_length_spin)
