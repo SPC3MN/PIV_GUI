@@ -353,7 +353,7 @@ class PreviewPanel(QWidget):
         # itself is handed off (see _PreviewWorker for why it has to be).
         try:
             project = main_window.project_panel.get_project_settings()
-            preprocess = main_window.project_panel.get_preprocess_settings()
+            preprocess = main_window.settings_panel.get_preprocess_settings()
             correlation = main_window.settings_panel.get_correlation_settings()
             validation = main_window.settings_panel.get_validation_settings()
             post = main_window.settings_panel.get_postprocess_settings()

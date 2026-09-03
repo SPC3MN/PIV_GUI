@@ -257,15 +257,20 @@ QLabel#inlineSectionLabel {{
     letter-spacing: 1px;
 }}
 
-/* Disclosure toggle for an Advanced drawer (widgets/_util.CollapsibleSection).
-   Deliberately flat and quiet: it is a way in, not a call to action. */
+/* Disclosure toggle for the Advanced drawer (widgets/_util.CollapsibleSection).
+   Flat and quiet -- it is a way in, not a call to action -- but its TEXT is a
+   real section heading (there is exactly one of these now, "ADVANCED", a peer
+   of SOURCE/OUTPUT/WINDOW SCHEDULE/etc, not a lesser one), so size/weight/color
+   match QGroupBox::title above exactly rather than the smaller, unbolded look
+   a plain toggle button would otherwise get from QWidget's base font-size. */
 QToolButton#disclosure {{
     background: transparent;
     border: 1px solid {LINE};
     border-radius: 3px;
     padding: 4px 8px;
     color: {INK_SOFT};
-    font-size: 8.5pt;
+    font-size: 9.5pt;
+    font-weight: 700;
     text-align: left;
 }}
 QToolButton#disclosure:hover {{ background-color: {PAPER}; color: {INK}; }}

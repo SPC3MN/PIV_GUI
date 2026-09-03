@@ -1,7 +1,7 @@
-"""Settings panel: multi-pass window/overlap schedule, per-pass internal
-stability fill, the "remove invalid vectors" post-processing step, and
-(behind Advanced -- see advanced_widget()) the correlation algorithm
-pickers, GPU tiling, and worker-process limit.
+"""Settings panel: raw-frame pre-processing, multi-pass window/overlap
+schedule, per-pass internal stability fill, the "remove invalid vectors"
+post-processing step, and (behind Advanced -- see advanced_widget()) the
+correlation algorithm pickers, GPU tiling, and worker-process limit.
 
 Physical-unit calibration (pixel pitch / frame Δt) lives on ProjectPanel
 now, right below where the project is selected -- not here. It used to be
@@ -9,6 +9,12 @@ a checkbox-gated pair of fields in a "PHYSICAL UNITS" box on this panel,
 but every real workflow either auto-extracts both from the selected .set
 or needs them filled in before anything downstream is meaningful, so
 gating them behind an on/off toggle only added a click nobody needed.
+
+Pre-processing (the min/max filter) used to live on ProjectPanel, folded
+into the SOURCE card right after the input path -- moved here, right
+above the window schedule, because it is a processing-pipeline choice
+like everything else on this panel, not a question about where the data
+comes from.
 
 Two DIFFERENT groups look superficially similar (both have a "smoothn"/
 "smooth" and a fill/replace concept) but serve entirely different
@@ -41,8 +47,8 @@ from PySide6.QtWidgets import (
 )
 
 from piv_suite.config.schema import (
-    CorrelationSettings, PassSettings, PerformanceSettings,
-    PostProcessSettings, RangeFilterSettings, ValidationSettings,
+    CorrelationSettings, PassSettings, PerformanceSettings, PostProcessSettings,
+    PreprocessSettings, RangeFilterSettings, ValidationSettings,
 )
 from piv_suite.perf.autotune import recommended_workers
 
@@ -129,6 +135,37 @@ class SettingsPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(6)
+
+        # ---- pre-processing (applied to raw frames, before correlation --
+        # for stereo, before dewarping too) -- right above the window
+        # schedule, the first thing that actually happens to the data. ----
+        prep_box = QGroupBox("PRE-PROCESSING")
+        prep_layout = QHBoxLayout(prep_box)
+        prep_layout.setContentsMargins(6, 6, 6, 6)
+        prep_layout.setSpacing(6)
+        self.min_max_check = QCheckBox("Min/max filter (L px):")
+        self.min_max_check.setToolTip(
+            "LaVision-style sliding min/max background removal + local "
+            "contrast normalization, applied to each raw frame before "
+            "correlation. For stereo, applied per-camera BEFORE "
+            "dewarping. On by default: on real DaVis recordings this is "
+            "the single largest contributor to matching DaVis's own "
+            "vectors -- see config.schema.PreprocessSettings.")
+        # Checked to match PreprocessSettings' own default (see its
+        # docstring for the real-data measurements behind that default).
+        self.min_max_check.setChecked(True)
+        self.min_max_length_spin = style_spin(QSpinBox())
+        self.min_max_length_spin.setRange(1, 10000)
+        self.min_max_length_spin.setValue(5)
+        self.min_max_length_spin.setToolTip(
+            "L, in pixels -- the sliding window size for the min/max "
+            "filter's background-removal and local-contrast steps. "
+            "Barely sensitive: 4 and 5 agree with DaVis equally well.")
+        self.min_max_check.toggled.connect(self.min_max_length_spin.setEnabled)
+        prep_layout.addWidget(self.min_max_check)
+        prep_layout.addWidget(self.min_max_length_spin)
+        prep_layout.addStretch(1)
+        layout.addWidget(prep_box)
 
         self.passes_table = _PassesTable()
         layout.addWidget(self.passes_table)
@@ -463,6 +500,12 @@ class SettingsPanel(QWidget):
     def _on_residual_filter_toggled(self, checked):
         self.residual_max_spin.setEnabled(checked)
         self.window_size_spin.setEnabled(checked)
+
+    def get_preprocess_settings(self) -> PreprocessSettings:
+        return PreprocessSettings(
+            min_max_filter_enabled=self.min_max_check.isChecked(),
+            min_max_filter_length=self.min_max_length_spin.value(),
+        )
 
     def get_correlation_settings(self) -> CorrelationSettings:
         return CorrelationSettings(

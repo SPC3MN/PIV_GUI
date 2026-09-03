@@ -98,6 +98,21 @@ def test_colorbar_label_includes_units():
     assert "px/frame" in fig_px.axes[1].get_ylabel()
 
 
+def test_title_and_axis_labels_use_the_report_ink_color():
+    # Matches scripts/make_comparison_plots.py's own field-panel styling
+    # (same INK, same font sizes) -- see this module's own docstring for
+    # why (a live preview and a saved comparison figure should read as
+    # the same program's output).
+    from piv_suite.plotting.preview import INK
+
+    x, y, u, v, valid = _planar_field()
+    fig = make_preview_figure("planar", x, y, u, v, valid, title="t")
+    ax = fig.axes[0]
+    assert ax.xaxis.label.get_color() == INK
+    assert ax.yaxis.label.get_color() == INK
+    assert fig._suptitle.get_color() == INK
+
+
 def test_vectors_toggle_adds_a_quiver_without_extra_axes():
     x, y, u, v, valid = _planar_field()
     fig_off = make_preview_figure("planar", x, y, u, v, valid, title="t", show_vectors=False)

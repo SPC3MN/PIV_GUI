@@ -17,9 +17,7 @@ from PySide6.QtWidgets import (
     QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
 )
 
-from piv_suite.config.schema import (
-    CalibrationSettings, DualPlanarSettings, PreprocessSettings, ProjectSettings,
-)
+from piv_suite.config.schema import CalibrationSettings, DualPlanarSettings, ProjectSettings
 from piv_suite.engines.registry import is_gpu_available
 
 from ._util import section_label, style_spin
@@ -196,35 +194,6 @@ class ProjectPanel(QWidget):
 
         input_layout.addWidget(self.loose_options)
 
-        # ---- pre-processing (applied to raw frames, before correlation --
-        # for stereo, before dewarping too) ----
-        prep_layout = QHBoxLayout()
-        prep_layout.setSpacing(6)
-        prep_layout.addWidget(section_label("Pre-processing"))
-        self.min_max_check = QCheckBox("Min/max filter (L px):")
-        self.min_max_check.setToolTip(
-            "LaVision-style sliding min/max background removal + local "
-            "contrast normalization, applied to each raw frame before "
-            "correlation. For stereo, applied per-camera BEFORE "
-            "dewarping. On by default: on real DaVis recordings this is "
-            "the single largest contributor to matching DaVis's own "
-            "vectors -- see config.schema.PreprocessSettings.")
-        # Checked to match PreprocessSettings' own default (see its
-        # docstring for the real-data measurements behind that default).
-        self.min_max_check.setChecked(True)
-        self.min_max_length_spin = style_spin(QSpinBox())
-        self.min_max_length_spin.setRange(1, 10000)
-        self.min_max_length_spin.setValue(5)
-        self.min_max_length_spin.setToolTip(
-            "L, in pixels -- the sliding window size for the min/max "
-            "filter's background-removal and local-contrast steps. "
-            "Barely sensitive: 4 and 5 agree with DaVis equally well.")
-        self.min_max_check.toggled.connect(self.min_max_length_spin.setEnabled)
-        prep_layout.addWidget(self.min_max_check)
-        prep_layout.addWidget(self.min_max_length_spin)
-        prep_layout.addStretch(1)
-        input_layout.addLayout(prep_layout)
-
         # ---- mode + backend, one row inside the same section ----
         mode_backend_row = QHBoxLayout()
         mode_backend_row.setSpacing(10)
@@ -246,6 +215,25 @@ class ProjectPanel(QWidget):
         mode_group.addButton(self.stereo_radio)
         mode_layout.addWidget(self.planar_radio)
         mode_layout.addWidget(self.stereo_radio)
+
+        # Read-only stand-in for the two radios above, shown INSTEAD of
+        # them for .set input -- see _update_input_field_visibility. A
+        # .set project always auto-detects its own real acquisition
+        # geometry the moment it's selected (main_window._on_input_path_
+        # changed, off the project's own calibration), so a manual
+        # override there was never actually choosing anything -- it just
+        # was left as whatever the last click set until the next .set
+        # selection silently overwrote it again. Loose-file input has no
+        # calibration to detect from, so it keeps the radios as the only
+        # way to say which mode applies -- same "state a value the user
+        # cannot usefully change" reasoning as settings_panel's
+        # correlation_method_value label.
+        self.mode_detected_label = QLabel()
+        self.mode_detected_label.setToolTip(
+            "Detected from the selected .set project's own calibration. "
+            "Switch to 'Labeled image pairs' input to choose Planar/Stereo "
+            "manually.")
+        mode_layout.addWidget(self.mode_detected_label)
         mode_backend_row.addLayout(mode_layout)
         mode_backend_row.addSpacing(18)
 
@@ -366,9 +354,20 @@ class ProjectPanel(QWidget):
         mode needs either the planar suffix pair or the stereo suffix/
         frame-order fields, depending on Mode, never both. Dual camera is
         planar-only (stereo already uses both cameras, for triangulation
-        instead of stitching)."""
+        instead of stitching).
+
+        Mode itself is only USER-CHOOSABLE in loose mode: a .set project
+        always auto-detects its own real acquisition geometry the moment
+        it's selected (main_window._on_input_path_changed), so the radios
+        are hidden in favor of mode_detected_label there -- see its own
+        comment at construction."""
         is_loose = self.mode_loose.isChecked()
         is_stereo = self.stereo_radio.isChecked()
+
+        self.planar_radio.setVisible(is_loose)
+        self.stereo_radio.setVisible(is_loose)
+        self.mode_detected_label.setVisible(not is_loose)
+        self.mode_detected_label.setText("Stereo" if is_stereo else "Planar")
 
         self.loose_options.setVisible(is_loose)
         self.multiset_index_label.setVisible(not is_loose)
@@ -426,12 +425,6 @@ class ProjectPanel(QWidget):
             suffix_cam0=_apply_glob_extension(self.suffix_cam0_edit.text(), glob_text),
             suffix_cam1=_apply_glob_extension(self.suffix_cam1_edit.text(), glob_text),
             stereo_frame_order=self.stereo_frame_order_combo.currentText(),
-        )
-
-    def get_preprocess_settings(self) -> PreprocessSettings:
-        return PreprocessSettings(
-            min_max_filter_enabled=self.min_max_check.isChecked(),
-            min_max_filter_length=self.min_max_length_spin.value(),
         )
 
     def get_calibration_settings(self) -> CalibrationSettings:

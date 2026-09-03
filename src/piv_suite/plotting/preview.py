@@ -20,6 +20,19 @@ still toggleable is an optional (u, v) quiver overlay -- see
 preview_panel.py for why it's only enabled once a real preview result
 exists to draw it on top of.
 
+Title/axis-label/tick color (INK, below) matches the field panels in
+scripts/make_comparison_plots.py's own DaVis-comparison report -- a
+near-black rather than matplotlib's default pure black, at the same
+font sizes -- so a live preview and a saved comparison figure read as
+the same program's output. That report's field panels don't draw a
+background grid or hide spines (unlike its trend/scatter plots, which
+do both via a separate `_style()` helper); a filled contour already
+occupies the whole axes, so a grid would add nothing to read and
+spines still usefully frame it. Deliberately not the same as that
+report's diverging RdBu_r colormap, either -- this plots an unsigned
+MAGNITUDE, not a signed component, so turbo stays right for the reason
+already given above.
+
 units labels the colorbar explicitly (e.g. "m/s" or "px/frame") instead
 of assuming -- a correctly-computed m/s field with an unlabeled colorbar
 reads as "these numbers look wrong" even when they aren't, which is very
@@ -50,6 +63,12 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 # Hard-coded, not a GUI choice any more -- see this module's docstring.
 MAGNITUDE_CMAP = "turbo"
+# Same ink used for every field plot in the DaVis-comparison report
+# (scripts/make_comparison_plots.py) -- title/axis-label/tick color here
+# matches that report's own field panels (a near-black, not matplotlib's
+# default pure-black-on-white-with-heavy-spines look) so a preview and a
+# saved comparison figure read as the same program's output.
+INK = "#12212B"
 # Number of filled-contour bands. 21 read as visibly banded/stepped on a
 # smooth real field; 41 halves the per-band jump for the same auto-scaled
 # range while staying cheap to render at preview size.
@@ -175,12 +194,15 @@ def make_preview_figure(mode, x, y, u, v, valid, title, w=None, units="m/s",
     # taller than the plot it annotates. make_axes_locatable pins it to the
     # real drawn height at any figure shape.
     cax = make_axes_locatable(ax).append_axes("right", size="3%", pad=0.12)
-    fig.colorbar(cs, cax=cax, label=f"|V| ({units})")
+    cbar = fig.colorbar(cs, cax=cax)
+    cbar.set_label(f"|V| ({units})", color=INK, fontsize=8)
+    cbar.ax.tick_params(labelsize=7, colors=INK)
     if show_vectors:
         _draw_direction_quiver(ax, x, y, u, v, valid)
     axlabel = ("x (world px)", "y (world px)") if mode == "stereo" else ("pixels", "pixels")
-    ax.set_xlabel(axlabel[0])
-    ax.set_ylabel(axlabel[1])
+    ax.set_xlabel(axlabel[0], color=INK, fontsize=8)
+    ax.set_ylabel(axlabel[1], color=INK, fontsize=8)
+    ax.tick_params(labelsize=7, colors=INK)
     # NOT ax.invert_yaxis() -- see plotting/planar.py's make_planar_figure
     # for the full account (same root cause, same fix, every plotting
     # module shares this). `y` already comes flipped out of
@@ -193,7 +215,7 @@ def make_preview_figure(mode, x, y, u, v, valid, title, w=None, units="m/s",
     # a user comparing this preview against a real DaVis render of the
     # same data (the flow pattern looked structurally right but
     # vertically mirrored).
-    fig.suptitle(title)
+    fig.suptitle(title, color=INK, fontsize=10)
     return fig
 
 

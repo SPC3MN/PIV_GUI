@@ -54,10 +54,10 @@ def test_preview_shows_progress_bar_while_running_and_hides_after(qtbot):
     panel.window = lambda: type("W", (), {
         "project_panel": type("P", (), {
             "get_project_settings": lambda self: type("S", (), {"mode": "planar", "dual_camera": False})(),
-            "get_preprocess_settings": lambda self: None,
             "get_calibration_settings": lambda self: None,
         })(),
         "settings_panel": type("SP", (), {
+            "get_preprocess_settings": lambda self: None,
             "get_correlation_settings": lambda self: None,
             "get_validation_settings": lambda self: None,
             "get_postprocess_settings": lambda self: None,
@@ -105,10 +105,10 @@ def test_range_preview_clamps_count_and_shows_determinate_progress(qtbot):
     panel.window = lambda: type("W", (), {
         "project_panel": type("P", (), {
             "get_project_settings": lambda self: type("S", (), {"mode": "planar", "dual_camera": False})(),
-            "get_preprocess_settings": lambda self: None,
             "get_calibration_settings": lambda self: None,
         })(),
         "settings_panel": type("SP", (), {
+            "get_preprocess_settings": lambda self: None,
             "get_correlation_settings": lambda self: None,
             "get_validation_settings": lambda self: None,
             "get_postprocess_settings": lambda self: None,
@@ -355,7 +355,7 @@ def test_project_panel_default_settings(qtbot):
     assert settings.input_mode == "set"
 
 
-def test_project_panel_preprocess_defaults_match_canonical_schema(qtbot):
+def test_settings_panel_preprocess_defaults_match_canonical_schema(qtbot):
     """The min/max filter's default is a measured choice, not a cosmetic
     one (see config.schema.PreprocessSettings' docstring), so a GUI that
     silently starts with it off would hand every new user the worse
@@ -364,12 +364,12 @@ def test_project_panel_preprocess_defaults_match_canonical_schema(qtbot):
 
     window = MainWindow()
     qtbot.addWidget(window)
-    got = window.project_panel.get_preprocess_settings()
+    got = window.settings_panel.get_preprocess_settings()
     canonical = PreprocessSettings()
     assert got.min_max_filter_enabled is canonical.min_max_filter_enabled
     assert got.min_max_filter_length == canonical.min_max_filter_length
     # The length spin has to be usable when the box starts checked.
-    assert window.project_panel.min_max_length_spin.isEnabled() is True
+    assert window.settings_panel.min_max_length_spin.isEnabled() is True
 
 
 def test_settings_panel_default_passes_match_canonical_schema(qtbot):
@@ -490,6 +490,42 @@ def test_loose_options_hidden_in_set_mode(qtbot):
     assert not pp.loose_options.isVisible()
     pp.mode_loose.setChecked(True)
     assert pp.loose_options.isVisible()
+
+
+def test_mode_radios_only_selectable_in_loose_mode(qtbot):
+    # A .set project always auto-detects its own real acquisition geometry
+    # the moment it's selected (main_window._on_input_path_changed), so a
+    # manual Mode choice there was never actually choosing anything -- just
+    # display the detected mode instead of two radios a click can't
+    # meaningfully change. Loose-file input has no calibration to detect
+    # from, so it keeps the radios as the only way to say which mode applies.
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    pp = window.project_panel
+    assert pp.mode_set.isChecked()
+    assert not pp.planar_radio.isVisible()
+    assert not pp.stereo_radio.isVisible()
+    assert pp.mode_detected_label.isVisible()
+
+    pp.mode_loose.setChecked(True)
+    assert pp.planar_radio.isVisible()
+    assert pp.stereo_radio.isVisible()
+    assert not pp.mode_detected_label.isVisible()
+
+
+def test_mode_detected_label_reflects_the_checked_radio(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    pp = window.project_panel
+    assert pp.planar_radio.isChecked()
+    assert pp.mode_detected_label.text() == "Planar"
+
+    # Simulates what main_window._on_input_path_changed does on real
+    # auto-detection -- setChecked() still works on a hidden radio, and
+    # the label must track it even though nothing visible was clicked.
+    pp.stereo_radio.setChecked(True)
+    assert pp.mode_detected_label.text() == "Stereo"
 
 
 def test_loose_options_show_correct_suffix_fields_per_mode(qtbot):
@@ -693,6 +729,21 @@ def test_run_panel_populates_calibration_in_config(qtbot):
                             validation=validation, postprocess=post,
                             calibration=calibration)
     assert config.calibration.pixel_pitch_mm == 0.05
+
+
+def test_preprocessing_section_sits_directly_above_the_window_schedule(qtbot):
+    # Pre-processing moved off ProjectPanel's SOURCE card onto
+    # SettingsPanel, right above WINDOW SCHEDULE -- it's a processing-
+    # pipeline choice like everything else on this panel, not a question
+    # about where the data comes from.
+    window = MainWindow()
+    qtbot.addWidget(window)
+    sp = window.settings_panel
+    layout = sp.layout()
+    widgets = [layout.itemAt(i).widget() for i in range(layout.count())]
+    prep_index = next(i for i, w in enumerate(widgets) if w is not None and w.title() == "PRE-PROCESSING")
+    passes_index = widgets.index(sp.passes_table)
+    assert prep_index == passes_index - 1
 
 
 def test_passes_table_has_no_internal_scrollbar(qtbot):

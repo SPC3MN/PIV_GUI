@@ -63,6 +63,39 @@ def test_disabled_text_is_weaker_than_secondary_but_still_perceptible():
     assert faint > 1.8
 
 
+def test_advanced_disclosure_title_matches_groupbox_title_size_and_weight():
+    # The "ADVANCED" disclosure toggle (widgets/_util.CollapsibleSection)
+    # is a real section heading now -- a peer of SOURCE/OUTPUT/WINDOW
+    # SCHEDULE/etc, the one consolidated Advanced section for the whole
+    # app -- so its text must render at the same size/weight as every
+    # other QGroupBox::title, not the smaller/unbolded look a plain
+    # QToolButton gets from QWidget's own base font-size.
+    import re
+
+    from piv_suite_gui.theme import STYLESHEET
+
+    def _rule_block(selector):
+        m = re.search(re.escape(selector) + r"\s*\{\{?(.*?)\}\}?", STYLESHEET, re.S)
+        assert m, f"no {selector} rule found in STYLESHEET"
+        return m.group(1)
+
+    def _prop(block, name):
+        m = re.search(re.escape(name) + r"\s*:\s*([^;]+);", block)
+        assert m, f"no {name} in block: {block}"
+        return m.group(1).strip()
+
+    # QGroupBox::title declares font-weight (700) but not font-size -- a
+    # title's actual rendered size is the base QWidget rule's, since
+    # nothing overrides it. The disclosure's own font-size must match
+    # THAT (what a real group-box title renders at), and its font-weight
+    # must match QGroupBox::title's own explicit declaration.
+    base_widget = _rule_block("QWidget")
+    groupbox_title = _rule_block("QGroupBox::title")
+    disclosure = _rule_block("QToolButton#disclosure")
+    assert _prop(disclosure, "font-size") == _prop(base_widget, "font-size")
+    assert _prop(disclosure, "font-weight") == _prop(groupbox_title, "font-weight")
+
+
 def test_section_titles_do_not_use_the_disabled_token():
     """The specific regression this file exists for: INK_FAINT reused for
     structural labels put every section title in the app at 2.2:1."""
