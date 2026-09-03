@@ -96,7 +96,9 @@ work.
     registration between two independently-computed grids more
     sensitive), not a bug.
   - Every correlation-pipeline knob tested (`per_pass_validation=False`,
-    `correlation_method=linear`, `subpixel_method=parabolic/centroid`,
+    `correlation_method=linear` (since removed from the GUI and coerced
+    away on config load -- see config.io.from_dict),
+    `subpixel_method=parabolic/centroid`,
     `min_max_filter` preprocessing, the custom `davis_combined` per-pass
     scheme above): **all made agreement with DaVis worse or unchanged,
     never better** — the app's original defaults are already the best-

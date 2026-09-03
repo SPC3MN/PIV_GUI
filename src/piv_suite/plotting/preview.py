@@ -46,6 +46,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 # Hard-coded, not a GUI choice any more -- see this module's docstring.
 MAGNITUDE_CMAP = "turbo"
@@ -66,7 +67,7 @@ def _auto_range(masked_data):
 
 
 def make_preview_figure(mode, x, y, u, v, valid, title, w=None, units="m/s",
-                         show_vectors=False, quiver_scale=1000):
+                         show_vectors=False, quiver_scale=1000, figsize=(7, 6)):
     """Build (not save/show) a matplotlib Figure showing ONE velocity-
     magnitude field for the GUI to embed directly. mode is "planar" or
     "stereo" -- used only to label the axes (stereo's grid is DaVis's
@@ -81,15 +82,42 @@ def make_preview_figure(mode, x, y, u, v, valid, title, w=None, units="m/s",
 
     show_vectors overlays a quiver of the in-plane (u, v) direction on
     top of the magnitude contour -- always ON TOP, never an alternative
-    to it (there's no contour-off mode any more; magnitude IS the plot)."""
+    to it (there's no contour-off mode any more; magnitude IS the plot).
+
+    figsize only matters to callers that render this figure directly (tests,
+    or anything saving a PNG). It does NOT drive the GUI: FigureCanvasQTAgg
+    resets the figure to the widget's own size the moment the canvas enters a
+    layout, so whatever is passed here is overwritten. What makes the plot fill
+    its panel is the panel's layout stretch, not this argument."""
     magnitude = np.sqrt(u**2 + v**2) if w is None else np.sqrt(u**2 + v**2 + w**2)
     masked = np.ma.masked_where(~valid, magnitude)
     vmin, vmax = _auto_range(masked)
     levels = np.linspace(vmin, vmax, 21)
 
-    fig, ax = plt.subplots(figsize=(7, 6))
+    # constrained layout, not tight_layout. With a fixed aspect the axes
+    # shrinks inside its box to preserve shape, and tight_layout's default
+    # margins then waste most of what is left: measured axes area 0.345 of the
+    # figure at the GUI's default size and 0.181 at its minimum, against 0.467
+    # and 0.351 constrained. Some letterboxing is unavoidable -- preserving
+    # geometry costs space whenever the panel's aspect differs from the data's
+    # -- but the margins around it need not.
+    fig, ax = plt.subplots(figsize=figsize, layout="constrained")
     cs = ax.contourf(x, y, masked, levels=levels, cmap=MAGNITUDE_CMAP, extend="both")
-    fig.colorbar(cs, ax=ax, label=f"|V| ({units})")
+    # EQUAL ASPECT, and it is not cosmetic. A PIV field is a picture of a
+    # physical region, so the preview's whole job -- "does this flow look
+    # right" -- depends on shape being preserved. matplotlib's default
+    # aspect="auto" stretches the data to fill whatever axes box it is given:
+    # measured at 1.881x on a real 379x704 stereo grid, i.e. a round vortex
+    # rendered 88% taller than wide, which reads as a physically wrong flow.
+    ax.set_aspect("equal")
+    # The colorbar is tied to the DRAWN axes, not to the axes' bounding box.
+    # fig.colorbar(ax=ax) sizes against the bbox, and a fixed-aspect axes
+    # shrinks inside its bbox to preserve shape -- so the bar kept the bbox's
+    # full height while the field occupied a fraction of it, leaving a bar
+    # taller than the plot it annotates. make_axes_locatable pins it to the
+    # real drawn height at any figure shape.
+    cax = make_axes_locatable(ax).append_axes("right", size="3%", pad=0.12)
+    fig.colorbar(cs, cax=cax, label=f"|V| ({units})")
     if show_vectors:
         ax.quiver(x[valid], y[valid], u[valid], v[valid], color="black", scale=quiver_scale)
     axlabel = ("x (world px)", "y (world px)") if mode == "stereo" else ("pixels", "pixels")
@@ -108,7 +136,6 @@ def make_preview_figure(mode, x, y, u, v, valid, title, w=None, units="m/s",
     # same data (the flow pattern looked structurally right but
     # vertically mirrored).
     fig.suptitle(title)
-    fig.tight_layout()
     return fig
 
 

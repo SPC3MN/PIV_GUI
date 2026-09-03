@@ -316,7 +316,7 @@ def test_settings_panel_greys_out_inapplicable_backend_fields(qtbot):
 
     gpu_only = [sp.batch_size_check, sp.tiling_check, sp.n_tiles_y_spin,
                 sp.n_tiles_x_spin, sp.tile_margin_check]
-    cpu_only = [sp.correlation_method_combo, sp.deformation_method_combo,
+    cpu_only = [sp.deformation_method_combo,
                 sp.interpolation_order_spin, sp.filter_method_combo]
 
     # default backend is CPU -- GPU-only fields start disabled
@@ -458,15 +458,27 @@ def test_loose_options_show_correct_suffix_fields_per_mode(qtbot):
     assert pp.suffix_cam0_edit.isVisible()
 
 
-def test_mode_and_backend_are_separate_group_boxes(qtbot):
+def test_mode_and_backend_selections_are_independent(qtbot):
+    """Mode and Backend now share a parent widget (both are rows inside the
+    Source section), and QRadioButton auto-exclusivity is PER PARENT -- so
+    without the explicit QButtonGroups, picking CPU would clear Stereo.
+
+    This used to assert that the two lived in different group boxes, which
+    tested the layout rather than the hazard: it failed the moment the panel
+    was reorganised even though the behaviour was still correct. Asserting the
+    behaviour instead protects the same thing and survives a redesign."""
     window = MainWindow()
     qtbot.addWidget(window)
     pp = window.project_panel
-    # planar_radio/stereo_radio and cpu_radio/gpu_radio must live in
-    # different parent group boxes, not one combined box
-    mode_parent = pp.planar_radio.parentWidget()
-    backend_parent = pp.cpu_radio.parentWidget()
-    assert mode_parent is not backend_parent
+
+    pp.stereo_radio.setChecked(True)
+    pp.cpu_radio.setChecked(True)
+    assert pp.stereo_radio.isChecked()   # a backend choice must not clear Mode
+    assert not pp.planar_radio.isChecked()
+
+    pp.planar_radio.setChecked(True)
+    assert pp.cpu_radio.isChecked()      # ...and a Mode choice must not clear Backend
+    assert not pp.stereo_radio.isChecked()
 
 
 def test_validation_group_is_user_editable(qtbot):
@@ -583,7 +595,6 @@ def test_correlation_settings_exposes_all_calculation_fields(qtbot):
     qtbot.addWidget(window)
     sp = window.settings_panel
 
-    sp.correlation_method_combo.setCurrentText("linear")
     sp.deformation_method_combo.setCurrentText("second image")
     sp.interpolation_order_spin.setValue(1)
     sp.batch_size_check.setChecked(True)
@@ -592,7 +603,6 @@ def test_correlation_settings_exposes_all_calculation_fields(qtbot):
     sp.tile_margin_spin.setValue(200)
 
     settings = sp.get_correlation_settings()
-    assert settings.correlation_method == "linear"
     assert settings.deformation_method == "second image"
     assert settings.interpolation_order == 1
     assert settings.batch_size == 128
@@ -968,7 +978,14 @@ def test_stereo_calibration_extraction_failure_shows_status_and_does_not_crash(q
     window.project_panel.input_path_edit.setText(str(set_path))
     window.project_panel.input_path_edit.editingFinished.emit()  # must not raise
 
-    assert "boom" in window.statusBar().currentMessage()
+    # The detail goes where it can be read and acted on...
+    assert "boom" in window.calibration_panel.problem_label.text()
+    assert window.calibration_panel.problem_label.isVisibleTo(window.calibration_panel)
+    # ...and the status bar points at it rather than carrying the whole thing,
+    # which it would truncate and then clear after 8 seconds.
+    message = window.statusBar().currentMessage()
+    assert "Camera calibration panel" in message
+    assert "boom" not in message
 
 
 def test_calibration_panel_load_from_set_button_triggers_main_window_extraction(qtbot, monkeypatch, tmp_path):
@@ -1272,3 +1289,112 @@ def test_calibration_labels_use_math_notation(qtbot):
     from PySide6.QtWidgets import QLabel
     angle_labels = {lbl.text() for lbl in cp.findChildren(QLabel)} & {"α₁:", "α₂:", "β₁:", "β₂:"}
     assert angle_labels == {"α₁:", "α₂:", "β₁:", "β₂:"}
+
+
+# ---- the control surface itself ----
+
+def test_no_permanently_disabled_controls_are_shipped(qtbot):
+    """Every disabled control must be disabled because of STATE, not because
+    it was never implemented. A button that can never be pressed is worse than
+    a missing one: it advertises a capability the app does not have.
+
+    The specific offender this replaces was "Load from DaVis report...", wired
+    to a stub that only ever raised NotImplementedError."""
+    from PySide6.QtWidgets import QPushButton
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    # Buttons legitimately gated on state: Run needs a successful Preview
+    # first, Cancel needs a batch in flight. Matched as a substring because
+    # some carry a glyph prefix.
+    state_gated = ("Run", "Cancel", "Preview")
+    for btn in window.findChildren(QPushButton):
+        text = btn.text()
+        if btn.isEnabled() or any(g in text for g in state_gated):
+            continue
+        raise AssertionError(
+            f"{text!r} ships disabled and is not state-gated -- either wire it "
+            f"up or remove it")
+
+
+def test_correlation_method_is_stated_not_offered_as_a_choice(qtbot):
+    """openpiv's zero-padded 'linear' branch requires a normalization this app
+    never applies (its own source says so), and measured 4.665 px RMS at 14 px
+    displacement against circular's 0.059 -- a 79x regression that used to be
+    reachable from a dropdown. With it gone there is only one valid value, so
+    the control states it rather than pretending to offer a choice."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    sp = window.settings_panel
+    assert not hasattr(sp, "correlation_method_combo")
+    assert sp.correlation_method_value.text() == "circular"
+    # ...and the emitted settings still carry it (this assertion previously
+    # disappeared with the "linear" test case, leaving the field uncovered).
+    assert sp.get_correlation_settings().correlation_method == "circular"
+
+
+def test_preview_plot_area_gets_the_spare_space(qtbot):
+    """The plot is the point of the Preview tab, so it must take the leftover
+    height. It previously sat in an unstretched layout followed by
+    addStretch(1), which handed all spare space to the stretch and pinned the
+    canvas to its minimum -- most of the window rendered as empty grey."""
+    from PySide6.QtWidgets import QSizePolicy
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    panel = window.preview_panel
+    layout = panel.layout()
+    idx = layout.indexOf(panel.plot_area)
+    assert idx >= 0
+    assert layout.stretch(idx) == 1
+    assert panel.plot_area.sizePolicy().verticalPolicy() == QSizePolicy.Expanding
+
+
+def test_a_blocking_calibration_failure_is_shown_where_it_can_be_acted_on(qtbot):
+    """A calibration that cannot be read stops the project being processed at
+    all, so the explanation must be persistent and readable -- not squeezed
+    into a status bar that truncates it and clears after 8 seconds.
+
+    These messages are long on purpose (they say what is wrong AND what to do),
+    and the real one for a correction-field snapshot runs to ~700 characters."""
+    window = MainWindow()
+    qtbot.addWidget(window)
+    panel = window.calibration_panel
+
+    assert not panel.problem_label.isVisibleTo(panel)   # nothing wrong yet
+    long_message = "Calibration snapshot 'X' is a base layer. " * 20
+    panel.set_problem(long_message)
+    assert panel.problem_label.isVisibleTo(panel)
+    assert panel.problem_label.text() == long_message
+    assert panel.problem_label.wordWrap()               # or it would be one long line
+    assert not panel.model_label.isVisibleTo(panel)     # don't claim a model we couldn't read
+
+    panel.set_problem(None)
+    assert not panel.problem_label.isVisibleTo(panel)
+    assert panel.model_label.isVisibleTo(panel)
+
+
+def test_a_failed_preview_does_not_leave_the_previous_field_on_screen(qtbot):
+    """A stale plot is worse than no plot: it shows one pair while the controls
+    describe another, and toggling Vectors would re-render the stale result as
+    if it were current."""
+    import numpy as np
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    panel = window.preview_panel
+    x, y = np.meshgrid(np.arange(6.0), np.arange(5.0))
+    result = dict(kind="planar", pair_id="0000", x=x, y=y, u=x, v=y,
+                  w=None, valid=np.ones_like(x, dtype=bool), elapsed=1.0,
+                  n_valid=x.size, n_total=x.size, n_range=0, n_std=0,
+                  n_group=0, n_fov=x.size, units="m/s")
+    panel._render(result)
+    assert panel.canvas is not None
+    assert panel.show_vectors_check.isEnabled()
+
+    panel._on_preview_failed("boom")
+    assert panel.canvas is None                    # the stale field is gone
+    assert panel._last_result is None              # ...and cannot be re-rendered
+    assert not panel.show_vectors_check.isEnabled()
+    assert "failed" in panel.placeholder.text().lower()
+    assert "boom" in panel.status_label.fullText()

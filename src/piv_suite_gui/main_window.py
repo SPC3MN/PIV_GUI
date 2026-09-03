@@ -13,7 +13,8 @@ import os
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QMainWindow, QScrollArea, QTabWidget, QVBoxLayout, QWidget,
+    QApplication, QHBoxLayout, QLabel, QMainWindow, QScrollArea, QTabWidget,
+    QVBoxLayout, QWidget,
 )
 
 from piv_suite import __version__
@@ -31,7 +32,11 @@ from piv_suite_gui.widgets.run_panel import RunPanel
 from piv_suite_gui.widgets.settings_panel import SettingsPanel
 
 LEFT_PANEL_WIDTH = 440
-RIGHT_PANEL_WIDTH = 640
+# The preview plot is the point of the right-hand side, and it holds a real
+# aspect ratio now -- a field wider than it is tall gets letterboxed in a
+# narrow pane. 820 gives it room to be read at a glance without the user
+# resizing on every launch.
+RIGHT_PANEL_WIDTH = 820
 INITIAL_WINDOW_WIDTH = LEFT_PANEL_WIDTH + RIGHT_PANEL_WIDTH
 
 
@@ -39,8 +44,25 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("PIV Testing")
-        self.resize(INITIAL_WINDOW_WIDTH, 860)
+        # Below this the left rail's own controls start clipping.
+        self.setMinimumSize(900, 620)
+        self.resize(*self._initial_size())
         self._build_ui()
+
+    def _initial_size(self):
+        """A default that fits the screen it opens on.
+
+        A fixed 1260x900 does not fit a 1366x768 laptop once the taskbar is
+        accounted for, so the window opened taller than the desktop. Clamp to
+        the available work area, leaving a small margin, and never go below the
+        window's own minimum."""
+        preferred_w, preferred_h = INITIAL_WINDOW_WIDTH, 900
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return preferred_w, preferred_h
+        available = screen.availableGeometry()
+        return (max(self.minimumWidth(), min(preferred_w, available.width() - 40)),
+                max(self.minimumHeight(), min(preferred_h, available.height() - 40)))
 
     def _build_ui(self):
         central = QWidget()
@@ -238,17 +260,22 @@ class MainWindow(QMainWindow):
             try:
                 stereo = read_stereo_calibration_from_set(set_paths[0], idx)
             except Exception as e:
-                messages.append(f"Couldn't auto-extract stereo calibration: {e}")
+                # The status bar gets a one-line summary; the panel gets the
+                # full explanation. These messages run to several hundred
+                # characters (they say what is wrong AND what to do about it),
+                # and a transient, truncating status bar is the wrong home for
+                # something that blocks processing entirely.
+                self.calibration_panel.set_problem(str(e))
+                messages.append("Stereo calibration couldn't be read "
+                                "-- see the Camera calibration panel.")
             else:
+                self.calibration_panel.set_problem(None)
                 self.calibration_panel.set_settings(stereo)
                 model = ("PinholeOpenCV" if stereo.cam0_pinhole is not None
                          else "Polynomial3rdOrder")
                 name = (stereo.cam0_pinhole.name if stereo.cam0_pinhole is not None
                         else stereo.cam0_mapping.name)
-                messages.append(
-                    f"Stereo calibration auto-extracted from DaVis .set ({model}: {name}) "
-                    f"-- triangulation angles are derived per pixel from it, nothing to "
-                    f"enter manually.")
+                messages.append(f"Stereo calibration read from DaVis .set ({model}).")
         else:
             is_dual = False
             try:

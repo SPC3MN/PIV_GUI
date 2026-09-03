@@ -352,12 +352,17 @@ def fast_fft_correlate_images(image_a, image_b, correlation_method="circular",
     If you bump scipy/numpy versions, re-run that comparison; don't
     assume the diff stays this small.
 
-    correlation_method="linear" is user-selectable in the GUI (settings_
-    panel's Correlation method combo) and intentionally NOT reimplemented
-    here -- its zero-padding branch is a different, more involved
-    computation than "circular"'s, and "circular" is both the default
-    and, per openpiv's own docs, the normal/faster choice. Falls back to
-    calling the original (slow but correct) function for "linear".
+    correlation_method="linear" is intentionally NOT reimplemented here --
+    its zero-padding branch is a different, more involved computation than
+    "circular"'s, and "circular" is both the default and, per openpiv's own
+    docs, the normal/faster choice. Falls back to calling the original (slow
+    but correct) function for "linear".
+
+    "linear" is no longer reachable from the app: it is not offered in the GUI
+    and config.io coerces it away on load, because it needs a normalization
+    this app never applies and measured 4.665 px RMS at 14 px displacement
+    against circular's 0.059. The branch stays here so this function remains a
+    faithful drop-in for openpiv's own, which still supports it.
 
     Chunking (recommended_chunk_size()) processes `image_a`/`image_b` in
     windows-axis slices rather than one big batched FFT call -- verified

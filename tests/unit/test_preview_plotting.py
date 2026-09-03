@@ -4,6 +4,7 @@ vector overlay, hard-coded colormap. No Qt/GUI needed, matplotlib alone
 (Agg backend, set in the module under test)."""
 
 import numpy as np
+import pytest
 from matplotlib.quiver import Quiver
 
 from piv_suite.plotting.preview import MAGNITUDE_CMAP, _auto_range, make_preview_figure
@@ -125,3 +126,96 @@ def test_empty_valid_mask_does_not_raise():
     valid[:] = False
     fig = make_preview_figure("planar", x, y, u, v, valid, title="t", show_vectors=True)
     assert len(fig.axes) == 2
+
+
+# ---- geometric fidelity ----
+#
+# A PIV field is a picture of a physical region, so the preview has to
+# preserve shape: a round vortex must render round. Before these tests the
+# figure used a fixed 7x6 canvas with matplotlib's default aspect="auto",
+# which stretches the data to fill the axes -- measured at 1.881x on a real
+# stereo grid (379x704), i.e. a circle rendered 88% taller than wide.
+
+def _axes_scale_ratio(fig):
+    """(inches-per-data-unit in y) / (same in x) for the data axes. 1.0 means
+    a circle in the data renders as a circle on paper.
+
+    Draws first: with a fixed aspect and an axes_grid1-attached colorbar, the
+    axes' final position is only settled during layout, so reading
+    get_position() beforehand returns a stale box."""
+    fig.canvas.draw()
+    ax = fig.axes[0]
+    box = ax.get_position()
+    fw, fh = fig.get_size_inches()
+    sx = (box.width * fw) / abs(ax.get_xlim()[1] - ax.get_xlim()[0])
+    sy = (box.height * fh) / abs(ax.get_ylim()[1] - ax.get_ylim()[0])
+    return sy / sx
+
+
+def _wide_field(ny=379, nx=704):
+    """A real stereo vector grid's shape -- deliberately far from square, which
+    is what makes the distortion visible."""
+    y, x = np.mgrid[0:ny, 0:nx].astype(float)
+    u = np.ones_like(x)
+    v = np.zeros_like(x)
+    return x, y, u, v, np.ones_like(x, dtype=bool)
+
+
+def test_preview_preserves_geometry_on_a_non_square_grid():
+    x, y, u, v, valid = _wide_field()
+    fig = make_preview_figure("stereo", x, y, u, v, valid, "t")
+    assert fig.axes[0].get_aspect() == 1.0
+    assert _axes_scale_ratio(fig) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_preview_preserves_geometry_on_a_tall_grid():
+    """The opposite extreme must not be distorted either."""
+    x, y, u, v, valid = _wide_field(ny=700, nx=200)
+    fig = make_preview_figure("stereo", x, y, u, v, valid, "t")
+    assert _axes_scale_ratio(fig) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_a_circular_feature_stays_circular():
+    """The property that actually matters, stated in the terms a user would:
+    measure the rendered width and height of a round blob's contour."""
+    ny, nx = 379, 704
+    y, x = np.mgrid[0:ny, 0:nx].astype(float)
+    r = np.sqrt((x - nx / 2) ** 2 + (y - ny / 2) ** 2)
+    u = np.exp(-(r / 120.0) ** 2)
+    fig = make_preview_figure("stereo", x, y, u, np.zeros_like(u),
+                              np.ones_like(u, dtype=bool), "t")
+    ax = fig.axes[0]
+    # Half-max contour of a radially symmetric blob: equal extent both ways.
+    fig.canvas.draw()
+    cs = ax.contour(x, y, u, levels=[0.5])
+    pts = np.vstack([p.vertices for p in cs.get_paths()])
+    width = np.ptp(pts[:, 0]) * (ax.get_position().width * fig.get_size_inches()[0]
+                                 / abs(ax.get_xlim()[1] - ax.get_xlim()[0]))
+    height = np.ptp(pts[:, 1]) * (ax.get_position().height * fig.get_size_inches()[1]
+                                  / abs(ax.get_ylim()[1] - ax.get_ylim()[0]))
+    assert width == pytest.approx(height, rel=0.02)
+
+
+def test_figure_size_follows_the_requested_canvas_shape():
+    """figsize is honoured for callers that render the figure directly.
+
+    NOTE it does not drive the GUI: FigureCanvasQTAgg resets the figure to the
+    widget's size as soon as the canvas is laid out. The preview panel relies
+    on its layout stretch for sizing, not on this argument."""
+    x, y, u, v, valid = _planar_field()
+    fig = make_preview_figure("planar", x, y, u, v, valid, "t", figsize=(11.0, 4.0))
+    assert tuple(fig.get_size_inches()) == pytest.approx((11.0, 4.0))
+
+
+def test_colorbar_stays_proportionate_to_the_plot():
+    """The colorbar annotates the field; it must not compete with it.
+    matplotlib sizes it against the axes BOX, which for a fixed-aspect axes in
+    a taller figure is far bigger than the drawn data -- it rendered full
+    height and roughly a sixth of the plot's width."""
+    x, y, u, v, valid = _wide_field()
+    fig = make_preview_figure("stereo", x, y, u, v, valid, "t", figsize=(8.0, 7.0))
+    fig.canvas.draw()   # positions are only final once laid out
+    data_ax, cbar_ax = fig.axes[0], fig.axes[1]
+    assert cbar_ax.get_position().width < 0.25 * data_ax.get_position().width
+    # ...and no taller than the field it annotates.
+    assert cbar_ax.get_position().height <= data_ax.get_position().height + 1e-6

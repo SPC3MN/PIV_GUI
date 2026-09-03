@@ -1,11 +1,19 @@
 """Application-wide visual theme: a light, hairline-ruled "spec sheet"
-look built on charcoal and alabaster, applied globally via
-QApplication.setStyleSheet() rather than styling each widget individually.
+look, applied globally via QApplication.setStyleSheet() rather than styling
+each widget individually.
 
-Neutral by design -- no accent hue. Charcoal (#5D5E60) and its darker
-text derivative carry every emphasis job (checked controls, focus rings,
-primary buttons, the active tab), so the only non-neutral color in the
-whole app is OK, and it means "this is working" rather than branding.
+ONE accent hue -- a deep instrument teal, taken from the cold end of the
+turbo colormap this app renders velocity fields with, so the chrome and the
+data belong to the same world. It is spent only where it carries meaning:
+the primary action, keyboard focus, selection, and the active tab. Section
+titles are deliberately NOT accented; there are a dozen of them, and
+colouring every one spends the accent on the frame instead of on what the
+user should act on.
+
+Everything else is cool-biased neutral rather than flat grey -- a pure mid-
+grey reads as unset, and the bias ties the neutrals to the accent. The
+theme was previously accent-free, with charcoal carrying every emphasis
+job, which left nothing on screen distinguishable as "the thing to press".
 
 Surfaces run light-on-light with 1px rules doing the separating, rather
 than the elevation/shadow approach a dark theme needs: cards are plain
@@ -18,26 +26,44 @@ a future palette swap only touches this one block):
     PANEL     -- QGroupBox ("card") background
     PAPER     -- header / tab bar / table header background
     INK       -- primary text
-    ACCENT    -- emphasis fill: checked controls, primary buttons, active tab
+    ACCENT    -- emphasis fill: checked controls, primary buttons, active tab,
+                 focus rings. ACCENT_HOVER/ACCENT_PRESSED are its button
+                 states; ACCENT_WASH tints a selected table row.
     INK_SOFT  -- secondary text (field labels, unselected tabs)
     INK_FAINT -- disabled text, status-bar text
     LINE      -- borders and hairlines
     INK_ON_ACCENT -- text drawn ON TOP of an ACCENT fill
-    OK        -- the one non-neutral color, reserved for "this is working"
-                 status. Darker than a dark theme's green would be, so it
-                 still reads against white.
+    OK        -- semantic "this is working" status, kept separate from ACCENT
+                 so a healthy state never reads as a call to action. Darker
+                 than a dark theme's green would be, so it still reads
+                 against white.
 """
 
-BACKDROP = "#EBE9E9"
+# Neutrals are cool-biased rather than pure grey -- a flat mid-grey reads as
+# unset, and the bias ties them to the accent below. The accent itself is a
+# deep instrument teal, taken from the cold end of the velocity colormap this
+# app renders with, so the chrome and the data belong to the same world. It is
+# spent only where it means something: the primary action, focus, selection,
+# and the active tab.
+BACKDROP = "#E9EBEC"
 PANEL = "#FFFFFF"
-PAPER = "#F6F5F5"
-INK = "#2E2F30"
-ACCENT = "#5D5E60"
-INK_SOFT = "#6C6D6F"
-INK_FAINT = "#9A9B9C"
-LINE = "#D9D7D7"
+PAPER = "#F4F6F7"
+INK = "#1E2529"
+ACCENT = "#0F6E78"
+ACCENT_HOVER = "#12818D"
+ACCENT_PRESSED = "#0B565E"
+ACCENT_WASH = "#E4F0F1"
+INK_SOFT = "#5A666D"
+INK_FAINT = "#93A0A7"
+LINE = "#D3D9DC"
 INK_ON_ACCENT = "#FFFFFF"
 OK = "#2E7D51"
+# Blocking-problem surface (calibration_panel's problem label). Tokens, not
+# literals in the stylesheet, so the docstring's promise that a palette swap
+# only touches this block stays true.
+PROBLEM_BG = "#FBF3F2"
+PROBLEM_LINE = "#E4C3BF"
+PROBLEM_INK = "#8A2F26"
 
 _MONO_FONTS = '"Consolas", "Cascadia Mono", "Courier New", monospace'
 _UI_FONTS = '"Segoe UI", "Helvetica Neue", Arial, sans-serif'
@@ -123,7 +149,14 @@ QGroupBox::title {{
     left: 3px;
     top: 1px;
     padding: 0 3px 0 0;
-    color: {ACCENT};
+    /* Muted, NOT the accent: section titles are structure, and there are a
+       dozen of them -- colouring every one spends the accent on the frame
+       instead of on what the user should act on. INK_SOFT and not INK_FAINT,
+       though: INK_FAINT exists to make DISABLED things look disabled (2.2:1
+       on this ground), and using it here put every structural label in the
+       app below the WCAG AA floor. INK_SOFT is 4.9:1 -- still clearly
+       secondary, still readable. */
+    color: {INK_SOFT};
     font-weight: 700;
 }}
 
@@ -137,7 +170,7 @@ QPushButton {{
     padding: 6px 14px;
 }}
 QPushButton:hover {{ background-color: {PAPER}; border-color: {INK_FAINT}; }}
-QPushButton:pressed {{ background-color: #E7E5E5; }}
+QPushButton:pressed {{ background-color: {BACKDROP}; }}
 QPushButton:disabled {{ color: {INK_FAINT}; background-color: {PAPER}; border-color: {LINE}; }}
 
 QPushButton[accent="true"] {{
@@ -146,8 +179,8 @@ QPushButton[accent="true"] {{
     border: 1px solid {ACCENT};
     font-weight: 600;
 }}
-QPushButton[accent="true"]:hover {{ background-color: #6E6F71; border-color: #6E6F71; }}
-QPushButton[accent="true"]:pressed {{ background-color: #4B4C4E; }}
+QPushButton[accent="true"]:hover {{ background-color: {ACCENT_HOVER}; border-color: {ACCENT_HOVER}; }}
+QPushButton[accent="true"]:pressed {{ background-color: {ACCENT_PRESSED}; }}
 /* Not a faded ACCENT fill: white-on-light-grey is nearly unreadable, so
    a disabled primary button falls back to the ordinary disabled look. */
 QPushButton[accent="true"]:disabled {{ background-color: {PAPER}; color: {INK_FAINT}; border-color: {LINE}; }}
@@ -208,6 +241,56 @@ QTabBar::tab {{
 }}
 QTabBar::tab:selected {{ color: {INK}; border-bottom: 2px solid {ACCENT}; }}
 QTabBar::tab:hover {{ color: {INK}; }}
+
+QTableView {{ alternate-background-color: {PAPER}; }}
+QTableView::item:selected {{ background-color: {ACCENT_WASH}; color: {INK}; }}
+
+/* Inline header for a control group that no longer owns a titled card --
+   see widgets/_util.section_label. Same weight as a QGroupBox title so a
+   folded section still reads as a section. */
+QLabel#inlineSectionLabel {{
+    /* Same reasoning as QGroupBox::title above -- and these are the smallest
+       text in the app, so they can least afford low contrast. */
+    color: {INK_SOFT};
+    font-size: 7.5pt;
+    font-weight: 600;
+    letter-spacing: 1px;
+}}
+
+/* Disclosure toggle for an Advanced drawer (widgets/_util.CollapsibleSection).
+   Deliberately flat and quiet: it is a way in, not a call to action. */
+QToolButton#disclosure {{
+    background: transparent;
+    border: 1px solid {LINE};
+    border-radius: 3px;
+    padding: 4px 8px;
+    color: {INK_SOFT};
+    font-size: 8.5pt;
+    text-align: left;
+}}
+QToolButton#disclosure:hover {{ background-color: {PAPER}; color: {INK}; }}
+QToolButton#disclosure:checked {{ color: {INK}; border-color: {INK_FAINT}; }}
+
+/* The preview canvas's home. Sunken relative to the panel so an empty plot
+   area reads as "a place a plot goes" rather than as unused window. */
+QFrame#plotArea {{
+    background-color: {PANEL};
+    border: 1px solid {LINE};
+    border-radius: 3px;
+}}
+/* Instructional, not decorative -- it tells a new user what to do next, so it
+   has to be readable rather than merely present. */
+QLabel#plotPlaceholder {{ color: {INK_SOFT}; }}
+
+/* A blocking problem the user has to act on -- readable and persistent,
+   unlike the transient status bar it used to be squeezed into. */
+QLabel#problemLabel {{
+    background-color: {PROBLEM_BG};
+    border: 1px solid {PROBLEM_LINE};
+    border-radius: 3px;
+    padding: 8px 10px;
+    color: {PROBLEM_INK};
+}}
 
 QProgressBar {{
     border: 1px solid {LINE};

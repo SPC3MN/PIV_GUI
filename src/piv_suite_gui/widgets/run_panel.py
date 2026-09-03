@@ -52,13 +52,32 @@ class RunPanel(QWidget):
         self.job_model = JobModel()
         self.table_view = QTableView()
         self.table_view.setModel(self.job_model)
-        self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        layout.addWidget(self.table_view)
+        # Numeric columns size to their contents; Pair and Status share the
+        # slack, with Status CAPPED. A failed pair's status is the full
+        # exception text -- 200-700 characters on this project's own real
+        # errors -- and sizing that column to its contents pushed the other
+        # five off-screen entirely, which is worse than the clipped headers
+        # this replaced. The full text is in the cell's tooltip.
+        header = self.table_view.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setMaximumSectionSize(260)
+        header.setStretchLastSection(False)
+        self.table_view.setTextElideMode(Qt.ElideRight)
+        self.table_view.setWordWrap(False)
+        self.table_view.setAlternatingRowColors(True)
+        self.table_view.verticalHeader().setVisible(False)
+        # The table is the thing being watched; the log is for when something
+        # goes wrong. 3:1 rather than the even split they had, which gave half
+        # the panel to a console that is empty on a healthy run.
+        layout.addWidget(self.table_view, stretch=3)
 
         self.log_console = QPlainTextEdit()
         self.log_console.setReadOnly(True)
         self.log_console.setMaximumBlockCount(5000)
-        layout.addWidget(self.log_console)
+        self.log_console.setPlaceholderText("Run output appears here.")
+        layout.addWidget(self.log_console, stretch=1)
 
     def set_run_enabled(self, enabled: bool):
         self.run_btn.setEnabled(enabled)

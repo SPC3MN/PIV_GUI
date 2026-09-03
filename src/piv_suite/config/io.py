@@ -54,6 +54,17 @@ def from_dict(d: dict) -> ProjectConfig:
     corr_d = dict(d.get("correlation", {}))
     if "passes" in corr_d:
         corr_d["passes"] = _passes_from_dicts(corr_d["passes"])
+    # openpiv's zero-padded "linear" branch needs a normalization this app
+    # never applies, and measures 4.665 px RMS at 14 px displacement against
+    # circular's 0.059. It was removed from the GUI; a hand-written or older
+    # .pivproj could still ask for it, and would silently get that regression.
+    # Coerce rather than raise: the rest of the project is still perfectly
+    # usable, and refusing to open it would help nobody.
+    if corr_d.get("correlation_method") not in (None, "circular"):
+        print(f"[warn] config: correlation_method="
+              f"{corr_d['correlation_method']!r} is not supported "
+              f"(it measures far worse at every displacement) -- using 'circular'")
+        corr_d["correlation_method"] = "circular"
     correlation = CorrelationSettings(**_filtered_kwargs(CorrelationSettings, corr_d))
 
     validation = ValidationSettings(**_filtered_kwargs(ValidationSettings, d.get("validation", {})))
