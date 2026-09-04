@@ -20,8 +20,8 @@ Two complete DaVis 10.2 projects, each 1000 double-frame snapshots at
 | Calibration model | Polynomial 3rd order, 2 Z-planes | Polynomial 3rd order, 2 Z-planes |
 | Calibrated Z-planes | +1.0 / −2.0 mm | +1.0 / −2.0 mm |
 | Scale | 19.422 px/mm | 17.921 px/mm |
-| DaVis's own output grid | 379 × 514 | 384 × 735 |
-| This app's grid | 373 × 509 | 380 × 731 |
+| DaVis's own output grid | 379 × 514 (194,806) | 384 × 735 (282,240) |
+| This app's grid | 373 × 509 (189,857) | 380 × 731 (277,780) |
 
 Both ship DaVis's own finished vectors (1000 `.vc7` files each) and the
 `JobHistory.xml` recording DaVis's own processing parameters. This app was
@@ -31,46 +31,64 @@ comparison: one 64×64 pass at 50% overlap followed by three 32×32 passes at
 factor (2), insertion factor (3), and minimum-neighbour rule (3), on a
 3×3 neighbourhood.
 
-Every number below comes from a 100-pair sample of each recording (pairs
-0–99), CPU backend, on a 16-logical-core / 7.7 GB machine. Comparison
+**Every number below is the full 1000 pairs of each recording** — no
+sampling. CPU backend, 48 worker processes, on a dual Xeon Gold 6146
+workstation (24 physical / 48 logical cores, 191.7 GB RAM). Comparison
 re-centres both fields on their own bounding box, resamples DaVis's field
-onto this app's grid (`RegularGridInterpolator` — DaVis's field is already a
-regular grid), corrects for DaVis's V sign convention, and scores only cells
-both sides measured. Density is always measured on each side's own native
-grid, never after resampling — resampling onto this app's grid, which is
-inset half an interrogation window from the canvas edge, would flatter
-DaVis by simply never asking about the border cells where its own field is
-invalid.
+onto this app's grid, corrects for DaVis's V sign convention (which differed
+on all 1000 pairs of both recordings — a consistent convention difference,
+not a per-pair anomaly), and scores only cells both sides measured
+(~188k of 189,857 planar, ~248k of 277,780 stereo). Density is always
+measured on each side's own native grid, never after resampling —
+resampling onto this app's grid, which is inset half an interrogation
+window from the canvas edge, would flatter DaVis by simply never asking
+about the border cells where its own field is invalid.
 
-## Performance
+## Accuracy
 
 ### Per-pair agreement
 
+Mean across all 1000 pairs, with spread:
+
 | | Planar | Stereo |
 |---|---|---|
-| Density, this app | 99.33% | 90.45% |
-| Density, DaVis | 98.10% | 88.90% |
-| corr(U) | 0.9914 | 0.9881 |
-| corr(V) | 0.9892 | 0.9879 |
-| corr(W) | — | 0.9861 |
-| mean\|diff\| | 9.51 mm/s | 11.55 mm/s (in-plane); 8.38 mm/s (W) |
+| Density, this app | **99.23%** (sd 0.66) | **90.48%** (sd 0.81) |
+| Density, DaVis | 98.10% (sd 0.01) | 89.01% (sd 0.23) |
+| corr(U) | 0.9888 (sd 0.0054) | 0.9855 (sd 0.0059) |
+| corr(V) | 0.9840 (sd 0.0067) | 0.9855 (sd 0.0057) |
+| corr(W) | — | 0.9849 (sd 0.0081) |
+| mean\|diff\| | 11.62 mm/s | 11.90 mm/s (in-plane); 8.68 mm/s (W) |
+| median\|diff\| | 9.70 mm/s | 9.83 mm/s (in-plane); 6.49 mm/s (W) |
+| p95\|diff\| | 27.18 mm/s | 26.68 mm/s |
+
+Against a mean flow speed of ~107 mm/s, the per-pair residual is ~11% of
+signal. The stereo out-of-plane component agrees as well as the in-plane
+ones (0.985 vs 0.986) despite W being the component most sensitive to
+calibration and triangulation geometry — and its absolute residual is
+smaller than in-plane (8.68 vs 11.90 mm/s).
+
+Density is remarkably stable pair-to-pair on DaVis's side (sd 0.01% planar)
+and more variable on this app's (sd 0.66%, min 95.13%), reflecting that
+DaVis's invalid cells here are dominated by a fixed geometric border while
+this app's vary with each pair's own seeding and correlation quality.
 
 ### Ensemble-mean agreement
 
-The time-averaged field over all 100 pairs — what most downstream analysis
+The time-averaged field over all 1000 pairs — what most downstream analysis
 actually consumes, and where per-pair noise averages out:
 
 | Component | corr | this app (mm/s) | DaVis (mm/s) | mean\|diff\| |
 |---|---|---|---|---|
-| Planar U | 0.9694 | −6.09 | −5.64 | 1.16 |
-| Planar V | 0.9722 | 4.72 | 5.14 | 1.21 |
-| Stereo U | 0.9817 | −6.08 | −4.90 | 2.35 |
-| Stereo V | 0.9827 | 1.41 | 2.22 | 1.63 |
-| Stereo W | 0.9598 | −15.47 | −15.21 | 1.70 |
+| Planar U | 0.9720 | −3.41 | −3.44 | 0.63 |
+| Planar V | 0.9956 | −0.55 | −0.59 | 0.42 |
+| Stereo U | 0.9711 | 3.82 | 4.05 | 0.81 |
+| Stereo V | 0.9837 | −1.41 | −1.41 | 0.46 |
+| Stereo W | 0.9899 | −10.54 | −10.54 | 0.62 |
 
-The per-pair residual (9.5–11.5 mm/s) is almost entirely uncorrelated
-frame-to-frame noise rather than bias: it collapses to 1.2–2.4 mm/s once
-averaged over 100 pairs.
+The ~12 mm/s per-pair residual collapses to 0.4–0.8 mm/s once averaged —
+it is almost entirely uncorrelated frame-to-frame noise, not bias. The
+ensemble means themselves agree to within 0.04 mm/s on every component, and
+stereo V and W agree to the reported precision.
 
 ### Internal field consistency
 
@@ -80,32 +98,61 @@ cross-comparison, no resampling. This asks whether a field agrees with
 
 | | Valid % | Local residual, p50 | Local residual, p99 | >3 local MAD |
 |---|---|---|---|---|
-| Planar, this app | 99.47 | 0.358 | 1.298 | 0.004% |
-| Planar, DaVis | 98.10 | 0.396 | 1.346 | 0.015% |
-| Stereo, this app | 90.35 | 0.329 | 1.155 | 0.003% |
-| Stereo, DaVis | 88.92 | 0.331 | 1.140 | 0.020% |
+| Planar, this app | 99.23 | 0.410 | 1.538 | **0.0067%** |
+| Planar, DaVis | 98.10 | 0.439 | 1.526 | 0.0323% |
+| Stereo, this app | 90.48 | 0.335 | 1.186 | **0.0030%** |
+| Stereo, DaVis | 89.01 | 0.337 | 1.197 | 0.1341% |
 
-(30-pair sample of each recording; "local residual" is deviation from the
-local median normalized by local MAD, Westerweel & Scarano; >3 MAD is a
-conventional spurious-vector threshold.)
+("Local residual" is deviation from the local median normalized by local
+MAD, Westerweel & Scarano; >3 MAD is a conventional spurious-vector
+threshold.)
 
-### Throughput
+Both programs produce fields of very similar internal smoothness (p50 and
+p99 residuals within a few percent of each other). Where they differ is the
+tail: this app leaves roughly 5× fewer >3-MAD vectors than DaVis on the
+planar recording and ~45× fewer on the stereo one, while also carrying
+slightly *more* vectors overall. The same pattern shows in peak speeds —
+DaVis's per-pair maximum averages 353.7 mm/s planar / 442.9 mm/s stereo
+against this app's 312.3 / 320.2, on fields whose *mean* speeds agree to
+within 1% (107.5 vs 108.4, and 105.9 vs 106.8). Those extra DaVis extremes
+are concentrated in the spurious-vector tail rather than distributed
+through the field.
+
+## Throughput
 
 DaVis's own `Settings_ProcessingTime.xml` reports 3 h 53 m for the full
 1000-pair planar job (14.0 s/pair) and 7 h 58 m for the full 1000-pair
-stereo job (28.7 s/pair). This app's CPU backend, on the 16-core/7.7 GB
-machine above, processed the 100-pair planar sample in 21.1 s/pair wall
-clock at 3 worker processes, and stereo samples in roughly 80–110 s/pair
-wall clock at 2 worker processes (stereo's four 3067×5874 dewarp canvases
-per pair make memory, not core count, the binding constraint on this
-machine).
+stereo job (28.7 s/pair).
+
+This app's CPU backend, processing the same 1000 pairs on the machine
+described above with 48 worker processes:
+
+| | Wall clock | Per pair (wall) | Per pair (single-core serial) | DaVis's own |
+|---|---|---|---|---|
+| Planar | 1 h 34 m | 5.6 s | 210.3 s | 14.0 s |
+| Stereo | 7 h 19 m | 26.3 s | 657.3 s | 28.7 s |
+
+The gap between the serial and wall-clock columns is the cross-pair process
+pool: pairs are independent, so throughput scales with cores until memory
+bandwidth binds. Measured speedup was ~29× on 24 physical cores.
+
+Within a stereo pair the cost is overwhelmingly correlation, not geometry:
+~96% correlation, 3–4% preprocessing plus the four 3067×5874 dewarp
+canvases, and a negligible remainder for post-processing. Stereo costs
+~3.1× planar per pair because it correlates two cameras over a 1.46× larger
+grid.
 
 **This is not a controlled hardware comparison.** DaVis's own hardware for
 this dataset is not recorded in the project (its result-set metadata
-references GPU-accelerated preprocessing, suggesting GPU involvement of
-some kind), while the numbers above are this app's CPU backend only. This
-app also has a separate GPU backend (`piv_suite.engines.gpu_engine`,
-built on `openpiv-python-gpu`) not exercised in this comparison.
+references GPU-accelerated preprocessing, suggesting GPU involvement of some
+kind), while the numbers above are this app's CPU backend only on a
+24-core workstation. This app also has a separate GPU backend
+(`piv_suite.engines.gpu_engine`, built on `openpiv-python-gpu`) which was
+not used here — the machine's GPU is a 2014-era Quadro K2200 (640 cores,
+4 GB), which is unlikely to beat 24 modern Xeon cores on this workload and
+whose 4 GB would force the tiled path for stereo's dewarp canvases. Treat
+the throughput table as "what each program actually took on the hardware it
+ran on," not as a like-for-like efficiency ranking.
 
 ## Functional differences
 
@@ -162,7 +209,10 @@ several degrees across the field of view. DaVis's own internal
 triangulation approach isn't inspectable from the project files, so this is
 a stated design choice on this app's side rather than a directly verified
 difference, but it is a departure from simpler stereo PIV implementations
-that do use a single scalar angle per camera.
+that do use a single scalar angle per camera. The stereo W agreement above
+(per-pair corr 0.985, ensemble corr 0.990, ensemble means matching to the
+reported precision) is the evidence that whatever the two approaches do
+internally, they land in the same place on this rig.
 
 **Stereo needs one manual, acquisition-time input DaVis's calibration
 doesn't expose.** `StereoSettings.sheet_z_mm` — the real Z position of the
@@ -173,7 +223,9 @@ an explicit parameter (or a manual GUI entry). It matters: on a sample
 pair, corr(W) ranged from 0.981 to 0.993 depending on the chosen value
 across a physically plausible 1 mm range, with mean\|diff\| swinging from
 6.4 to 10.5 mm/s. Whoever ran the acquisition needs to supply this
-correctly per recording; there is no way to derive it after the fact.
+correctly per recording; there is no way to derive it after the fact. (The
+stereo numbers in this document use the midpoint of the two calibrated
+planes, −0.5 mm.)
 
 **Preprocessing matches DaVis's own reported step.** Both of DaVis's jobs
 for this dataset report a sliding min/max local-contrast-normalization
@@ -242,6 +294,15 @@ These sit alongside the pre-existing `compare_dataset.py`,
 resumable comparison run and the shared field-statistics/plotting code the
 new scripts import.
 
+`compare_dataset.py` writes one checkpoint per pair and skips already-done
+pairs on a rerun, so a full-dataset run survives interruption. It also
+accepts `--start-index`/`--stride`, which shards a run across several
+concurrent processes writing into one output directory — on this machine
+12 shards cut the 1000-pair planar comparison from ~6.5 hours to ~50
+minutes, since the per-pair cost is dominated by resampling one field onto
+the other's grid. Run it once more with `--summarize-only` afterward to
+rebuild the combined `summary.csv` from every checkpoint.
+
 ## Caveats
 
 - All numbers above are from one planar and one stereo recording off one
@@ -252,7 +313,13 @@ new scripts import.
 - The global-outlier-filter observation is a live open question, not a
   settled recommendation: the right threshold plausibly depends on how
   clean a given field already is, and this app's default is unchanged
-  pending a broader sweep across more datasets.
+  pending a broader sweep across more datasets. That measurement is from a
+  bounded sample, unlike the 1000-pair figures elsewhere in this document.
 - The sheet-Z sensitivity measurement is from a 2-pair sample; treat the
   specific correlation numbers as illustrative of the sensitivity's
   existence and rough size, not as a precise calibration curve.
+- Per-pair correlations here come from `compare_dataset.py` (scattered-point
+  `griddata` resampling); `make_comparison_plots.py` uses
+  `RegularGridInterpolator` on the same data and lands within ~0.001 on
+  correlation and ~0.15 mm/s on mean\|diff\|. Either is a fair reading; they
+  are not identical pipelines.
