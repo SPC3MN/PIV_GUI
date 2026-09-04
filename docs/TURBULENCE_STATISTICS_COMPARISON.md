@@ -249,6 +249,14 @@ it has to move. Running the full analysis chain on each configuration:
   underlying noise that produces the shoulder, but only slightly:
   sigma^2/u_rms^2 is about 0.36%, i.e. roughly 0.2% on RMS.
 
+One practical corollary. The third of the three 32px fine passes adds velocity
+content specifically at and below r = W — the structure function of a 2-pass
+field is ~10% lower right at the window and recovers to within 2% by r = 8 W.
+That is the same region this section shows is least trustworthy, and dropping
+the pass moves the field slightly *closer* to DaVis rather than further away.
+See DAVIS_COMPARISON.md's pass-count section; the effect on vector density is
+nil, because density is not set by the pass count at all.
+
 ### Removing it, if you want to
 
 The shoulder sits at r = 1.25-1.5 W regardless of spacing, so to clear it from

@@ -154,6 +154,80 @@ whose 4 GB would force the tiled path for stereo's dewarp canvases. Treat
 the throughput table as "what each program actually took on the hardware it
 ran on," not as a like-for-like efficiency ranking.
 
+## Pass-count sensitivity
+
+The production schedule — one 64×64 pass at 50% overlap then three 32×32 at
+75% — mirrors DaVis's own job rather than being tuned. Dropping to **two**
+32×32 passes was measured over the first 100 pairs of each recording, against
+the same schedule otherwise unchanged. The 3-pass rerun reproduces
+`batch_planar_full` bit for bit, so the two runs differ in pass count and
+nothing else.
+
+**Vector density is unaffected.** The output grid is identical by construction
+— it comes from the final pass alone, and that pass is unchanged — so
+`n_total` is fixed (189,857 planar, 277,780 stereo). The engine rejects
+nothing either: `cpu_engine` returns `val_locations` all-False, and validity is
+decided afterwards by `processing.postprocess`. Pass count therefore reaches
+density only through how converged the field is when the UOD sees it, and it
+barely moves:
+
+| | 3 fine passes | 2 fine passes | change | retained |
+|---|---|---|---|---|
+| Planar | 99.2257% | 99.2225% | −0.0032 pp (t = −2.15) | 99.954% |
+| Stereo | 90.620% | 90.625% | +0.0044 pp (t = +4.77) | 99.969% |
+
+Both changes are a few thousandths of a percentage point, and the **sign
+differs between the two recordings** — the direction is not even consistent,
+which is what no real effect looks like. Vectors lost and gained roughly
+cancel (planar 0.046% against 0.043% of the grid).
+
+**What the third pass does change** is vector values, by ~1.0 mm/s planar
+(both components) and 0.6–0.9 mm/s stereo, concentrated at small separations.
+The second-order structure function of the 2-pass field is lower, in a dip
+centred on the interrogation window:
+
+| r (mm), planar | 0.41 | 0.82 | 1.65 (= W) | 3.30 | 6.59 | 13.18 |
+|---|---|---|---|---|---|---|
+| D11 ratio, 2-pass / 3-pass | 0.940 | 0.904 | **0.900** | 0.931 | 0.959 | 0.978 |
+
+So the third pass adds content at and below the interrogation window, and the
+fields converge at larger separations. Whether that content is real is
+testable, because DaVis ran the same three-32px schedule: if the third pass
+were converging on the true small-scale field it should move this app *toward*
+the reference. It does the opposite.
+
+| | 3 fine passes | 2 fine passes | closer to DaVis |
+|---|---|---|---|
+| Planar, mean\|diff\| U | 8.119 mm/s | 8.072 mm/s | 2 passes (t = −39.2) |
+| Planar, mean\|diff\| V | 8.266 mm/s | 8.210 mm/s | 2 passes (t = −51.9) |
+| Stereo, mean\|diff\| U | 8.555 mm/s | 8.399 mm/s | 2 passes (t = −99.5) |
+| Stereo, mean\|diff\| V | 6.575 mm/s | 6.466 mm/s | 2 passes (t = −154.7) |
+| Stereo, mean\|diff\| W | 8.544 mm/s | 8.397 mm/s | 2 passes (t = −110.0) |
+
+Two passes agree better on all five components across both recordings, with
+correlations marginally higher as well (planar U 0.9866 against 0.9865, stereo
+W 0.9861 against 0.9857). The improvement is small — 0.6-0.7% planar, 1.7%
+stereo — but consistent on essentially every pair.
+
+**Throughput.** Back to back on the same 100 planar pairs and the same
+machine: 7.57 s/pair at three fine passes against 4.85 s/pair at two, a
+**35.9% saving**, close to what removing one of three fine passes predicts from
+correlation work alone. The 2-pass stereo run measured 14.6 s/pair, but against
+a 1000-pair production run rather than a matched control, so treat that one as
+indicative.
+
+The finding is therefore that **diverging from DaVis's pass schedule makes this
+app's output agree slightly better with DaVis's output**, for about a third
+less compute, at no cost in density. Two things argue against acting on it as a
+default: these are two recordings of one flow from one facility, and DaVis is a
+reference rather than ground truth — both programs could be smoothing away the
+same real structure. The third pass may also earn its keep on higher-shear or
+more sparsely seeded data, where window deformation needs more iterations to
+converge. Synthetic images with a known displacement field would settle whether
+the sub-window content the third pass adds is signal or noise. The one-sentence
+summary in the meantime: the third fine pass is not buying accuracy on this
+data, and it is not what sets vector density.
+
 ## Functional differences
 
 Structural choices where the two programs genuinely work differently, not
